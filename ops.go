@@ -227,6 +227,162 @@ func Tanh(a *Tensor) *Tensor {
 	return out
 }
 
+// ---------- Exp / Log ----------
+
+// Exp returns e^a element-wise.
+func Exp(a *Tensor) *Tensor {
+	out := Zeros(a.shape...)
+	for i, v := range a.data {
+		out.data[i] = float32(math.Exp(float64(v)))
+	}
+	if a.requiresGrad {
+		out.requiresGrad = true
+		out.gradFn = &GradFn{
+			name:   "Exp",
+			inputs: []*Tensor{a},
+			backward: func(grad *Tensor) []*Tensor {
+				// d(exp(x))/dx = exp(x)
+				g := Zeros(a.shape...)
+				for i, v := range out.data {
+					g.data[i] = grad.data[i] * v
+				}
+				return []*Tensor{g}
+			},
+		}
+	}
+	return out
+}
+
+// Log returns ln(a) element-wise.
+func Log(a *Tensor) *Tensor {
+	out := Zeros(a.shape...)
+	for i, v := range a.data {
+		out.data[i] = float32(math.Log(float64(v)))
+	}
+	if a.requiresGrad {
+		out.requiresGrad = true
+		out.gradFn = &GradFn{
+			name:   "Log",
+			inputs: []*Tensor{a},
+			backward: func(grad *Tensor) []*Tensor {
+				g := Zeros(a.shape...)
+				for i, v := range a.data {
+					g.data[i] = grad.data[i] / v
+				}
+				return []*Tensor{g}
+			},
+		}
+	}
+	return out
+}
+
+// ---------- Softmax / LogSoftmax ----------
+
+// Softmax applies softmax along the last dimension of a 2-D tensor (batch, classes).
+// softmax(x_i) = exp(x_i - max(x)) / sum(exp(x - max(x)))
+func Softmax(a *Tensor) *Tensor {
+	if a.Dim() != 2 {
+		panic("gorch: Softmax requires 2-D tensor (batch, classes)")
+	}
+	batch, classes := a.shape[0], a.shape[1]
+	out := Zeros(batch, classes)
+
+	for i := 0; i < batch; i++ {
+		// Numerical stability: subtract max
+		rowMax := a.data[i*classes]
+		for j := 1; j < classes; j++ {
+			if a.data[i*classes+j] > rowMax {
+				rowMax = a.data[i*classes+j]
+			}
+		}
+		var sum float32
+		for j := 0; j < classes; j++ {
+			out.data[i*classes+j] = float32(math.Exp(float64(a.data[i*classes+j] - rowMax)))
+			sum += out.data[i*classes+j]
+		}
+		for j := 0; j < classes; j++ {
+			out.data[i*classes+j] /= sum
+		}
+	}
+
+	if a.requiresGrad {
+		out.requiresGrad = true
+		out.gradFn = &GradFn{
+			name:   "Softmax",
+			inputs: []*Tensor{a},
+			backward: func(grad *Tensor) []*Tensor {
+				dx := Zeros(batch, classes)
+				for i := 0; i < batch; i++ {
+					// For each sample: dx = s * (grad - sum(grad * s))
+					var dot float32
+					for j := 0; j < classes; j++ {
+						dot += grad.data[i*classes+j] * out.data[i*classes+j]
+					}
+					for j := 0; j < classes; j++ {
+						dx.data[i*classes+j] = out.data[i*classes+j] * (grad.data[i*classes+j] - dot)
+					}
+				}
+				return []*Tensor{dx}
+			},
+		}
+	}
+	return out
+}
+
+// LogSoftmax applies log-softmax along the last dimension of a 2-D tensor.
+// logsoftmax(x_i) = x_i - max(x) - log(sum(exp(x - max(x))))
+func LogSoftmax(a *Tensor) *Tensor {
+	if a.Dim() != 2 {
+		panic("gorch: LogSoftmax requires 2-D tensor (batch, classes)")
+	}
+	batch, classes := a.shape[0], a.shape[1]
+	out := Zeros(batch, classes)
+
+	// Also store softmax for backward
+	sm := make([]float32, batch*classes)
+
+	for i := 0; i < batch; i++ {
+		rowMax := a.data[i*classes]
+		for j := 1; j < classes; j++ {
+			if a.data[i*classes+j] > rowMax {
+				rowMax = a.data[i*classes+j]
+			}
+		}
+		var sumExp float32
+		for j := 0; j < classes; j++ {
+			sm[i*classes+j] = float32(math.Exp(float64(a.data[i*classes+j] - rowMax)))
+			sumExp += sm[i*classes+j]
+		}
+		logSumExp := float32(math.Log(float64(sumExp)))
+		for j := 0; j < classes; j++ {
+			sm[i*classes+j] /= sumExp // now softmax
+			out.data[i*classes+j] = a.data[i*classes+j] - rowMax - logSumExp
+		}
+	}
+
+	if a.requiresGrad {
+		out.requiresGrad = true
+		out.gradFn = &GradFn{
+			name:   "LogSoftmax",
+			inputs: []*Tensor{a},
+			backward: func(grad *Tensor) []*Tensor {
+				dx := Zeros(batch, classes)
+				for i := 0; i < batch; i++ {
+					var sumGrad float32
+					for j := 0; j < classes; j++ {
+						sumGrad += grad.data[i*classes+j]
+					}
+					for j := 0; j < classes; j++ {
+						dx.data[i*classes+j] = grad.data[i*classes+j] - sm[i*classes+j]*sumGrad
+					}
+				}
+				return []*Tensor{dx}
+			},
+		}
+	}
+	return out
+}
+
 // ---------- Reduction ops ----------
 
 // Sum returns the sum of all elements as a scalar tensor.

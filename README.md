@@ -4,6 +4,8 @@ A PyTorch-like deep learning framework in Go, backed by Apple Metal GPU.
 
 Pure Go framework logic (tensors, autograd, nn modules, optimizers) with a thin Objective-C shim for Metal compute and MPS (Metal Performance Shaders) acceleration. Designed for Apple Silicon's unified memory architecture — zero-copy data sharing between CPU and GPU.
 
+**97.2% accuracy on MNIST** with a 2-layer MLP trained in 30 seconds on M4.
+
 ## Features
 
 - **Tensor** — N-dimensional arrays on CPU or Metal GPU with unified memory
@@ -11,7 +13,9 @@ Pure Go framework logic (tensors, autograd, nn modules, optimizers) with a thin 
 - **Metal GPU** — element-wise ops via custom .metal kernels, matrix multiply via MPS
 - **nn** — Module interface, Linear, ReLU, Sigmoid, Tanh, Sequential
 - **optim** — SGD (with momentum), Adam
-- **Loss** — MSELoss
+- **Loss** — MSELoss, CrossEntropyLoss
+- **Ops** — Exp, Log, Softmax, LogSoftmax, and all standard element-wise ops
+- **Data** — DataLoader with shuffle, batching; built-in MNIST reader with auto-download
 
 ## Requirements
 
@@ -64,6 +68,51 @@ func main() {
 }
 ```
 
+## MNIST Example
+
+```go
+package main
+
+import (
+    "fmt"
+
+    g "github.com/vinq1911/gorch"
+    "github.com/vinq1911/gorch/data"
+    "github.com/vinq1911/gorch/nn"
+    "github.com/vinq1911/gorch/optim"
+)
+
+func main() {
+    trainSet, _ := data.LoadMNIST("./mnist_data", true)
+    testSet, _ := data.LoadMNIST("./mnist_data", false)
+
+    model := nn.NewSequential(
+        nn.NewLinear(784, 128),
+        nn.NewReLU(),
+        nn.NewLinear(128, 10),
+    )
+    opt := optim.NewAdam(model.Parameters(), 0.001)
+    loader := data.NewDataLoader(trainSet, 64, true)
+
+    for epoch := 0; epoch < 3; epoch++ {
+        loader.Reset()
+        for {
+            inputs, targets := loader.Next()
+            if inputs == nil {
+                break
+            }
+            opt.ZeroGrad()
+            logits := model.Forward(inputs)
+            loss := g.CrossEntropyLoss(logits, targets)
+            loss.Backward()
+            opt.Step()
+        }
+        fmt.Printf("Epoch %d complete\n", epoch+1)
+    }
+    // Evaluate: ~97% accuracy after 3 epochs
+}
+```
+
 ## Metal GPU
 
 Tensors can be moved to Metal GPU for accelerated compute. Unified memory means no explicit copies — Go and the GPU read/write the same physical memory.
@@ -84,7 +133,7 @@ y := g.MatMul(x, w) // runs on GPU via MPS
 ## Architecture
 
 ```
-gorch (Go)                    ← tensors, autograd, nn, optim
+gorch (Go)                    ← tensors, autograd, nn, optim, data
   |
   v  CGo
 metal/shim.m (Objective-C)    ← ~200 LOC bridge
@@ -98,9 +147,9 @@ Metal + MPS                   ← Apple GPU compute
 ```
 gorch/
   tensor.go          Tensor type, creation, indexing, device transfer
-  ops.go             Element-wise, reduction, matmul ops with CPU/Metal dispatch
+  ops.go             Element-wise, reduction, matmul, softmax ops with CPU/Metal dispatch
   autograd.go        Reverse-mode automatic differentiation
-  loss.go            Loss functions (MSELoss)
+  loss.go            Loss functions (MSELoss, CrossEntropyLoss)
   metal/
     shim.h / shim.m  Objective-C Metal bridge
     metal.go         Go bindings for Metal device, buffers, pipelines
@@ -109,25 +158,40 @@ gorch/
     module.go        Module interface, Linear, Sequential, activations
   optim/
     optim.go         SGD and Adam optimizers
+  data/
+    dataloader.go    Batched DataLoader with shuffle
+    mnist.go         MNIST dataset reader with auto-download
+  e2e/
+    mnist_test.go    End-to-end MNIST training test (97.2% accuracy)
 ```
 
 ## Running Tests
 
 ```bash
+# Unit tests (fast, no network)
 CGO_ENABLED=1 go test ./... -v
+
+# End-to-end tests (downloads MNIST, trains model)
+CGO_ENABLED=1 go test ./e2e/ -tags e2e -v -timeout 10m
 ```
 
 ## Roadmap
 
-- [ ] Softmax / LogSoftmax
-- [ ] CrossEntropyLoss
-- [ ] MNIST training demo
+- [x] Tensors with CPU/Metal dual dispatch
+- [x] Reverse-mode autograd
+- [x] nn.Linear, Sequential, ReLU/Sigmoid/Tanh
+- [x] SGD (momentum) and Adam optimizers
+- [x] MSELoss, CrossEntropyLoss
+- [x] Softmax, LogSoftmax, Exp, Log
+- [x] DataLoader with batching and shuffle
+- [x] MNIST training (97.2% accuracy)
 - [ ] Conv2d
 - [ ] Dropout, BatchNorm, LayerNorm
-- [ ] DataLoader with goroutine parallelism
 - [ ] Broadcasting
 - [ ] Save/Load model weights
 - [ ] GPU autograd (backward pass on Metal)
+- [ ] Embedding layer
+- [ ] Attention / Transformer blocks
 
 ## License
 

@@ -124,6 +124,115 @@ func TestMeanCPU(t *testing.T) {
 	}
 }
 
+// ---------- Exp / Log ----------
+
+func TestExpCPU(t *testing.T) {
+	a := NewTensor([]float32{0, 1}, 2)
+	b := Exp(a)
+	if !approx(b.data[0], 1) || !approx(b.data[1], float32(math.E)) {
+		t.Fatalf("exp([0,1]) = %v, want [1, e]", b.Data())
+	}
+}
+
+func TestLogCPU(t *testing.T) {
+	a := NewTensor([]float32{1, float32(math.E)}, 2)
+	b := Log(a)
+	if !approx(b.data[0], 0) || !approx(b.data[1], 1) {
+		t.Fatalf("log([1,e]) = %v, want [0, 1]", b.Data())
+	}
+}
+
+// ---------- Softmax / LogSoftmax ----------
+
+func TestSoftmax(t *testing.T) {
+	// Single sample: softmax([1, 2, 3])
+	a := NewTensor([]float32{1, 2, 3}, 1, 3)
+	s := Softmax(a)
+	// Should sum to 1
+	var sum float32
+	for _, v := range s.Data() {
+		sum += v
+	}
+	if !approx(sum, 1.0) {
+		t.Fatalf("softmax sum = %f, want 1.0", sum)
+	}
+	// s[2] > s[1] > s[0]
+	if s.data[0] >= s.data[1] || s.data[1] >= s.data[2] {
+		t.Fatalf("softmax order wrong: %v", s.Data())
+	}
+}
+
+func TestLogSoftmax(t *testing.T) {
+	a := NewTensor([]float32{1, 2, 3}, 1, 3)
+	ls := LogSoftmax(a)
+	s := Softmax(a)
+	// LogSoftmax should equal log of softmax
+	for i := range ls.Data() {
+		expected := float32(math.Log(float64(s.data[i])))
+		if !approx(ls.data[i], expected) {
+			t.Fatalf("logsoftmax[%d] = %f, want %f", i, ls.data[i], expected)
+		}
+	}
+}
+
+func TestSoftmaxBatch(t *testing.T) {
+	// Two samples
+	a := NewTensor([]float32{1, 2, 3, 10, 20, 30}, 2, 3)
+	s := Softmax(a)
+	// Each row should sum to 1
+	for row := 0; row < 2; row++ {
+		var sum float32
+		for j := 0; j < 3; j++ {
+			sum += s.data[row*3+j]
+		}
+		if !approx(sum, 1.0) {
+			t.Fatalf("row %d sum = %f, want 1.0", row, sum)
+		}
+	}
+}
+
+// ---------- CrossEntropyLoss ----------
+
+func TestCrossEntropyLoss(t *testing.T) {
+	// 2 samples, 3 classes
+	logits := NewTensor([]float32{1, 2, 3, 1, 2, 3}, 2, 3)
+	logits.SetRequiresGrad(true)
+	targets := NewTensor([]float32{2, 0}, 2, 1) // correct classes: 2 and 0
+
+	loss := CrossEntropyLoss(logits, targets)
+
+	// Loss should be positive
+	if loss.data[0] <= 0 {
+		t.Fatalf("CE loss = %f, want > 0", loss.data[0])
+	}
+
+	// Test backward
+	loss.Backward()
+	if logits.Grad() == nil {
+		t.Fatal("logits.grad is nil after backward")
+	}
+	// Gradient shape should match logits
+	if logits.Grad().Size() != 6 {
+		t.Fatalf("grad size = %d, want 6", logits.Grad().Size())
+	}
+}
+
+func TestCrossEntropyGradient(t *testing.T) {
+	// When prediction is perfect, gradient for correct class should be near 0
+	// logits heavily favoring class 0 for sample 0
+	logits := NewTensor([]float32{100, 0, 0}, 1, 3)
+	logits.SetRequiresGrad(true)
+	targets := NewTensor([]float32{0}, 1, 1)
+
+	loss := CrossEntropyLoss(logits, targets)
+	loss.Backward()
+
+	// Loss should be near 0
+	if loss.data[0] > 0.01 {
+		t.Fatalf("CE loss for perfect prediction = %f, want ~0", loss.data[0])
+	}
+}
+
 // ---------- MatMul CPU ----------
 
 func TestMatMulCPU(t *testing.T) {

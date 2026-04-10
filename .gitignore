@@ -25,3 +25,6 @@ Thumbs.db
 # Metal compiled shaders
 *.air
 *.metallib
+
+# MNIST data cache
+mnist_data/
