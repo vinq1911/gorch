@@ -16,7 +16,7 @@ Pure Go framework logic (tensors, autograd, nn modules, optimizers) with a thin 
 ## Requirements
 
 - macOS with Apple Silicon (M1/M2/M3/M4)
-- Go 1.21+
+- Go 1.26+
 - Xcode Command Line Tools (for Metal framework headers)
 
 ## Quick Start
