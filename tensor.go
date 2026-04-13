@@ -215,6 +215,94 @@ func (t *Tensor) Reshape(shape ...int) *Tensor {
 	return &Tensor{data: t.data, shape: copyShape(shape), buf: t.buf}
 }
 
+// ---------- Reshape / Transpose ----------
+
+// ReshapeOp returns a new tensor with the same data but different shape, with autograd support.
+func ReshapeOp(a *Tensor, shape ...int) *Tensor {
+	n := numElements(shape)
+	if n != a.Size() {
+		panic(fmt.Sprintf("gorch: cannot reshape %v to %v", a.shape, shape))
+	}
+	out := &Tensor{data: a.data, shape: copyShape(shape), buf: a.buf}
+	if a.requiresGrad {
+		origShape := copyShape(a.shape)
+		out.requiresGrad = true
+		out.gradFn = &GradFn{
+			name:   "Reshape",
+			inputs: []*Tensor{a},
+			backward: func(grad *Tensor) []*Tensor {
+				return []*Tensor{&Tensor{data: grad.data, shape: origShape}}
+			},
+		}
+	}
+	return out
+}
+
+// Transpose2D swaps rows and columns of a 2-D tensor.
+func Transpose2D(a *Tensor) *Tensor {
+	if a.Dim() != 2 {
+		panic(fmt.Sprintf("gorch: Transpose2D requires 2-D tensor, got %d-D", a.Dim()))
+	}
+	M, N := a.shape[0], a.shape[1]
+	out := Zeros(N, M)
+	for i := 0; i < M; i++ {
+		for j := 0; j < N; j++ {
+			out.data[j*M+i] = a.data[i*N+j]
+		}
+	}
+	if a.requiresGrad {
+		out.requiresGrad = true
+		out.gradFn = &GradFn{
+			name:   "Transpose2D",
+			inputs: []*Tensor{a},
+			backward: func(grad *Tensor) []*Tensor {
+				return []*Tensor{Transpose2D(grad)}
+			},
+		}
+	}
+	return out
+}
+
+// AddBias adds a (N,) or (1,N) bias to each row of a (M,N) matrix.
+// Broadcasts bias across the first dimension.
+func AddBias(a, bias *Tensor) *Tensor {
+	if a.Dim() != 2 {
+		panic("gorch: AddBias requires 2-D tensor for a")
+	}
+	M, N := a.shape[0], a.shape[1]
+	bData := bias.data
+	if len(bData) != N {
+		panic(fmt.Sprintf("gorch: AddBias bias length %d != feature dim %d", len(bData), N))
+	}
+
+	out := Zeros(M, N)
+	for i := 0; i < M; i++ {
+		for j := 0; j < N; j++ {
+			out.data[i*N+j] = a.data[i*N+j] + bData[j]
+		}
+	}
+
+	if a.requiresGrad || bias.requiresGrad {
+		out.requiresGrad = true
+		out.gradFn = &GradFn{
+			name:   "AddBias",
+			inputs: []*Tensor{a, bias},
+			backward: func(grad *Tensor) []*Tensor {
+				// dL/da = grad (same shape)
+				// dL/dbias = sum over rows
+				db := Zeros(N)
+				for i := 0; i < M; i++ {
+					for j := 0; j < N; j++ {
+						db.data[j] += grad.data[i*N+j]
+					}
+				}
+				return []*Tensor{grad, db}
+			},
+		}
+	}
+	return out
+}
+
 // ---------- Display ----------
 
 func (t *Tensor) String() string {
