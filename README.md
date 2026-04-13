@@ -2,14 +2,15 @@
 
 A PyTorch-like deep learning framework in Go, backed by Apple Metal GPU.
 
-Pure Go framework logic (tensors, autograd, nn modules, optimizers) with a thin Objective-C shim for Metal compute and MPS (Metal Performance Shaders) acceleration. Designed for Apple Silicon's unified memory architecture — zero-copy data sharing between CPU and GPU.
+Pure Go framework logic (tensors, autograd, nn modules, optimizers) with Apple's Accelerate (BLAS/vDSP/vForce) for CPU and Metal/MPS for GPU. Designed for Apple Silicon's unified memory architecture — zero-copy data sharing between CPU and GPU.
 
-**97.2% accuracy on MNIST** with a 2-layer MLP trained in 30 seconds on M4.
+**97.2% accuracy on MNIST** with a 2-layer MLP trained in **~1 second** on M4.
 
 ## Features
 
 - **Tensor** — N-dimensional arrays on CPU or Metal GPU with unified memory
 - **Autograd** — reverse-mode automatic differentiation with topological sort
+- **Accelerate CPU** — BLAS (cblas_sgemm), vDSP vector ops, vForce transcendentals
 - **Metal GPU** — element-wise ops via custom .metal kernels, matrix multiply via MPS
 - **nn** — Module interface, Linear, ReLU, Sigmoid, Tanh, Sequential
 - **optim** — SGD (with momentum), Adam
@@ -133,36 +134,41 @@ y := g.MatMul(x, w) // runs on GPU via MPS
 ## Architecture
 
 ```
-gorch (Go)                    ← tensors, autograd, nn, optim, data
-  |
-  v  CGo
-metal/shim.m (Objective-C)    ← ~200 LOC bridge
-  |
-  v
-Metal + MPS                   ← Apple GPU compute
+gorch (Go)                         ← tensors, autograd, nn, optim, data
+  |                    |
+  v  CGo               v  CGo
+metal/shim.m (ObjC)    accelerate/shim.c
+  |                    |
+  v                    v
+Metal + MPS            Accelerate (BLAS/vDSP/vForce)
+  |                    |
+Apple GPU              Apple CPU (NEON SIMD, AMX)
 ```
 
 ## Project Structure
 
 ```
 gorch/
-  tensor.go          Tensor type, creation, indexing, device transfer
-  ops.go             Element-wise, reduction, matmul, softmax ops with CPU/Metal dispatch
-  autograd.go        Reverse-mode automatic differentiation
-  loss.go            Loss functions (MSELoss, CrossEntropyLoss)
+  tensor.go            Tensor type, creation, indexing, device transfer
+  ops.go               Ops with 3-tier dispatch: Metal GPU → Accelerate CPU → fallback
+  autograd.go          Reverse-mode automatic differentiation
+  loss.go              Loss functions (MSELoss, CrossEntropyLoss)
+  accelerate/
+    shim.h / shim.c    C wrapper for Accelerate BLAS/vDSP/vForce
+    accelerate.go      Go bindings for Accelerate
   metal/
-    shim.h / shim.m  Objective-C Metal bridge
-    metal.go         Go bindings for Metal device, buffers, pipelines
-    kernels.go       Metal shader source for element-wise ops
+    shim.h / shim.m    Objective-C Metal bridge
+    metal.go           Go bindings for Metal device, buffers, pipelines
+    kernels.go         Metal shader source for element-wise ops
   nn/
-    module.go        Module interface, Linear, Sequential, activations
+    module.go          Module interface, Linear (BLAS-backed), Sequential, activations
   optim/
-    optim.go         SGD and Adam optimizers
+    optim.go           SGD and Adam optimizers
   data/
-    dataloader.go    Batched DataLoader with shuffle
-    mnist.go         MNIST dataset reader with auto-download
+    dataloader.go      Batched DataLoader with shuffle
+    mnist.go           MNIST dataset reader with auto-download
   e2e/
-    mnist_test.go    End-to-end MNIST training test (97.2% accuracy)
+    mnist_test.go      End-to-end MNIST training test (97.2% accuracy, ~1s)
 ```
 
 ## Running Tests
@@ -184,7 +190,8 @@ CGO_ENABLED=1 go test ./e2e/ -tags e2e -v -timeout 10m
 - [x] MSELoss, CrossEntropyLoss
 - [x] Softmax, LogSoftmax, Exp, Log
 - [x] DataLoader with batching and shuffle
-- [x] MNIST training (97.2% accuracy)
+- [x] MNIST training (97.2% accuracy, ~1s on M4)
+- [x] Accelerate CPU backend (BLAS, vDSP, vForce) — 30x training speedup
 - [ ] Conv2d
 - [ ] Dropout, BatchNorm, LayerNorm
 - [ ] Broadcasting

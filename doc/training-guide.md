@@ -310,12 +310,12 @@ func main() {
 }
 ```
 
-Expected output on Apple Silicon:
+Expected output on Apple Silicon (M4, Accelerate-backed):
 
 ```
-Epoch 1  loss=0.2976  elapsed=10s
-Epoch 2  loss=0.1344  elapsed=19s
-Epoch 3  loss=0.0957  elapsed=29s
+Epoch 1  loss=0.2950  elapsed=0.4s
+Epoch 2  loss=0.1303  elapsed=0.7s
+Epoch 3  loss=0.0903  elapsed=1.0s
 Test accuracy: 97.22% (9722/10000)
 ```
 

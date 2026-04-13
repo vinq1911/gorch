@@ -7,6 +7,7 @@ import (
 	"math"
 
 	g "github.com/vinq1911/gorch"
+	"github.com/vinq1911/gorch/accelerate"
 )
 
 // Module is a neural network layer or model.
@@ -44,35 +45,25 @@ func NewLinear(inFeatures, outFeatures int) *Linear {
 	return &Linear{Weight: w, Bias: b, in: inFeatures, out: outFeatures}
 }
 
-// Forward computes y = x @ W^T + b with full autograd support.
+// Forward computes y = x @ W^T + b using Accelerate BLAS.
 func (l *Linear) Forward(x *g.Tensor) *g.Tensor {
 	batch := x.Shape()[0]
 
-	// Manual matmul: out = x @ W^T
-	xData := x.Data()
-	wData := l.Weight.Data()
+	// out = x @ W^T via BLAS: SgemmTransB
+	// x is (batch, in), W is (out, in), W^T is (in, out), result is (batch, out)
 	outData := make([]float32, batch*l.out)
-	for i := 0; i < batch; i++ {
-		for j := 0; j < l.out; j++ {
-			var s float32
-			for k := 0; k < l.in; k++ {
-				s += xData[i*l.in+k] * wData[j*l.in+k] // W is (out, in), row j
-			}
-			outData[i*l.out+j] = s
-		}
-	}
+	accelerate.SgemmTransB(batch, l.out, l.in, 1.0, x.Data(), l.Weight.Data(), 0.0, outData)
 
-	// Add bias
+	// Add bias using Accelerate vDSP
 	bData := l.Bias.Data()
 	for i := 0; i < batch; i++ {
-		for j := 0; j < l.out; j++ {
-			outData[i*l.out+j] += bData[j]
-		}
+		row := outData[i*l.out : (i+1)*l.out]
+		accelerate.VAdd(row, bData, row)
 	}
 
 	out := g.NewTensor(outData, batch, l.out)
 
-	// Set up autograd
+	// Autograd
 	if x.RequiresGrad() || l.Weight.RequiresGrad() || l.Bias.RequiresGrad() {
 		out.SetRequiresGrad(true)
 		capturedX := x
@@ -85,47 +76,26 @@ func (l *Linear) Forward(x *g.Tensor) *g.Tensor {
 			gData := grad.Data()
 
 			// dL/dx = grad @ W  (batch, out) @ (out, in) = (batch, in)
-			var dxData []float32
-			if capturedX.RequiresGrad() {
-				dxData = make([]float32, capturedBatch*capturedIn)
-				for i := 0; i < capturedBatch; i++ {
-					for k := 0; k < capturedIn; k++ {
-						var s float32
-						for j := 0; j < capturedOut; j++ {
-							s += gData[i*capturedOut+j] * capturedW.Data()[j*capturedIn+k]
-						}
-						dxData[i*capturedIn+k] = s
-					}
-				}
-			}
-
-			// dL/dW = grad^T @ x  => accumulated: (out, in)
-			dwData := make([]float32, capturedOut*capturedIn)
-			for j := 0; j < capturedOut; j++ {
-				for k := 0; k < capturedIn; k++ {
-					var s float32
-					for i := 0; i < capturedBatch; i++ {
-						s += gData[i*capturedOut+j] * capturedX.Data()[i*capturedIn+k]
-					}
-					dwData[j*capturedIn+k] = s
-				}
-			}
-
-			// dL/db = sum of grad over batch
-			dbData := make([]float32, capturedOut)
-			for i := 0; i < capturedBatch; i++ {
-				for j := 0; j < capturedOut; j++ {
-					dbData[j] += gData[i*capturedOut+j]
-				}
-			}
-
 			var dx *g.Tensor
 			if capturedX.RequiresGrad() {
+				dxData := make([]float32, capturedBatch*capturedIn)
+				accelerate.Sgemm(capturedBatch, capturedIn, capturedOut, 1.0, gData, capturedW.Data(), 0.0, dxData)
 				dx = g.NewTensor(dxData, capturedBatch, capturedIn)
 			} else {
 				dx = g.Zeros(capturedBatch, capturedIn)
 			}
+
+			// dL/dW = grad^T @ x  (out, batch) @ (batch, in) = (out, in)
+			dwData := make([]float32, capturedOut*capturedIn)
+			accelerate.SgemmTransA(capturedOut, capturedIn, capturedBatch, 1.0, gData, capturedX.Data(), 0.0, dwData)
 			dw := g.NewTensor(dwData, capturedOut, capturedIn)
+
+			// dL/db = sum of grad over batch (column sums)
+			dbData := make([]float32, capturedOut)
+			for i := 0; i < capturedBatch; i++ {
+				row := gData[i*capturedOut : (i+1)*capturedOut]
+				accelerate.VAdd(dbData, row, dbData)
+			}
 			db := g.NewTensor(dbData, 1, capturedOut)
 
 			return []*g.Tensor{dx, dw, db}

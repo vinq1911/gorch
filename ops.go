@@ -7,6 +7,7 @@ import (
 	"math"
 	"sync"
 
+	"github.com/vinq1911/gorch/accelerate"
 	"github.com/vinq1911/gorch/metal"
 )
 
@@ -232,9 +233,7 @@ func Tanh(a *Tensor) *Tensor {
 // Exp returns e^a element-wise.
 func Exp(a *Tensor) *Tensor {
 	out := Zeros(a.shape...)
-	for i, v := range a.data {
-		out.data[i] = float32(math.Exp(float64(v)))
-	}
+	accelerate.Exp(a.data, out.data)
 	if a.requiresGrad {
 		out.requiresGrad = true
 		out.gradFn = &GradFn{
@@ -256,9 +255,7 @@ func Exp(a *Tensor) *Tensor {
 // Log returns ln(a) element-wise.
 func Log(a *Tensor) *Tensor {
 	out := Zeros(a.shape...)
-	for i, v := range a.data {
-		out.data[i] = float32(math.Log(float64(v)))
-	}
+	accelerate.Log(a.data, out.data)
 	if a.requiresGrad {
 		out.requiresGrad = true
 		out.gradFn = &GradFn{
@@ -387,10 +384,7 @@ func LogSoftmax(a *Tensor) *Tensor {
 
 // Sum returns the sum of all elements as a scalar tensor.
 func Sum(a *Tensor) *Tensor {
-	var s float32
-	for _, v := range a.data {
-		s += v
-	}
+	s := accelerate.Sum(a.data)
 	out := NewTensor([]float32{s}, 1)
 	if a.requiresGrad {
 		out.requiresGrad = true
@@ -447,16 +441,8 @@ func MatMul(a, b *Tensor) *Tensor {
 		out.data = outBuf.FloatSlice()
 		out.buf = outBuf
 	} else {
-		// CPU path: naive matmul
-		for i := 0; i < M; i++ {
-			for j := 0; j < N; j++ {
-				var s float32
-				for k := 0; k < K; k++ {
-					s += a.data[i*K+k] * b.data[k*N+j]
-				}
-				out.data[i*N+j] = s
-			}
-		}
+		// CPU path: Accelerate BLAS sgemm
+		accelerate.Sgemm(M, N, K, 1.0, a.data, b.data, 0.0, out.data)
 	}
 
 	if a.requiresGrad || b.requiresGrad {
@@ -465,44 +451,19 @@ func MatMul(a, b *Tensor) *Tensor {
 			name:   "MatMul",
 			inputs: []*Tensor{a, b},
 			backward: func(grad *Tensor) []*Tensor {
-				// dL/dA = grad @ B^T
-				// dL/dB = A^T @ grad
-				bT := transpose(b)
-				aT := transpose(a)
-				return []*Tensor{
-					matMulCPU(grad, bT),
-					matMulCPU(aT, grad),
-				}
+				// dL/dA = grad @ B^T  (using BLAS transB)
+				// dL/dB = A^T @ grad  (using BLAS transA)
+				gM, gN := grad.shape[0], grad.shape[1]
+				bK := b.shape[0] // B is KxN, we want grad @ B^T = (gM, gN) @ (gN, bK) but bK=K, gN=N
+				dA := Zeros(gM, b.shape[0])
+				accelerate.SgemmTransB(gM, b.shape[0], gN, 1.0, grad.data, b.data, 0.0, dA.data)
+
+				dB := Zeros(a.shape[1], gN)
+				_ = bK
+				accelerate.SgemmTransA(a.shape[1], gN, a.shape[0], 1.0, a.data, grad.data, 0.0, dB.data)
+
+				return []*Tensor{dA, dB}
 			},
-		}
-	}
-	return out
-}
-
-// transpose returns the transpose of a 2-D tensor (CPU only, for autograd).
-func transpose(a *Tensor) *Tensor {
-	M, N := a.shape[0], a.shape[1]
-	out := Zeros(N, M)
-	for i := 0; i < M; i++ {
-		for j := 0; j < N; j++ {
-			out.data[j*M+i] = a.data[i*N+j]
-		}
-	}
-	return out
-}
-
-// matMulCPU is a CPU-only matmul used in backward pass.
-func matMulCPU(a, b *Tensor) *Tensor {
-	M, K := a.shape[0], a.shape[1]
-	N := b.shape[1]
-	out := Zeros(M, N)
-	for i := 0; i < M; i++ {
-		for j := 0; j < N; j++ {
-			var s float32
-			for k := 0; k < K; k++ {
-				s += a.data[i*K+k] * b.data[k*N+j]
-			}
-			out.data[i*N+j] = s
 		}
 	}
 	return out
@@ -510,7 +471,11 @@ func matMulCPU(a, b *Tensor) *Tensor {
 
 // ---------- dispatch helpers ----------
 
-// binaryOp dispatches to Metal if both tensors are on GPU, else CPU.
+// Accelerate-backed CPU dispatch function type.
+type accBinaryFn func(a, b, out []float32)
+type accUnaryFn func(a, out []float32)
+
+// binaryOp dispatches to Metal if both tensors are on GPU, Accelerate on CPU.
 func binaryOp(a, b *Tensor, kernelName string, cpuFn func(float32, float32) float32) *Tensor {
 	out := Zeros(a.shape...)
 
@@ -519,6 +484,8 @@ func binaryOp(a, b *Tensor, kernelName string, cpuFn func(float32, float32) floa
 		gpu.Queue.Dispatch1D(gpu.pipe(kernelName), []*metal.Buffer{a.buf, b.buf, outBuf}, a.Size())
 		out.data = outBuf.FloatSlice()
 		out.buf = outBuf
+	} else if fn := accBinaryFor(kernelName); fn != nil {
+		fn(a.data, b.data, out.data)
 	} else {
 		for i := range a.data {
 			out.data[i] = cpuFn(a.data[i], b.data[i])
@@ -527,7 +494,7 @@ func binaryOp(a, b *Tensor, kernelName string, cpuFn func(float32, float32) floa
 	return out
 }
 
-// unaryOp dispatches to Metal if tensor is on GPU, else CPU.
+// unaryOp dispatches to Metal if tensor is on GPU, Accelerate on CPU.
 func unaryOp(a *Tensor, kernelName string, cpuFn func(float32) float32) *Tensor {
 	out := Zeros(a.shape...)
 
@@ -536,12 +503,44 @@ func unaryOp(a *Tensor, kernelName string, cpuFn func(float32) float32) *Tensor 
 		gpu.Queue.Dispatch1D(gpu.pipe(kernelName), []*metal.Buffer{a.buf, outBuf}, a.Size())
 		out.data = outBuf.FloatSlice()
 		out.buf = outBuf
+	} else if fn := accUnaryFor(kernelName); fn != nil {
+		fn(a.data, out.data)
 	} else {
 		for i, v := range a.data {
 			out.data[i] = cpuFn(v)
 		}
 	}
 	return out
+}
+
+// accBinaryFor returns the Accelerate function for a given binary kernel name.
+func accBinaryFor(name string) accBinaryFn {
+	switch name {
+	case "vec_add":
+		return accelerate.VAdd
+	case "vec_sub":
+		return accelerate.VSub
+	case "vec_mul":
+		return accelerate.VMul
+	case "vec_div":
+		return accelerate.VDiv
+	default:
+		return nil
+	}
+}
+
+// accUnaryFor returns the Accelerate function for a given unary kernel name.
+func accUnaryFor(name string) accUnaryFn {
+	switch name {
+	case "vec_relu":
+		return accelerate.ReLU
+	case "vec_sigmoid":
+		return accelerate.Sigmoid
+	case "vec_tanh_act":
+		return accelerate.Tanh
+	default:
+		return nil
+	}
 }
 
 func assertSameShape(a, b *Tensor) {
