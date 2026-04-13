@@ -1,0 +1,76 @@
+[
+  {
+    "category": "Image Classification",
+    "name": "MNIST (MLP 784→128→10)",
+    "accuracy": 97,
+    "loss": 0.09145086,
+    "train_time": "1.326s",
+    "train_time_ms": 1326,
+    "params": 101770,
+    "epochs": 3,
+    "details": "Handwritten digit recognition, 60K train / 10K test"
+  },
+  {
+    "category": "Image Classification",
+    "name": "Fashion-MNIST (MLP 784→256→128→10)",
+    "accuracy": 97.84,
+    "loss": 0.011711981,
+    "train_time": "5.396s",
+    "train_time_ms": 5395,
+    "params": 235146,
+    "epochs": 10,
+    "details": "Clothing classification, 60K train / 10K test, 10 classes"
+  },
+  {
+    "category": "Image Classification",
+    "name": "Fashion-MNIST (CNN Conv16→Conv32→FC)",
+    "accuracy": 98.21,
+    "loss": 0.04486075,
+    "train_time": "44.573s",
+    "train_time_ms": 44572,
+    "params": 20490,
+    "epochs": 3,
+    "details": "2-layer CNN, 3 epochs only (vs 5 in dedicated test)"
+  },
+  {
+    "category": "Medical",
+    "name": "Breast Cancer Wisconsin (MLP 30→64→32→2)",
+    "accuracy": 95.6140350877193,
+    "loss": 0.002735485,
+    "train_time": "64ms",
+    "train_time_ms": 63,
+    "params": 4130,
+    "epochs": 50,
+    "details": "Binary classification (benign/malignant), 569 samples, 30 features"
+  },
+  {
+    "category": "Tabular",
+    "name": "Wine Quality (MLP 11→128→64→32→6)",
+    "accuracy": 64.375,
+    "loss": 0.29648417,
+    "train_time": "297ms",
+    "train_time_ms": 297,
+    "params": 12070,
+    "epochs": 50,
+    "details": "6-class wine score prediction, 1599 samples, 11 features"
+  },
+  {
+    "category": "Language Model",
+    "name": "GPT (char-level, 2-layer, dim=64)",
+    "loss": 0.008973152,
+    "train_time": "1.122s",
+    "train_time_ms": 1122,
+    "params": 119060,
+    "epochs": 200,
+    "details": "Shakespeare-style text, vocab=20, loss 3.7913→0.0090, warmup+cosine LR"
+  },
+  {
+    "category": "Model I/O",
+    "name": "Safetensors Save/Load Round-Trip",
+    "train_time": "save=896µs load=69µs",
+    "train_time_ms": 0.964,
+    "params": 325,
+    "epochs": 0,
+    "details": "4 tensors, exact value match: PASS"
+  }
+]

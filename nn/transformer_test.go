@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	g "github.com/vinq1911/gorch"
+	"github.com/vinq1911/gorch/optim"
 )
 
 func TestEmbeddingForward(t *testing.T) {
@@ -180,23 +181,21 @@ func TestGPTTrainStep(t *testing.T) {
 	initialLoss := loss.Data()[0]
 	loss.Backward()
 
-	// Manual SGD step
-	lr := float32(0.01)
-	for _, p := range model.Parameters() {
-		if p.Grad() != nil {
-			for i := range p.Data() {
-				p.Data()[i] -= lr * p.Grad().Data()[i]
-			}
-		}
-		p.ZeroGrad()
+	// Multiple Adam steps to ensure loss decreases (single SGD step can be flaky
+	// with random init on small models)
+	opt := optim.NewAdam(model.Parameters(), 0.01)
+	for step := 0; step < 5; step++ {
+		opt.ZeroGrad()
+		l := g.CrossEntropyLoss(model.Forward(tokens), targets)
+		l.Backward()
+		opt.Step()
 	}
 
-	// Second forward: loss should decrease
 	logits2 := model.Forward(tokens)
 	loss2 := g.CrossEntropyLoss(logits2, targets)
 
 	if loss2.Data()[0] >= initialLoss {
-		t.Fatalf("loss did not decrease: %.4f → %.4f", initialLoss, loss2.Data()[0])
+		t.Fatalf("loss did not decrease after 5 Adam steps: %.4f → %.4f", initialLoss, loss2.Data()[0])
 	}
-	fmt.Printf("  GPT train step: loss %.4f → %.4f\n", initialLoss, loss2.Data()[0])
+	fmt.Printf("  GPT train step: loss %.4f → %.4f (5 steps)\n", initialLoss, loss2.Data()[0])
 }

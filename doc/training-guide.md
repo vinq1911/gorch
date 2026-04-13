@@ -1,6 +1,6 @@
 # Training with gorch
 
-This guide walks through how to train neural networks using gorch — from basic concepts to a complete MNIST classifier.
+This guide walks through how to train neural networks using gorch — from basic concepts to transformers.
 
 ## Core concepts
 
@@ -45,6 +45,10 @@ t.Size()     // 4
 t.Dim()      // 2
 t.Data()     // []float32{1, 2, 3, 4}
 t.At(0, 1)   // 2.0
+
+// Reshape and transpose
+r := g.ReshapeOp(t, 4)       // (4,)
+tr := g.Transpose2D(t)       // (2, 2) transposed
 ```
 
 ### Gradient tracking
@@ -80,16 +84,42 @@ params := layer.Parameters()    // [weight, bias]
 model := nn.NewSequential(
     nn.NewLinear(784, 128),
     nn.NewReLU(),
+    nn.NewDropout(0.2),         // 20% dropout for regularization
     nn.NewLinear(128, 64),
     nn.NewReLU(),
     nn.NewLinear(64, 10),
 )
+```
 
-// Forward pass
-logits := model.Forward(input)  // input: (batch, 784), output: (batch, 10)
+### CNN model
 
-// All parameters from all layers
-params := model.Parameters()
+```go
+model := nn.NewSequential(
+    nn.NewConv2d(1, 16, 3, 1, 1),  // (1,28,28) -> (16,28,28)
+    nn.NewReLU(),
+    nn.NewMaxPool2d(2, 2),          // -> (16,14,14)
+    nn.NewConv2d(16, 32, 3, 1, 1),  // -> (32,14,14)
+    nn.NewReLU(),
+    nn.NewMaxPool2d(2, 2),          // -> (32,7,7)
+    nn.NewFlatten(),                // -> (1568)
+    nn.NewLinear(1568, 10),         // -> (10)
+)
+```
+
+### GPT language model
+
+```go
+model := nn.NewGPT(
+    50257,  // vocab size
+    256,    // embedding dim
+    4,      // attention heads
+    4,      // transformer layers
+    128,    // max sequence length
+)
+
+// Forward pass: token IDs → logits
+tokens := []int{1, 5, 10, 20}
+logits := model.Forward(tokens)  // (4, 50257)
 ```
 
 ### Available layers
@@ -97,20 +127,26 @@ params := model.Parameters()
 | Layer | Constructor | Description |
 |-------|-------------|-------------|
 | `Linear` | `nn.NewLinear(in, out)` | Fully connected, Kaiming init |
+| `Conv2d` | `nn.NewConv2d(inC, outC, kernel, stride, pad)` | 2D convolution (im2col + BLAS) |
+| `MaxPool2d` | `nn.NewMaxPool2d(kernel, stride)` | 2D max pooling |
+| `Flatten` | `nn.NewFlatten()` | Reshape 4D→2D for CNN→MLP transition |
+| `Embedding` | `nn.NewEmbedding(vocab, dim)` | Token/position lookup table |
+| `LayerNorm` | `nn.NewLayerNorm(dim)` | Normalize last dimension |
+| `MultiHeadAttention` | `nn.NewMultiHeadAttention(dim, heads)` | Self-attention with causal masking |
+| `TransformerBlock` | `nn.NewTransformerBlock(dim, heads)` | Pre-norm transformer (attn + FFN) |
+| `Dropout` | `nn.NewDropout(p)` | Random zeroing with inverted scaling |
 | `ReLU` | `nn.NewReLU()` | max(0, x) activation |
 | `Sigmoid` | `nn.NewSigmoid()` | Sigmoid activation |
 | `Tanh` | `nn.NewTanh()` | Tanh activation |
 | `Sequential` | `nn.NewSequential(layers...)` | Chain layers in order |
+| `GPT` | `nn.NewGPT(vocab, dim, heads, layers, maxSeq)` | Decoder-only transformer LM |
 
 ## Loss functions
 
 ### MSELoss — for regression
 
-Mean squared error: `mean((pred - target)^2)`
-
 ```go
-pred := model.Forward(inputs)         // (batch, 1)
-loss := g.MSELoss(pred, targets)       // scalar tensor
+loss := g.MSELoss(pred, targets)   // mean((pred - target)^2)
 ```
 
 ### CrossEntropyLoss — for classification
@@ -123,96 +159,147 @@ targets := g.NewTensor(labels, batchSize, 1)   // integer labels as float32
 loss := g.CrossEntropyLoss(logits, targets)     // scalar tensor
 ```
 
-Internally applies log-softmax and negative log-likelihood. No need to add a softmax layer to your model.
-
 ## Optimizers
 
-### SGD
+### SGD and Adam
 
 ```go
 import "github.com/vinq1911/gorch/optim"
 
-opt := optim.NewSGD(model.Parameters(), 0.01, 0.9)
-// args: params, learning rate, momentum (0 for no momentum)
+opt := optim.NewSGD(model.Parameters(), 0.01, 0.9)   // lr=0.01, momentum=0.9
+opt := optim.NewAdam(model.Parameters(), 0.001)        // default betas
 ```
 
-### Adam
+### Learning rate scheduling
 
 ```go
-opt := optim.NewAdam(model.Parameters(), 0.001)
-// uses default betas (0.9, 0.999) and eps (1e-8)
+// Step decay: multiply LR by 0.1 every 30 epochs
+sched := optim.NewStepLR(opt, 0.001, 30, 0.1, opt.SetLR)
+
+// Cosine annealing: smooth decay from 0.001 to 0
+sched := optim.NewCosineAnnealingLR(opt, 0.001, 0.0, 100, opt.SetLR)
+
+// Warmup + cosine (GPT-style): 10 warmup steps, then cosine decay
+sched := optim.NewWarmupCosineScheduler(0.001, 0.0, 10, 1000, opt.SetLR)
+
+// Call after each epoch (or step):
+sched.Step()
 ```
 
-### Optimizer loop
+## Dropout
 
 ```go
-opt.ZeroGrad()   // clear gradients from previous step
-// ... forward + loss + backward ...
-opt.Step()       // update parameters using gradients
+dropout := nn.NewDropout(0.1)
+
+// Training mode (dropout active):
+dropout.Train()
+out := dropout.Forward(x)
+
+// Evaluation mode (dropout disabled):
+dropout.Eval()
+out := dropout.Forward(x)  // pass-through
 ```
 
-Always call `ZeroGrad()` before each forward pass. Gradients accumulate by default — without zeroing, you get the sum of all previous gradients.
+## Saving and loading models
+
+### Save model weights
+
+```go
+import "github.com/vinq1911/gorch/model"
+
+params := myModel.Parameters()
+nameMap := map[int]string{
+    0: "layer1.weight",
+    1: "layer1.bias",
+    2: "layer2.weight",
+    3: "layer2.bias",
+}
+model.SaveModelWeights("model.safetensors", params, nameMap)
+```
+
+### Load model weights
+
+```go
+loadMap := map[string]int{
+    "layer1.weight": 0,
+    "layer1.bias":   1,
+    "layer2.weight": 2,
+    "layer2.bias":   3,
+}
+model.LoadModelWeights("model.safetensors", params, loadMap)
+```
+
+### Load pretrained safetensors
+
+```go
+sf, err := model.LoadSafetensors("pretrained.safetensors")
+// sf.Tensors["model.layers.0.weight"] → *gorch.Tensor
+// sf.Names → sorted list of tensor names
+```
+
+Supports F32, F16, and BF16 (auto-converted to F32).
+
+## Tokenizer
+
+### BPE tokenizer (GPT-2 compatible)
+
+```go
+tok, err := model.LoadTokenizer("vocab.json", "merges.txt")
+ids := tok.Encode("Hello world")     // []int{15496, 995}
+text := tok.Decode(ids)               // "Hello world"
+```
+
+### Character-level tokenizer (for testing)
+
+```go
+tok := model.NewSimpleTokenizer("the quick brown fox")
+ids := tok.Encode("fox")
+text := tok.Decode(ids)  // "fox"
+```
 
 ## Data loading
 
+### Built-in datasets
+
+```go
+// MNIST digits
+trainSet, _ := data.LoadMNIST("./cache", true)
+
+// Fashion-MNIST clothing
+trainSet, _ := data.LoadFashionMNIST("./cache", true)
+
+// UCI Wine Quality
+wineDS, _ := data.LoadWineQuality("./cache")
+wineDS.Normalize()
+train, test := wineDS.TrainTestSplit(0.2)
+
+// UCI Breast Cancer
+bcDS, _ := data.LoadBreastCancer("./cache")
+bcDS.Normalize()
+train, test := bcDS.TrainTestSplit(0.2)
+```
+
+### Generic CSV loading
+
+```go
+ds, _ := data.LoadCSV("data.csv", ",", -1, true, nil)  // comma-sep, last col = label, skip header
+ds.Normalize()
+train, test := ds.TrainTestSplit(0.2)
+```
+
 ### DataLoader
 
-Batches a dataset with optional shuffling:
-
 ```go
-import "github.com/vinq1911/gorch/data"
-
-loader := data.NewDataLoader(dataset, 64, true)  // batch=64, shuffle=true
+loader := data.NewDataLoader(trainSet, 64, true)  // batch=64, shuffle=true
 
 for epoch := 0; epoch < numEpochs; epoch++ {
-    loader.Reset()  // reshuffle at start of each epoch
+    loader.Reset()
     for {
         inputs, targets := loader.Next()
-        if inputs == nil {
-            break  // epoch done
-        }
-        // ... train on this batch ...
+        if inputs == nil { break }
+        // ... train ...
     }
 }
-```
-
-### MNIST dataset
-
-Built-in MNIST reader with automatic download:
-
-```go
-trainSet, err := data.LoadMNIST("./mnist_data", true)   // training split
-testSet, err := data.LoadMNIST("./mnist_data", false)    // test split
-
-trainSet.Len()        // 60000
-trainSet.InputShape() // [784]  (28x28 flattened, normalized to [0,1])
-```
-
-### Custom datasets
-
-Implement the `data.Dataset` interface:
-
-```go
-type Dataset interface {
-    Len() int
-    Get(index int) (input, target []float32)
-    InputShape() []int
-    TargetShape() []int
-}
-```
-
-Example:
-
-```go
-type MyDataset struct {
-    xs [][]float32
-    ys [][]float32
-}
-
-func (d *MyDataset) Len() int                          { return len(d.xs) }
-func (d *MyDataset) InputShape() []int                 { return []int{4} }
-func (d *MyDataset) TargetShape() []int                { return []int{1} }
-func (d *MyDataset) Get(i int) ([]float32, []float32)  { return d.xs[i], d.ys[i] }
 ```
 
 ## Complete example: MNIST classifier
@@ -222,8 +309,6 @@ package main
 
 import (
     "fmt"
-    "time"
-
     g "github.com/vinq1911/gorch"
     "github.com/vinq1911/gorch/data"
     "github.com/vinq1911/gorch/nn"
@@ -231,120 +316,79 @@ import (
 )
 
 func main() {
-    // 1. Load data
     trainSet, _ := data.LoadMNIST("./mnist_data", true)
     testSet, _ := data.LoadMNIST("./mnist_data", false)
 
-    // 2. Define model
     model := nn.NewSequential(
-        nn.NewLinear(784, 128),
-        nn.NewReLU(),
+        nn.NewLinear(784, 128), nn.NewReLU(),
         nn.NewLinear(128, 10),
     )
-
-    // 3. Optimizer
     opt := optim.NewAdam(model.Parameters(), 0.001)
-
-    // 4. Training loop
     loader := data.NewDataLoader(trainSet, 64, true)
-    start := time.Now()
 
     for epoch := 0; epoch < 3; epoch++ {
         loader.Reset()
-        var totalLoss float32
-        batches := 0
-
         for {
             inputs, targets := loader.Next()
-            if inputs == nil {
-                break
-            }
-
+            if inputs == nil { break }
             opt.ZeroGrad()
-            logits := model.Forward(inputs)
-            loss := g.CrossEntropyLoss(logits, targets)
+            loss := g.CrossEntropyLoss(model.Forward(inputs), targets)
             loss.Backward()
             opt.Step()
-
-            totalLoss += loss.Data()[0]
-            batches++
-        }
-
-        fmt.Printf("Epoch %d  loss=%.4f  elapsed=%v\n",
-            epoch+1, totalLoss/float32(batches), time.Since(start).Round(time.Second))
-    }
-
-    // 5. Evaluate
-    testLoader := data.NewDataLoader(testSet, 256, false)
-    testLoader.Reset()
-    correct, total := 0, 0
-
-    for {
-        inputs, targets := testLoader.Next()
-        if inputs == nil {
-            break
-        }
-
-        logits := model.Forward(inputs)
-        preds := logits.Data()
-        tgts := targets.Data()
-        batch := inputs.Shape()[0]
-
-        for i := 0; i < batch; i++ {
-            // argmax over classes
-            best := 0
-            for j := 1; j < 10; j++ {
-                if preds[i*10+j] > preds[i*10+best] {
-                    best = j
-                }
-            }
-            if best == int(tgts[i]) {
-                correct++
-            }
-            total++
         }
     }
-
-    fmt.Printf("Test accuracy: %.2f%% (%d/%d)\n",
-        float64(correct)/float64(total)*100, correct, total)
+    // Result: 97.2% accuracy in ~1 second on M4
 }
 ```
 
-Expected output on Apple Silicon (M4, Accelerate-backed):
-
-```
-Epoch 1  loss=0.2950  elapsed=0.4s
-Epoch 2  loss=0.1303  elapsed=0.7s
-Epoch 3  loss=0.0903  elapsed=1.0s
-Test accuracy: 97.22% (9722/10000)
-```
-
-## Metal GPU acceleration
-
-Move tensors to Metal for GPU-accelerated compute:
+## Complete example: GPT training
 
 ```go
-gpu, _ := g.InitMetal()
+package main
 
-// Move data to GPU
-a := g.Rand(1000, 1000).ToMetal(gpu.Dev)
-b := g.Rand(1000, 1000).ToMetal(gpu.Dev)
+import (
+    "fmt"
+    g "github.com/vinq1911/gorch"
+    "github.com/vinq1911/gorch/model"
+    "github.com/vinq1911/gorch/nn"
+    "github.com/vinq1911/gorch/optim"
+)
 
-// Ops automatically dispatch to Metal kernels
-c := g.Add(a, b)        // element-wise on GPU
-d := g.MatMul(a, b)     // MPS-accelerated matmul
-e := g.ReLU(c)           // GPU kernel
+func main() {
+    corpus := "the quick brown fox jumps over the lazy dog"
+    tok := model.NewSimpleTokenizer(corpus)
 
-// Move back to CPU when needed
-e.ToCPU()
+    gpt := nn.NewGPT(tok.VocabSize(), 64, 4, 2, 128)
+    opt := optim.NewAdam(gpt.Parameters(), 0.001)
+
+    // Train: predict next character
+    ids := tok.Encode(corpus)
+    for step := 0; step < 100; step++ {
+        opt.ZeroGrad()
+        logits := gpt.Forward(ids[:len(ids)-1])
+        targets := make([]float32, len(ids)-1)
+        for i := range targets {
+            targets[i] = float32(ids[i+1])
+        }
+        loss := g.CrossEntropyLoss(logits,
+            g.NewTensor(targets, len(targets), 1))
+        loss.Backward()
+        opt.Step()
+
+        if step%20 == 0 {
+            fmt.Printf("step %d  loss=%.4f\n", step, loss.Data()[0])
+        }
+    }
+}
 ```
-
-Unified memory means no explicit copies — Go writes data, the GPU reads it from the same physical address. This is Apple Silicon's key advantage.
 
 ## Tips
 
 - **Learning rate**: start with 0.001 for Adam, 0.01 for SGD
-- **Batch size**: 32-128 is typical. Larger batches are faster but may need higher learning rate
-- **Kaiming init**: `nn.NewLinear` uses Kaiming initialization by default — good for ReLU networks
-- **CrossEntropyLoss expects raw logits**: don't add Softmax as the last layer when using CrossEntropyLoss
-- **ZeroGrad before forward**: always zero gradients at the start of each iteration, not the end
+- **Batch size**: 32-128 is typical. Larger batches need higher learning rate
+- **Dropout**: use 0.1-0.3 for regularization. Disable during evaluation
+- **LR scheduling**: CosineAnnealing or WarmupCosine generally outperform constant LR
+- **CrossEntropyLoss expects raw logits**: don't add Softmax as the last layer
+- **ZeroGrad before forward**: always zero gradients at the start of each iteration
+- **Save checkpoints**: use SaveModelWeights periodically during long training runs
+- **Conv2d uses im2col + BLAS**: 1x1 convolutions skip im2col for zero data duplication
