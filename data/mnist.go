@@ -60,6 +60,21 @@ func (d *MNISTDataset) Get(i int) ([]float32, []float32) {
 	return d.images[i], []float32{float32(d.labels[i])}
 }
 
+// MNISTDataset2D wraps MNISTDataset to return images as (1, 28, 28) for Conv2d input.
+type MNISTDataset2D struct {
+	inner *MNISTDataset
+}
+
+// As2D wraps a flat MNIST dataset to return 2D image tensors (1, 28, 28).
+func (d *MNISTDataset) As2D() *MNISTDataset2D {
+	return &MNISTDataset2D{inner: d}
+}
+
+func (d *MNISTDataset2D) Len() int                         { return d.inner.Len() }
+func (d *MNISTDataset2D) InputShape() []int                 { return []int{1, 28, 28} }
+func (d *MNISTDataset2D) TargetShape() []int                { return []int{1} }
+func (d *MNISTDataset2D) Get(i int) ([]float32, []float32) { return d.inner.Get(i) }
+
 // ---------- IDX file format readers (shared by MNIST and Fashion-MNIST) ----------
 
 func loadIDXImages(dir, baseURL, filename string) ([][]float32, error) {

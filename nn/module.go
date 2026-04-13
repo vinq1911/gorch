@@ -134,6 +134,74 @@ func NewTanh() *TanhModule { return &TanhModule{} }
 func (t *TanhModule) Forward(x *g.Tensor) *g.Tensor { return g.Tanh(x) }
 func (t *TanhModule) Parameters() []*g.Tensor        { return nil }
 
+// ---------- Conv2d ----------
+
+// Conv2d implements a 2D convolutional layer.
+// Input shape: (batch, inChannels, H, W), output shape: (batch, outChannels, outH, outW).
+type Conv2d struct {
+	Weight  *g.Tensor // shape: (outChannels, inChannels, kernelSize, kernelSize)
+	Bias    *g.Tensor // shape: (outChannels,)
+	Stride  int
+	Padding int
+}
+
+// NewConv2d creates a Conv2d layer with Kaiming initialization.
+func NewConv2d(inChannels, outChannels, kernelSize, stride, padding int) *Conv2d {
+	fanIn := float64(inChannels * kernelSize * kernelSize)
+	scale := float32(math.Sqrt(2.0 / fanIn))
+
+	w := g.RandN(outChannels, inChannels, kernelSize, kernelSize)
+	for i := range w.Data() {
+		w.Data()[i] *= scale
+	}
+	w.SetRequiresGrad(true)
+
+	b := g.Zeros(outChannels)
+	b.SetRequiresGrad(true)
+
+	return &Conv2d{Weight: w, Bias: b, Stride: stride, Padding: padding}
+}
+
+func (c *Conv2d) Forward(x *g.Tensor) *g.Tensor {
+	return g.Conv2dForward(x, c.Weight, c.Bias, c.Stride, c.Padding)
+}
+
+func (c *Conv2d) Parameters() []*g.Tensor {
+	return []*g.Tensor{c.Weight, c.Bias}
+}
+
+// ---------- MaxPool2d ----------
+
+// MaxPool2d implements 2D max pooling.
+type MaxPool2d struct {
+	KernelSize int
+	Stride     int
+}
+
+// NewMaxPool2d creates a MaxPool2d layer.
+func NewMaxPool2d(kernelSize, stride int) *MaxPool2d {
+	return &MaxPool2d{KernelSize: kernelSize, Stride: stride}
+}
+
+func (m *MaxPool2d) Forward(x *g.Tensor) *g.Tensor {
+	return g.MaxPool2dForward(x, m.KernelSize, m.Stride)
+}
+
+func (m *MaxPool2d) Parameters() []*g.Tensor { return nil }
+
+// ---------- Flatten ----------
+
+// Flatten reshapes (batch, C, H, W) to (batch, C*H*W) for transition from conv to linear.
+type Flatten struct{}
+
+func NewFlatten() *Flatten { return &Flatten{} }
+
+func (f *Flatten) Forward(x *g.Tensor) *g.Tensor {
+	return g.FlattenForward(x)
+}
+
+func (f *Flatten) Parameters() []*g.Tensor { return nil }
+
 // ---------- Sequential ----------
 
 // Sequential chains multiple modules in order.

@@ -12,7 +12,7 @@ Pure Go framework logic (tensors, autograd, nn modules, optimizers) with Apple's
 - **Autograd** — reverse-mode automatic differentiation with topological sort
 - **Accelerate CPU** — BLAS (cblas_sgemm), vDSP vector ops, vForce transcendentals
 - **Metal GPU** — element-wise ops via custom .metal kernels, matrix multiply via MPS
-- **nn** — Module interface, Linear, ReLU, Sigmoid, Tanh, Sequential
+- **nn** — Module interface, Linear, Conv2d, MaxPool2d, Flatten, ReLU, Sigmoid, Tanh, Sequential
 - **optim** — SGD (with momentum), Adam
 - **Loss** — MSELoss, CrossEntropyLoss
 - **Ops** — Exp, Log, Softmax, LogSoftmax, and all standard element-wise ops
@@ -150,6 +150,8 @@ Apple GPU              Apple CPU (NEON SIMD, AMX)
 ```
 gorch/
   tensor.go            Tensor type, creation, indexing, device transfer
+  conv.go              Conv2d forward/backward (im2col + BLAS sgemm)
+  pool.go              MaxPool2d, Flatten
   ops.go               Ops with 3-tier dispatch: Metal GPU → Accelerate CPU → fallback
   autograd.go          Reverse-mode automatic differentiation
   loss.go              Loss functions (MSELoss, CrossEntropyLoss)
@@ -161,14 +163,16 @@ gorch/
     metal.go           Go bindings for Metal device, buffers, pipelines
     kernels.go         Metal shader source for element-wise ops
   nn/
-    module.go          Module interface, Linear (BLAS-backed), Sequential, activations
+    module.go          Linear, Conv2d, MaxPool2d, Flatten, Sequential, activations
   optim/
     optim.go           SGD and Adam optimizers
   data/
     dataloader.go      Batched DataLoader with shuffle
     mnist.go           MNIST dataset reader with auto-download
   e2e/
-    mnist_test.go      End-to-end MNIST training test (97.2% accuracy, ~1s)
+    mnist_test.go      End-to-end MNIST training (97.2% accuracy, ~1s)
+    fashion_test.go    Fashion-MNIST MLP benchmark (88.1% accuracy)
+    cnn_fashion_test.go Fashion-MNIST CNN benchmark (90.6% accuracy)
 ```
 
 ## Running Tests
@@ -192,7 +196,8 @@ CGO_ENABLED=1 go test ./e2e/ -tags e2e -v -timeout 10m
 - [x] DataLoader with batching and shuffle
 - [x] MNIST training (97.2% accuracy, ~1s on M4)
 - [x] Accelerate CPU backend (BLAS, vDSP, vForce) — 30x training speedup
-- [ ] Conv2d
+- [x] Conv2d (im2col + BLAS), MaxPool2d, Flatten — CNN support
+- [x] Fashion-MNIST CNN: 90.6% accuracy (vs 88.1% MLP)
 - [ ] Dropout, BatchNorm, LayerNorm
 - [ ] Broadcasting
 - [ ] Save/Load model weights
