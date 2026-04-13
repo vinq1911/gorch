@@ -21,7 +21,7 @@ var mnistFiles = map[string]string{
 	"test-labels":  "t10k-labels-idx1-ubyte.gz",
 }
 
-// MNISTDataset holds MNIST images and labels.
+// MNISTDataset holds MNIST/FashionMNIST images and labels.
 type MNISTDataset struct {
 	images [][]float32 // each image: 784 float32s in [0,1]
 	labels []int
@@ -41,11 +41,11 @@ func LoadMNIST(dir string, train bool) (*MNISTDataset, error) {
 		imgKey, lblKey = "test-images", "test-labels"
 	}
 
-	images, err := loadMNISTImages(dir, imgKey)
+	images, err := loadIDXImages(dir, mnistBaseURL, mnistFiles[imgKey])
 	if err != nil {
 		return nil, fmt.Errorf("load images: %w", err)
 	}
-	labels, err := loadMNISTLabels(dir, lblKey)
+	labels, err := loadIDXLabels(dir, mnistBaseURL, mnistFiles[lblKey])
 	if err != nil {
 		return nil, fmt.Errorf("load labels: %w", err)
 	}
@@ -53,16 +53,22 @@ func LoadMNIST(dir string, train bool) (*MNISTDataset, error) {
 	return &MNISTDataset{images: images, labels: labels}, nil
 }
 
-func (d *MNISTDataset) Len() int                          { return len(d.images) }
-func (d *MNISTDataset) InputShape() []int                  { return []int{784} }
-func (d *MNISTDataset) TargetShape() []int                 { return []int{1} }
+func (d *MNISTDataset) Len() int                         { return len(d.images) }
+func (d *MNISTDataset) InputShape() []int                 { return []int{784} }
+func (d *MNISTDataset) TargetShape() []int                { return []int{1} }
 func (d *MNISTDataset) Get(i int) ([]float32, []float32) {
 	return d.images[i], []float32{float32(d.labels[i])}
 }
 
-func loadMNISTImages(dir, key string) ([][]float32, error) {
-	path := filepath.Join(dir, mnistFiles[key])
-	if err := downloadIfMissing(path, mnistBaseURL+mnistFiles[key]); err != nil {
+// ---------- IDX file format readers (shared by MNIST and Fashion-MNIST) ----------
+
+func loadIDXImages(dir, baseURL, filename string) ([][]float32, error) {
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return nil, err
+	}
+
+	path := filepath.Join(dir, filename)
+	if err := downloadIfMissing(path, baseURL+filename); err != nil {
 		return nil, err
 	}
 
@@ -105,9 +111,13 @@ func loadMNISTImages(dir, key string) ([][]float32, error) {
 	return images, nil
 }
 
-func loadMNISTLabels(dir, key string) ([]int, error) {
-	path := filepath.Join(dir, mnistFiles[key])
-	if err := downloadIfMissing(path, mnistBaseURL+mnistFiles[key]); err != nil {
+func loadIDXLabels(dir, baseURL, filename string) ([]int, error) {
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return nil, err
+	}
+
+	path := filepath.Join(dir, filename)
+	if err := downloadIfMissing(path, baseURL+filename); err != nil {
 		return nil, err
 	}
 
