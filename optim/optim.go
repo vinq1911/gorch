@@ -59,6 +59,12 @@ func (o *SGD) ZeroGrad() {
 	}
 }
 
+// SetLR updates the learning rate (used by LR schedulers).
+func (o *SGD) SetLR(lr float32) { o.lr = lr }
+
+// GetLR returns the current learning rate.
+func (o *SGD) GetLR() float32 { return o.lr }
+
 // ---------- Adam ----------
 
 // Adam implements the Adam optimizer (Kingma & Ba, 2014).
@@ -121,3 +127,9 @@ func (o *Adam) ZeroGrad() {
 		p.ZeroGrad()
 	}
 }
+
+// SetLR updates the learning rate (used by LR schedulers).
+func (o *Adam) SetLR(lr float32) { o.lr = lr }
+
+// GetLR returns the current learning rate.
+func (o *Adam) GetLR() float32 { return o.lr }
