@@ -12,11 +12,13 @@ Pure Go framework logic (tensors, autograd, nn modules, optimizers) with Apple's
 - **Autograd** — reverse-mode automatic differentiation with topological sort
 - **Accelerate CPU** — BLAS (cblas_sgemm), vDSP vector ops, vForce transcendentals
 - **Metal GPU** — element-wise ops via custom .metal kernels, matrix multiply via MPS
-- **nn** — Module interface, Linear, Conv2d, MaxPool2d, Flatten, ReLU, Sigmoid, Tanh, Sequential
-- **optim** — SGD (with momentum), Adam
+- **nn** — Linear, Conv2d, MaxPool2d, Flatten, Embedding, LayerNorm, MultiHeadAttention, TransformerBlock, Dropout, Sequential
+- **GPT** — Full decoder-only transformer language model (token + positional embeddings, N transformer blocks, LM head)
+- **optim** — SGD (momentum), Adam, StepLR, CosineAnnealingLR, WarmupCosineScheduler
 - **Loss** — MSELoss, CrossEntropyLoss
-- **Ops** — Exp, Log, Softmax, LogSoftmax, and all standard element-wise ops
-- **Data** — DataLoader with shuffle, batching; built-in MNIST reader with auto-download
+- **Ops** — Exp, Log, Softmax, LogSoftmax, Transpose, MaskFill, EmbeddingLookup, ScaledMatMul
+- **Data** — DataLoader, MNIST, Fashion-MNIST, Wine Quality, Breast Cancer, generic CSV
+- **Model I/O** — Safetensors load/save (F32, F16, BF16), BPE tokenizer (GPT-2 compatible)
 
 ## Requirements
 
@@ -150,6 +152,7 @@ Apple GPU              Apple CPU (NEON SIMD, AMX)
 ```
 gorch/
   tensor.go            Tensor type, creation, indexing, device transfer
+  attention_ops.go     MaskFill, EmbeddingLookup, ScaledMatMul, CausalMask
   conv.go              Conv2d forward/backward (im2col + BLAS sgemm)
   pool.go              MaxPool2d, Flatten
   ops.go               Ops with 3-tier dispatch: Metal GPU → Accelerate CPU → fallback
@@ -164,15 +167,29 @@ gorch/
     kernels.go         Metal shader source for element-wise ops
   nn/
     module.go          Linear, Conv2d, MaxPool2d, Flatten, Sequential, activations
+    embedding.go       Token/position embedding lookup
+    layernorm.go       Layer normalization with learnable gamma/beta
+    attention.go       Multi-head self-attention with causal masking
+    transformer.go     Pre-norm transformer block (attn + FFN + residuals)
+    gpt.go             GPT decoder-only language model
+    dropout.go         Dropout with inverted scaling, train/eval modes
   optim/
     optim.go           SGD and Adam optimizers
+    scheduler.go       StepLR, CosineAnnealingLR, WarmupCosineScheduler
+  model/
+    safetensors.go     Load/save safetensors format (F32/F16/BF16)
+    tokenizer.go       BPE tokenizer (GPT-2 compatible) + char-level tokenizer
   data/
     dataloader.go      Batched DataLoader with shuffle
-    mnist.go           MNIST dataset reader with auto-download
+    mnist.go           MNIST/Fashion-MNIST reader with auto-download
+    tabular.go         Generic CSV loader with normalize + train/test split
+    wine.go            UCI Wine Quality dataset
+    breast_cancer.go   UCI Breast Cancer Wisconsin dataset
   e2e/
-    mnist_test.go      End-to-end MNIST training (97.2% accuracy, ~1s)
-    fashion_test.go    Fashion-MNIST MLP benchmark (88.1% accuracy)
-    cnn_fashion_test.go Fashion-MNIST CNN benchmark (90.6% accuracy)
+    mnist_test.go      MNIST training (97.2% accuracy, ~1s)
+    fashion_test.go    Fashion-MNIST MLP benchmark (88.1%)
+    cnn_fashion_test.go Fashion-MNIST CNN benchmark (90.6%)
+    realworld_test.go  Wine + Breast Cancer + Fashion multi-architecture harness
 ```
 
 ## Running Tests
@@ -198,12 +215,16 @@ CGO_ENABLED=1 go test ./e2e/ -tags e2e -v -timeout 10m
 - [x] Accelerate CPU backend (BLAS, vDSP, vForce) — 30x training speedup
 - [x] Conv2d (im2col + BLAS), MaxPool2d, Flatten — CNN support
 - [x] Fashion-MNIST CNN: 90.6% accuracy (vs 88.1% MLP)
-- [ ] Dropout, BatchNorm, LayerNorm
+- [x] Embedding, LayerNorm, MultiHeadAttention, TransformerBlock
+- [x] GPT decoder-only language model (forward + backward + train step verified)
+- [x] Dropout (inverted scaling, train/eval modes)
+- [x] LR schedulers (StepLR, CosineAnnealing, WarmupCosine)
+- [x] Safetensors load/save (F32, F16, BF16 support)
+- [x] BPE tokenizer (GPT-2 compatible)
+- [x] Real-world benchmarks: Wine Quality, Breast Cancer (97.4%), Fashion-MNIST
 - [ ] Broadcasting
-- [ ] Save/Load model weights
 - [ ] GPU autograd (backward pass on Metal)
-- [ ] Embedding layer
-- [ ] Attention / Transformer blocks
+- [ ] Pretrained model loading (GPT-2, TinyStories)
 
 ## License
 
