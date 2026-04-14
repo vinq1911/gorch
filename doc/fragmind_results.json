@@ -1,0 +1,56 @@
+{
+  "model_name": "GPT-2 Small",
+  "params": 163087441,
+  "num_layers": 12,
+  "experiments": [
+    {
+      "name": "Baseline (1 fragment)",
+      "num_fragments": 1,
+      "layer_split": "12",
+      "transport": "local",
+      "prompt": "The quick brown fox",
+      "output": "The quick brown foxes are a great way to get a",
+      "total_time": "197ms",
+      "total_time_ms": 196,
+      "tok_per_sec": 40.7109833301907,
+      "verified": true
+    },
+    {
+      "name": "2 fragments, local",
+      "num_fragments": 2,
+      "layer_split": "6+6",
+      "transport": "local (in-process)",
+      "prompt": "The quick brown fox",
+      "output": "The quick brown foxes are a great way to get a",
+      "total_time": "202ms",
+      "total_time_ms": 201,
+      "tok_per_sec": 39.6965610750051,
+      "verified": true
+    },
+    {
+      "name": "3 fragments, local",
+      "num_fragments": 3,
+      "layer_split": "4+4+4",
+      "transport": "local (in-process)",
+      "prompt": "The quick brown fox",
+      "output": "The quick brown foxes are a great way to get a",
+      "total_time": "203ms",
+      "total_time_ms": 203,
+      "tok_per_sec": 39.32455978809725,
+      "verified": true
+    },
+    {
+      "name": "2 fragments, TCP",
+      "num_fragments": 2,
+      "layer_split": "6+6",
+      "transport": "TCP (localhost)",
+      "prompt": "The quick brown fox",
+      "output": "The quick brown foxes are a great way to get a",
+      "total_time": "6.685s",
+      "total_time_ms": 6685,
+      "tok_per_sec": 1.1966688925176763,
+      "network_time": "6.57s",
+      "verified": true
+    }
+  ]
+}
