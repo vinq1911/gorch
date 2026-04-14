@@ -228,6 +228,39 @@ func Tanh(a *Tensor) *Tensor {
 	return out
 }
 
+// ---------- GELU ----------
+
+// GELU returns the Gaussian Error Linear Unit activation: x * Phi(x).
+// Uses the tanh approximation: 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+func GELU(a *Tensor) *Tensor {
+	out := Zeros(a.shape...)
+	for i, x := range a.data {
+		x3 := x * x * x
+		inner := float32(0.7978845608) * (x + 0.044715*x3) // sqrt(2/pi) ≈ 0.7978845608
+		out.data[i] = 0.5 * x * (1 + float32(math.Tanh(float64(inner))))
+	}
+	if a.requiresGrad {
+		out.requiresGrad = true
+		out.gradFn = &GradFn{
+			name:   "GELU",
+			inputs: []*Tensor{a},
+			backward: func(grad *Tensor) []*Tensor {
+				dx := Zeros(a.shape...)
+				for i, x := range a.data {
+					x3 := x * x * x
+					inner := float32(0.7978845608) * (x + 0.044715*x3)
+					tanhVal := float32(math.Tanh(float64(inner)))
+					// d(GELU)/dx = 0.5*(1+tanh) + 0.5*x*(1-tanh^2)*0.7978845608*(1+3*0.044715*x^2)
+					dtanh := 1 - tanhVal*tanhVal
+					dx.data[i] = grad.data[i] * (0.5*(1+tanhVal) + 0.5*x*dtanh*0.7978845608*(1+3*0.044715*x*x))
+				}
+				return []*Tensor{dx}
+			},
+		}
+	}
+	return out
+}
+
 // ---------- Exp / Log ----------
 
 // Exp returns e^a element-wise.

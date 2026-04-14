@@ -39,7 +39,7 @@ func (tb *TransformerBlock) Forward(x *g.Tensor, seqLen int) *g.Tensor {
 	// FFN with residual
 	normed2 := tb.Norm2.Forward(x)
 	ffnOut := tb.FFN1.Forward(normed2)
-	ffnOut = g.ReLU(ffnOut) // GELU would be better, but ReLU works
+	ffnOut = g.GELU(ffnOut)
 	ffnOut = tb.FFN2.Forward(ffnOut)
 	x = g.Add(x, ffnOut) // residual
 

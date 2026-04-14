@@ -1,0 +1,32 @@
+{
+  "model_name": "GPT-2 Small (124M)",
+  "params": 163087441,
+  "load_time": "2.669s",
+  "load_time_ms": 2668,
+  "prompts": [
+    {
+      "prompt": "The meaning of life is",
+      "generated": "The meaning of life is not the same as the meaning of death.\n",
+      "new_tokens": 10,
+      "gen_time": "249ms",
+      "gen_time_ms": 248,
+      "tokens_per_sec": 40.16273264533984
+    },
+    {
+      "prompt": "Once upon a time in a land far away",
+      "generated": "Once upon a time in a land far away, the sun was shining, and the moon was",
+      "new_tokens": 10,
+      "gen_time": "258ms",
+      "gen_time_ms": 257,
+      "tokens_per_sec": 38.782457028591615
+    },
+    {
+      "prompt": "Artificial intelligence will",
+      "generated": "Artificial intelligence will be able to do things like search for and find",
+      "new_tokens": 10,
+      "gen_time": "308ms",
+      "gen_time_ms": 308,
+      "tokens_per_sec": 32.46689124643035
+    }
+  ]
+}
