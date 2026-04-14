@@ -1,0 +1,62 @@
+[
+  {
+    "name": "Baseline MLP (ReLU)",
+    "description": "784→256→128→10, Adam 0.001, no regularization",
+    "accuracy": 88.83,
+    "final_loss": 0.22618479,
+    "train_time": "5.813s",
+    "train_time_ms": 5813,
+    "params": 235146,
+    "epochs": 10
+  },
+  {
+    "name": "MLP + GELU",
+    "description": "Same architecture, GELU instead of ReLU",
+    "accuracy": 88.69,
+    "final_loss": 0.19999328,
+    "train_time": "10.107s",
+    "train_time_ms": 10107,
+    "params": 235146,
+    "epochs": 10
+  },
+  {
+    "name": "MLP + BatchNorm",
+    "description": "BatchNorm after each Linear, before activation",
+    "accuracy": 89.14,
+    "final_loss": 0.162089,
+    "train_time": "8.897s",
+    "train_time_ms": 8896,
+    "params": 235914,
+    "epochs": 10
+  },
+  {
+    "name": "MLP + Dropout(0.2)",
+    "description": "Dropout after each activation",
+    "accuracy": 88.47,
+    "final_loss": 0.28162545,
+    "train_time": "7.459s",
+    "train_time_ms": 7458,
+    "params": 235146,
+    "epochs": 10
+  },
+  {
+    "name": "Full (BN+GELU+Dropout)",
+    "description": "BatchNorm + GELU + Dropout(0.2)",
+    "accuracy": 89.17,
+    "final_loss": 0.22897409,
+    "train_time": "16.516s",
+    "train_time_ms": 16515,
+    "params": 235914,
+    "epochs": 10
+  },
+  {
+    "name": "Full + Cosine LR",
+    "description": "BN+GELU+Dropout + CosineAnnealing(0.002→0.0001)",
+    "accuracy": 90.35,
+    "final_loss": 0.18940842,
+    "train_time": "16.471s",
+    "train_time_ms": 16471,
+    "params": 235914,
+    "epochs": 10
+  }
+]
