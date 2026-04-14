@@ -71,3 +71,48 @@ Current ops allocate a new tensor per call. This is correct but wasteful for hot
 2. **Scratch buffers:** Conv2d, matmul backward, and other ops that need temporary workspace should pre-allocate and reuse
 3. **NoGrad buffer pool:** During inference, intermediate tensors can be recycled since the autograd tape isn't recording
 4. **Unified memory awareness:** Metal buffers on Apple Silicon share physical memory with CPU — avoid redundant CPU copies of GPU results
+
+## ADR-005: Pretrained model loading strategy
+
+**Date:** 2026-04-14
+**Status:** Accepted
+
+GPT-2 weights are loaded from HuggingFace safetensors format with these transformations:
+
+1. **Conv1D → Linear transposition:** GPT-2 stores weights as (in, out), gorch Linear expects (out, in). Transpose during loading.
+2. **Fused QKV split:** GPT-2's `c_attn` concatenates Q, K, V into one (dim, 3*dim) matrix. Split into separate Wq, Wk, Wv during loading.
+3. **Tied LM head:** GPT-2 shares token embedding weights with the output projection. Copy wte.weight into LMHead.Weight.
+4. **GELU activation:** GPT-2 uses GELU, not ReLU. Added GELU op with tanh approximation.
+
+## ADR-006: Fragmind pipeline parallelism
+
+**Date:** 2026-04-14
+**Status:** Accepted
+
+Models are split into "fragments" — contiguous slices of transformer blocks. Fragment 0 handles embeddings + first N blocks, last fragment handles remaining blocks + LM head.
+
+**Transport:** TCP with binary tensor serialization (ndim + shape + float32 data). Simple, portable, works across machines.
+
+**Result:** Local pipeline has <3% overhead. TCP pipeline is serialization-bound (~821ms per token for 768-dim activations). Production optimization: shared memory, RDMA, or batched token transfer.
+
+**Output consistency:** All split configurations produce bit-identical output to unsplit model, verified in e2e tests.
+
+## ADR-007: Broadcasting implementation
+
+**Date:** 2026-04-14
+**Status:** Accepted
+
+NumPy-compatible broadcasting via separate `AddB`/`SubB`/`MulB`/`DivB` functions (not replacing the original same-shape `Add`/`Sub`/`Mul`/`Div`).
+
+**Rationale:** Keeping both avoids the overhead of broadcast shape checking on the hot path where shapes are known to match. The `B` suffix makes broadcast intent explicit.
+
+**Autograd:** Backward pass uses `reduceBroadcastGrad` to sum gradients along broadcast dimensions back to the original shape.
+
+## ADR-008: Text generation sampling strategy
+
+**Date:** 2026-04-14
+**Status:** Accepted
+
+Generation supports: greedy (argmax), temperature scaling, top-K filtering, and top-P nucleus sampling. KV cache struct exists for future incremental decoding but is not yet integrated into the GPT forward pass (full sequence recomputation per token).
+
+**Current throughput:** ~40 tok/s on GPT-2 small (124M params) without KV cache. With KV cache, expect 3-5x improvement for long sequences.
