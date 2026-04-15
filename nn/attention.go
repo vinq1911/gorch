@@ -3,11 +3,13 @@
 package nn
 
 import (
+	"math"
+
 	g "github.com/vinq1911/gorch"
 )
 
 // MultiHeadAttention implements multi-head self-attention.
-// All operations use 2D tensors (flattened batch*seq) with explicit reshaping.
+// Uses batched matmul to process all heads in one GPU dispatch.
 type MultiHeadAttention struct {
 	Wq       *Linear
 	Wk       *Linear
@@ -19,7 +21,6 @@ type MultiHeadAttention struct {
 }
 
 // NewMultiHeadAttention creates a multi-head attention module.
-// dim must be divisible by numHeads.
 func NewMultiHeadAttention(dim, numHeads int) *MultiHeadAttention {
 	if dim%numHeads != 0 {
 		panic("gorch: dim must be divisible by numHeads")
@@ -37,54 +38,78 @@ func NewMultiHeadAttention(dim, numHeads int) *MultiHeadAttention {
 }
 
 // Forward computes multi-head self-attention.
-// x: (seq, dim) — single sequence, no batch dim.
-// seqLen: sequence length.
-// Returns: (seq, dim).
+// x: (seq, dim). Returns: (seq, dim).
+//
+// Uses batched matmul: all heads computed in 2 GPU dispatches instead of 24 CPU matmuls.
+// Data layout for batched ops: (numHeads, seq, headDim) packed contiguously.
 func (mha *MultiHeadAttention) Forward(x *g.Tensor, seqLen int) *g.Tensor {
-	dim := mha.Dim
 	numHeads := mha.NumHeads
 	headDim := mha.HeadDim
+	dim := mha.Dim
 
 	// Project: (seq, dim) → (seq, dim) for Q, K, V
 	q := mha.Wq.Forward(x) // (seq, dim)
 	k := mha.Wk.Forward(x)
 	v := mha.Wv.Forward(x)
 
-	// Process each head separately (loop over heads — correct, not optimally batched)
-	// Split dim into numHeads chunks of headDim
-	headOutputs := make([]*g.Tensor, numHeads)
+	// Use batched matmul for inference (no grad required on inputs)
+	// Fall back to per-head loop for training (has autograd)
+	useBatched := !x.RequiresGrad()
 
-	for h := 0; h < numHeads; h++ {
-		// Extract head h: columns [h*headDim : (h+1)*headDim] from Q, K, V
-		qh := extractHead(q, seqLen, dim, h, headDim) // (seq, headDim)
-		kh := extractHead(k, seqLen, dim, h, headDim)
-		vh := extractHead(v, seqLen, dim, h, headDim)
+	var concat *g.Tensor
 
-		// Attention scores: (seq, headDim) @ (headDim, seq) = (seq, seq)
-		kT := g.Transpose2D(kh)
-		scores := g.ScaledMatMul(qh, kT, float32(headDim))
+	if useBatched {
+		// === Batched path: 2 GPU dispatches instead of 24 CPU matmuls ===
+		qHeads := reshapeToHeads(q, seqLen, numHeads, headDim)
+		kHeads := reshapeToHeads(k, seqLen, numHeads, headDim)
+		vHeads := reshapeToHeads(v, seqLen, numHeads, headDim)
 
-		// Causal mask
+		// Batched Q @ K^T → (numHeads, seq, seq)
+		scores := g.BatchedMatMulTransB(qHeads, kHeads, numHeads, seqLen, seqLen, headDim)
+
+		// Scale, mask, softmax (in-place on unified memory)
+		invScale := float32(1.0 / float64(headDim))
+		scoresData := scores.Data()
+		for i := range scoresData {
+			scoresData[i] *= invScale
+		}
 		mask := g.CausalMask(seqLen)
-		scores = g.MaskFill(scores, mask, -1e9)
+		for h := 0; h < numHeads; h++ {
+			offset := h * seqLen * seqLen
+			for i, m := range mask {
+				if m {
+					scoresData[offset+i] = -1e9
+				}
+			}
+			softmaxInPlace(scoresData[offset:offset+seqLen*seqLen], seqLen)
+		}
 
-		// Softmax over last dim
-		attnWeights := g.Softmax(scores) // (seq, seq)
+		// Batched attn @ V → (numHeads, seq, headDim)
+		attnOut := g.BatchedMatMul(scores, vHeads, numHeads, seqLen, headDim, seqLen)
+		concat = reshapeFromHeads(attnOut, seqLen, numHeads, headDim)
 
-		// Weighted values: (seq, seq) @ (seq, headDim) = (seq, headDim)
-		headOut := g.MatMul(attnWeights, vh)
-		headOutputs[h] = headOut
+	} else {
+		// === Per-head loop: supports autograd for training ===
+		headOutputs := make([]*g.Tensor, numHeads)
+		for h := 0; h < numHeads; h++ {
+			qh := extractHead(q, seqLen, dim, h, headDim)
+			kh := extractHead(k, seqLen, dim, h, headDim)
+			vh := extractHead(v, seqLen, dim, h, headDim)
+
+			kT := g.Transpose2D(kh)
+			scores := g.ScaledMatMul(qh, kT, float32(headDim))
+			mask := g.CausalMask(seqLen)
+			scores = g.MaskFill(scores, mask, -1e9)
+			attnWeights := g.Softmax(scores)
+			headOutputs[h] = g.MatMul(attnWeights, vh)
+		}
+		concat = concatHeadsLoop(headOutputs, seqLen, numHeads, headDim)
 	}
 
-	// Concatenate heads: (seq, numHeads*headDim) = (seq, dim)
-	concat := concatHeads(headOutputs, seqLen, numHeads, headDim)
-
-	// Output projection
 	return mha.Wo.Forward(concat)
 }
 
 // extractHead extracts one attention head's columns from a (seq, dim) tensor.
-// Returns (seq, headDim). Keeps data on Metal if input is on Metal.
 func extractHead(x *g.Tensor, seq, dim, headIdx, headDim int) *g.Tensor {
 	out := g.Zeros(seq, headDim)
 	xData := x.Data()
@@ -110,13 +135,11 @@ func extractHead(x *g.Tensor, seq, dim, headIdx, headDim int) *g.Tensor {
 	return out
 }
 
-// concatHeads concatenates head outputs back into (seq, dim).
-// Keeps data on Metal if any head is on Metal.
-func concatHeads(heads []*g.Tensor, seq, numHeads, headDim int) *g.Tensor {
+// concatHeadsLoop concatenates head outputs back into (seq, dim) with autograd.
+func concatHeadsLoop(heads []*g.Tensor, seq, numHeads, headDim int) *g.Tensor {
 	dim := numHeads * headDim
 	out := g.Zeros(seq, dim)
 	outData := out.Data()
-
 	for h, head := range heads {
 		hData := head.Data()
 		offset := h * headDim
@@ -124,14 +147,9 @@ func concatHeads(heads []*g.Tensor, seq, numHeads, headDim int) *g.Tensor {
 			copy(outData[i*dim+offset:i*dim+offset+headDim], hData[i*headDim:(i+1)*headDim])
 		}
 	}
-
-	// Autograd: scatter gradients back to each head
 	anyGrad := false
 	for _, h := range heads {
-		if h.RequiresGrad() {
-			anyGrad = true
-			break
-		}
+		if h.RequiresGrad() { anyGrad = true; break }
 	}
 	if anyGrad {
 		out.SetRequiresGrad(true)
@@ -153,6 +171,94 @@ func concatHeads(heads []*g.Tensor, seq, numHeads, headDim int) *g.Tensor {
 		})
 	}
 	return out
+}
+
+// reshapeToHeads rearranges (seq, dim) → packed (numHeads, seq, headDim).
+// Input layout: row i has [head0_0..head0_hd, head1_0..head1_hd, ...]
+// Output layout: [head0_row0, head0_row1, ..., head1_row0, head1_row1, ...]
+func reshapeToHeads(x *g.Tensor, seq, numHeads, headDim int) *g.Tensor {
+	dim := numHeads * headDim
+	xData := x.Data()
+	outData := make([]float32, numHeads*seq*headDim)
+
+	for h := 0; h < numHeads; h++ {
+		for s := 0; s < seq; s++ {
+			srcOff := s*dim + h*headDim
+			dstOff := h*seq*headDim + s*headDim
+			copy(outData[dstOff:dstOff+headDim], xData[srcOff:srcOff+headDim])
+		}
+	}
+
+	out := g.NewTensor(outData, numHeads*seq, headDim)
+
+	// If input is on Metal, move output to Metal for batched MPS
+	if x.IsOnMetal() {
+		if dev := g.MetalDev(); dev != nil {
+			out.ToMetal(dev)
+		}
+	}
+
+	if x.RequiresGrad() {
+		out.SetRequiresGrad(true)
+		out.SetGradFn("ReshapeToHeads", []*g.Tensor{x}, func(grad *g.Tensor) []*g.Tensor {
+			return []*g.Tensor{reshapeFromHeads(grad, seq, numHeads, headDim)}
+		})
+	}
+	return out
+}
+
+// reshapeFromHeads rearranges packed (numHeads, seq, headDim) → (seq, dim).
+func reshapeFromHeads(x *g.Tensor, seq, numHeads, headDim int) *g.Tensor {
+	dim := numHeads * headDim
+	xData := x.Data()
+	outData := make([]float32, seq*dim)
+
+	for h := 0; h < numHeads; h++ {
+		for s := 0; s < seq; s++ {
+			srcOff := h*seq*headDim + s*headDim
+			dstOff := s*dim + h*headDim
+			copy(outData[dstOff:dstOff+headDim], xData[srcOff:srcOff+headDim])
+		}
+	}
+
+	out := g.NewTensor(outData, seq, dim)
+
+	if x.RequiresGrad() {
+		out.SetRequiresGrad(true)
+		out.SetGradFn("ReshapeFromHeads", []*g.Tensor{x}, func(grad *g.Tensor) []*g.Tensor {
+			return []*g.Tensor{reshapeToHeads(grad, seq, numHeads, headDim)}
+		})
+	}
+	return out
+}
+
+// softmaxInPlace applies softmax to a (rows, cols) block in-place.
+func softmaxInPlace(data []float32, cols int) {
+	rows := len(data) / cols
+	for i := 0; i < rows; i++ {
+		row := data[i*cols : (i+1)*cols]
+
+		// Numerical stability: subtract max
+		maxVal := row[0]
+		for _, v := range row[1:] {
+			if v > maxVal {
+				maxVal = v
+			}
+		}
+
+		var sum float32
+		for j := range row {
+			row[j] = float32(exp64(float64(row[j] - maxVal)))
+			sum += row[j]
+		}
+		for j := range row {
+			row[j] /= sum
+		}
+	}
+}
+
+func exp64(x float64) float64 {
+	return math.Exp(x)
 }
 
 func (mha *MultiHeadAttention) Parameters() []*g.Tensor {

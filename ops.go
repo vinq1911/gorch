@@ -532,6 +532,50 @@ func MatMulTransB(a, b *Tensor) *Tensor {
 	return out
 }
 
+// BatchedMatMul computes out[i] = a[i] @ b[i] for i in 0..batchSize-1.
+// a: (batchSize, M, K), b: (batchSize, K, N), out: (batchSize, M, N).
+// Dispatches to MPS batched matmul on GPU, Accelerate BLAS loop on CPU.
+func BatchedMatMul(a, b *Tensor, batchSize, M, N, K int) *Tensor {
+	out := Zeros(batchSize, M, N)
+
+	if a.buf != nil && b.buf != nil && gpu != nil {
+		outBuf := gpu.Dev.NewBuffer(batchSize * M * N * 4)
+		gpu.Queue.BatchedMatMul(a.buf, b.buf, outBuf, M, N, K, batchSize)
+		out.data = outBuf.FloatSlice()
+		out.buf = outBuf
+	} else {
+		// CPU: loop over batch
+		for i := 0; i < batchSize; i++ {
+			aOff := i * M * K
+			bOff := i * K * N
+			cOff := i * M * N
+			accelerate.Sgemm(M, N, K, 1.0, a.data[aOff:aOff+M*K], b.data[bOff:bOff+K*N], 0.0, out.data[cOff:cOff+M*N])
+		}
+	}
+	return out
+}
+
+// BatchedMatMulTransB computes out[i] = a[i] @ b[i]^T for i in 0..batchSize-1.
+// a: (batchSize, M, K), b: (batchSize, N, K), out: (batchSize, M, N).
+func BatchedMatMulTransB(a, b *Tensor, batchSize, M, N, K int) *Tensor {
+	out := Zeros(batchSize, M, N)
+
+	if a.buf != nil && b.buf != nil && gpu != nil {
+		outBuf := gpu.Dev.NewBuffer(batchSize * M * N * 4)
+		gpu.Queue.BatchedMatMulTransB(a.buf, b.buf, outBuf, M, N, K, batchSize)
+		out.data = outBuf.FloatSlice()
+		out.buf = outBuf
+	} else {
+		for i := 0; i < batchSize; i++ {
+			aOff := i * M * K
+			bOff := i * N * K
+			cOff := i * M * N
+			accelerate.SgemmTransB(M, N, K, 1.0, a.data[aOff:aOff+M*K], b.data[bOff:bOff+N*K], 0.0, out.data[cOff:cOff+M*N])
+		}
+	}
+	return out
+}
+
 // ---------- dispatch helpers ----------
 
 // Accelerate-backed CPU dispatch function type.

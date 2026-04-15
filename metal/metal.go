@@ -121,6 +121,21 @@ func (q *CommandQueue) MatMulTransA(a, b, c *Buffer, M, N, K int) {
 		C.uint32_t(M), C.uint32_t(N), C.uint32_t(K))
 }
 
+// BatchedMatMul computes C[i] = A[i] @ B[i] for i in 0..batchSize-1 using MPS.
+// All matrices packed contiguously. Single GPU command buffer submission.
+// A: (batchSize*M*K), B: (batchSize*K*N), C: (batchSize*M*N).
+func (q *CommandQueue) BatchedMatMul(a, b, c *Buffer, M, N, K, batchSize int) {
+	C.metal_mps_batched_matmul(q.ptr, a.ptr, b.ptr, c.ptr,
+		C.uint32_t(M), C.uint32_t(N), C.uint32_t(K), C.uint32_t(batchSize))
+}
+
+// BatchedMatMulTransB computes C[i] = A[i] @ B[i]^T for i in 0..batchSize-1.
+// A: (batchSize*M*K), B: (batchSize*N*K), C: (batchSize*M*N).
+func (q *CommandQueue) BatchedMatMulTransB(a, b, c *Buffer, M, N, K, batchSize int) {
+	C.metal_mps_batched_matmul_transB(q.ptr, a.ptr, b.ptr, c.ptr,
+		C.uint32_t(M), C.uint32_t(N), C.uint32_t(K), C.uint32_t(batchSize))
+}
+
 // Release frees a device.
 func (d *Device) Release() {
 	C.metal_release(unsafe.Pointer(d.ptr))

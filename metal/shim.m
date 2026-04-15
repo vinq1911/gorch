@@ -167,6 +167,123 @@ void metal_mps_matmul(MTLCommandQueueRef queue,
 }
 
 // ---------------------------------------------------------------------------
+// Batched MPS matrix multiply: C[i] = A[i] @ B[i]
+// All matrices packed contiguously. Single command buffer, one commit.
+// ---------------------------------------------------------------------------
+
+void metal_mps_batched_matmul(MTLCommandQueueRef queue,
+                              MTLBufferRef A, MTLBufferRef B, MTLBufferRef C,
+                              uint32_t M, uint32_t N, uint32_t K,
+                              uint32_t batchSize) {
+    @autoreleasepool {
+        id<MTLCommandQueue> q = (__bridge id<MTLCommandQueue>)queue;
+        id<MTLDevice> dev = q.device;
+        id<MTLCommandBuffer> cmdBuf = [q commandBuffer];
+
+        uint32_t aStride = M * K;
+        uint32_t bStride = K * N;
+        uint32_t cStride = M * N;
+
+        for (uint32_t i = 0; i < batchSize; i++) {
+            MPSMatrixDescriptor* descA = [MPSMatrixDescriptor
+                matrixDescriptorWithRows:M columns:K
+                rowBytes:K * sizeof(float) dataType:MPSDataTypeFloat32];
+            MPSMatrixDescriptor* descB = [MPSMatrixDescriptor
+                matrixDescriptorWithRows:K columns:N
+                rowBytes:N * sizeof(float) dataType:MPSDataTypeFloat32];
+            MPSMatrixDescriptor* descC = [MPSMatrixDescriptor
+                matrixDescriptorWithRows:M columns:N
+                rowBytes:N * sizeof(float) dataType:MPSDataTypeFloat32];
+
+            MPSMatrix* matA = [[MPSMatrix alloc] initWithBuffer:(__bridge id<MTLBuffer>)A
+                                                         offset:i * aStride * sizeof(float)
+                                                     descriptor:descA];
+            MPSMatrix* matB = [[MPSMatrix alloc] initWithBuffer:(__bridge id<MTLBuffer>)B
+                                                         offset:i * bStride * sizeof(float)
+                                                     descriptor:descB];
+            MPSMatrix* matC = [[MPSMatrix alloc] initWithBuffer:(__bridge id<MTLBuffer>)C
+                                                         offset:i * cStride * sizeof(float)
+                                                     descriptor:descC];
+
+            MPSMatrixMultiplication* mul = [[MPSMatrixMultiplication alloc]
+                initWithDevice:dev resultRows:M resultColumns:N interiorColumns:K];
+
+            [mul encodeToCommandBuffer:cmdBuf leftMatrix:matA rightMatrix:matB resultMatrix:matC];
+        }
+
+        [cmdBuf commit];
+        [cmdBuf waitUntilCompleted];
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Batched MPS: C[i] = A[i] @ B[i]^T
+// A is (batch*M*K), B is (batch*N*K), C is (batch*M*N)
+// ---------------------------------------------------------------------------
+
+void metal_mps_batched_matmul_transB(MTLCommandQueueRef queue,
+                                     MTLBufferRef A, MTLBufferRef B, MTLBufferRef C,
+                                     uint32_t M, uint32_t N, uint32_t K,
+                                     uint32_t batchSize) {
+    @autoreleasepool {
+        id<MTLCommandQueue> q = (__bridge id<MTLCommandQueue>)queue;
+        id<MTLDevice> dev = q.device;
+
+        // Transpose all B[i] into a temp buffer, then do batched matmul
+        uint32_t bSrcStride = N * K;
+        uint32_t bDstStride = K * N;
+        uint32_t totalBT = batchSize * K * N;
+        id<MTLBuffer> btBuf = [dev newBufferWithLength:totalBT * sizeof(float)
+                                               options:MTLResourceStorageModeShared];
+        float* bData = (float*)[(__bridge id<MTLBuffer>)B contents];
+        float* btData = (float*)[btBuf contents];
+
+        for (uint32_t batch = 0; batch < batchSize; batch++) {
+            for (uint32_t i = 0; i < N; i++) {
+                for (uint32_t j = 0; j < K; j++) {
+                    btData[batch * bDstStride + j * N + i] = bData[batch * bSrcStride + i * K + j];
+                }
+            }
+        }
+
+        id<MTLCommandBuffer> cmdBuf = [q commandBuffer];
+
+        uint32_t aStride = M * K;
+        uint32_t cStride = M * N;
+
+        for (uint32_t i = 0; i < batchSize; i++) {
+            MPSMatrixDescriptor* descA = [MPSMatrixDescriptor
+                matrixDescriptorWithRows:M columns:K
+                rowBytes:K * sizeof(float) dataType:MPSDataTypeFloat32];
+            MPSMatrixDescriptor* descBT = [MPSMatrixDescriptor
+                matrixDescriptorWithRows:K columns:N
+                rowBytes:N * sizeof(float) dataType:MPSDataTypeFloat32];
+            MPSMatrixDescriptor* descC = [MPSMatrixDescriptor
+                matrixDescriptorWithRows:M columns:N
+                rowBytes:N * sizeof(float) dataType:MPSDataTypeFloat32];
+
+            MPSMatrix* matA = [[MPSMatrix alloc] initWithBuffer:(__bridge id<MTLBuffer>)A
+                                                         offset:i * aStride * sizeof(float)
+                                                     descriptor:descA];
+            MPSMatrix* matBT = [[MPSMatrix alloc] initWithBuffer:btBuf
+                                                          offset:i * bDstStride * sizeof(float)
+                                                      descriptor:descBT];
+            MPSMatrix* matC = [[MPSMatrix alloc] initWithBuffer:(__bridge id<MTLBuffer>)C
+                                                         offset:i * cStride * sizeof(float)
+                                                     descriptor:descC];
+
+            MPSMatrixMultiplication* mul = [[MPSMatrixMultiplication alloc]
+                initWithDevice:dev resultRows:M resultColumns:N interiorColumns:K];
+
+            [mul encodeToCommandBuffer:cmdBuf leftMatrix:matA rightMatrix:matBT resultMatrix:matC];
+        }
+
+        [cmdBuf commit];
+        [cmdBuf waitUntilCompleted];
+    }
+}
+
+// ---------------------------------------------------------------------------
 // MPS matrix multiply: C = A @ B^T
 // A is MxK, B is NxK (stored row-major), C is MxN.
 // We describe B as having rows=K, columns=N but with rowBytes=N*sizeof(float)
