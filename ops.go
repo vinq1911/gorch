@@ -502,6 +502,35 @@ func MatMul(a, b *Tensor) *Tensor {
 	return out
 }
 
+// MatMulTransB computes a @ b^T.
+// a is (M, K), b is (N, K), result is (M, N).
+func MatMulTransB(a, b *Tensor) *Tensor {
+	if a.Dim() != 2 || b.Dim() != 2 {
+		panic("gorch: MatMulTransB requires 2-D tensors")
+	}
+	M, K := a.shape[0], a.shape[1]
+	N, K2 := b.shape[0], b.shape[1]
+	if K != K2 {
+		panic(fmt.Sprintf("gorch: MatMulTransB shape mismatch: (%d,%d) @ (%d,%d)^T", M, K, N, K2))
+	}
+
+	out := Zeros(M, N)
+
+	if a.buf != nil && b.buf != nil && gpu != nil {
+		// GPU path: MPS matmul with transB
+		outBuf := gpu.Dev.NewBuffer(M * N * 4)
+		gpu.Queue.MatMulTransB(a.buf, b.buf, outBuf, M, N, K)
+		out.data = outBuf.FloatSlice()
+		out.buf = outBuf
+	} else {
+		// CPU path: Accelerate BLAS
+		accelerate.SgemmTransB(M, N, K, 1.0, a.data, b.data, 0.0, out.data)
+	}
+
+	// No autograd for now — used in inference-only Linear forward
+	return out
+}
+
 // ---------- dispatch helpers ----------
 
 // Accelerate-backed CPU dispatch function type.

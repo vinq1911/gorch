@@ -8,6 +8,7 @@ import (
 
 	g "github.com/vinq1911/gorch"
 	"github.com/vinq1911/gorch/accelerate"
+	"github.com/vinq1911/gorch/metal"
 )
 
 // Module is a neural network layer or model.
@@ -23,10 +24,11 @@ type Module interface {
 // Linear implements a fully connected layer: y = x @ W^T + b.
 // Input shape: (batch, inFeatures), output shape: (batch, outFeatures).
 type Linear struct {
-	Weight *g.Tensor // shape: (outFeatures, inFeatures)
-	Bias   *g.Tensor // shape: (1, outFeatures)
-	in     int
-	out    int
+	Weight  *g.Tensor // shape: (outFeatures, inFeatures)
+	Bias    *g.Tensor // shape: (1, outFeatures)
+	in      int
+	out     int
+	onMetal bool
 }
 
 // NewLinear creates a Linear layer with Kaiming uniform initialization.
@@ -49,19 +51,31 @@ func NewLinear(inFeatures, outFeatures int) *Linear {
 func (l *Linear) Forward(x *g.Tensor) *g.Tensor {
 	batch := x.Shape()[0]
 
-	// out = x @ W^T via BLAS: SgemmTransB
-	// x is (batch, in), W is (out, in), W^T is (in, out), result is (batch, out)
-	outData := make([]float32, batch*l.out)
-	accelerate.SgemmTransB(batch, l.out, l.in, 1.0, x.Data(), l.Weight.Data(), 0.0, outData)
+	var out *g.Tensor
 
-	// Add bias using Accelerate vDSP
-	bData := l.Bias.Data()
-	for i := 0; i < batch; i++ {
-		row := outData[i*l.out : (i+1)*l.out]
-		accelerate.VAdd(row, bData, row)
+	if l.onMetal && x.MetalBuffer() != nil && l.Weight.MetalBuffer() != nil {
+		// GPU path: x @ W^T via MPS MatMulTransB
+		// x is (batch, in), W is (out, in), result is (batch, out)
+		out = g.MatMulTransB(x, l.Weight)
+		// Add bias — data is in unified memory, so CPU loop works on Metal buffer data
+		bData := l.Bias.Data()
+		outData := out.Data()
+		for i := 0; i < batch; i++ {
+			for j := 0; j < l.out; j++ {
+				outData[i*l.out+j] += bData[j]
+			}
+		}
+	} else {
+		// CPU path: Accelerate BLAS
+		outData := make([]float32, batch*l.out)
+		accelerate.SgemmTransB(batch, l.out, l.in, 1.0, x.Data(), l.Weight.Data(), 0.0, outData)
+		bData := l.Bias.Data()
+		for i := 0; i < batch; i++ {
+			row := outData[i*l.out : (i+1)*l.out]
+			accelerate.VAdd(row, bData, row)
+		}
+		out = g.NewTensor(outData, batch, l.out)
 	}
-
-	out := g.NewTensor(outData, batch, l.out)
 
 	// Autograd
 	if x.RequiresGrad() || l.Weight.RequiresGrad() || l.Bias.RequiresGrad() {
@@ -106,6 +120,20 @@ func (l *Linear) Forward(x *g.Tensor) *g.Tensor {
 
 func (l *Linear) Parameters() []*g.Tensor {
 	return []*g.Tensor{l.Weight, l.Bias}
+}
+
+// ToMetal moves the Linear layer's weights to Metal GPU.
+func (l *Linear) ToMetal(dev *metal.Device) {
+	l.Weight.ToMetal(dev)
+	l.Bias.ToMetal(dev)
+	l.onMetal = true
+}
+
+// ToCPU moves the Linear layer back to CPU.
+func (l *Linear) ToCPU() {
+	l.Weight.ToCPU()
+	l.Bias.ToCPU()
+	l.onMetal = false
 }
 
 // ---------- Activations as modules ----------

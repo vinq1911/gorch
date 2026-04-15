@@ -4,6 +4,7 @@ package nn
 
 import (
 	g "github.com/vinq1911/gorch"
+	"github.com/vinq1911/gorch/metal"
 )
 
 // GPT is a decoder-only transformer language model.
@@ -98,4 +99,40 @@ func (gpt *GPT) CountParameters() int {
 		total += p.Size()
 	}
 	return total
+}
+
+// ToMetal moves all model weights to Metal GPU.
+func (gpt *GPT) ToMetal(dev *metal.Device) {
+	gpt.TokenEmbed.Weight.ToMetal(dev)
+	gpt.PosEmbed.Weight.ToMetal(dev)
+
+	for _, block := range gpt.Blocks {
+		block.Attn.Wq.ToMetal(dev)
+		block.Attn.Wk.ToMetal(dev)
+		block.Attn.Wv.ToMetal(dev)
+		block.Attn.Wo.ToMetal(dev)
+		block.FFN1.ToMetal(dev)
+		block.FFN2.ToMetal(dev)
+		// LayerNorm weights stay on CPU — they're small and
+		// operate element-wise on unified memory anyway
+	}
+
+	gpt.LMHead.ToMetal(dev)
+}
+
+// ToCPU moves all model weights back to CPU.
+func (gpt *GPT) ToCPU() {
+	gpt.TokenEmbed.Weight.ToCPU()
+	gpt.PosEmbed.Weight.ToCPU()
+
+	for _, block := range gpt.Blocks {
+		block.Attn.Wq.ToCPU()
+		block.Attn.Wk.ToCPU()
+		block.Attn.Wv.ToCPU()
+		block.Attn.Wo.ToCPU()
+		block.FFN1.ToCPU()
+		block.FFN2.ToCPU()
+	}
+
+	gpt.LMHead.ToCPU()
 }

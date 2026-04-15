@@ -45,6 +45,18 @@ void metal_mps_matmul(MTLCommandQueueRef queue,
                       MTLBufferRef A, MTLBufferRef B, MTLBufferRef C,
                       uint32_t M, uint32_t N, uint32_t K);
 
+// MPS matrix multiply with transpose: C = A @ B^T.
+// A is MxK, B is NxK (stored row-major), C is MxN.
+void metal_mps_matmul_transB(MTLCommandQueueRef queue,
+                             MTLBufferRef A, MTLBufferRef B, MTLBufferRef C,
+                             uint32_t M, uint32_t N, uint32_t K);
+
+// MPS matrix multiply with transpose: C = A^T @ B.
+// A is KxM (stored row-major), B is KxN, C is MxN.
+void metal_mps_matmul_transA(MTLCommandQueueRef queue,
+                             MTLBufferRef A, MTLBufferRef B, MTLBufferRef C,
+                             uint32_t M, uint32_t N, uint32_t K);
+
 // Release a device or command queue.
 void metal_release(void* obj);
 

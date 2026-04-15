@@ -107,6 +107,20 @@ func (q *CommandQueue) MatMul(a, b, c *Buffer, M, N, K int) {
 		C.uint32_t(M), C.uint32_t(N), C.uint32_t(K))
 }
 
+// MatMulTransB computes C = A @ B^T using MPS.
+// A is MxK, B is NxK (row-major), C is MxN.
+func (q *CommandQueue) MatMulTransB(a, b, c *Buffer, M, N, K int) {
+	C.metal_mps_matmul_transB(q.ptr, a.ptr, b.ptr, c.ptr,
+		C.uint32_t(M), C.uint32_t(N), C.uint32_t(K))
+}
+
+// MatMulTransA computes C = A^T @ B using MPS.
+// A is KxM (row-major), B is KxN, C is MxN.
+func (q *CommandQueue) MatMulTransA(a, b, c *Buffer, M, N, K int) {
+	C.metal_mps_matmul_transA(q.ptr, a.ptr, b.ptr, c.ptr,
+		C.uint32_t(M), C.uint32_t(N), C.uint32_t(K))
+}
+
 // Release frees a device.
 func (d *Device) Release() {
 	C.metal_release(unsafe.Pointer(d.ptr))

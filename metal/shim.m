@@ -167,6 +167,120 @@ void metal_mps_matmul(MTLCommandQueueRef queue,
 }
 
 // ---------------------------------------------------------------------------
+// MPS matrix multiply: C = A @ B^T
+// A is MxK, B is NxK (stored row-major), C is MxN.
+// We describe B as having rows=K, columns=N but with rowBytes=N*sizeof(float)
+// so MPS reads it transposed. Actually we use the alpha/interiorColumns trick:
+// A(MxK) @ B^T(KxN) = treating B(NxK) as if B^T is (K,N).
+// MPS reads B row-major, so we need B^T contiguous.
+// Simplest correct approach: describe B as (N,K) and swap interpretation.
+// ---------------------------------------------------------------------------
+
+void metal_mps_matmul_transB(MTLCommandQueueRef queue,
+                             MTLBufferRef A, MTLBufferRef B, MTLBufferRef C,
+                             uint32_t M, uint32_t N, uint32_t K) {
+    @autoreleasepool {
+        id<MTLCommandQueue> q = (__bridge id<MTLCommandQueue>)queue;
+        id<MTLDevice> dev = q.device;
+
+        // A is (M, K) row-major
+        MPSMatrixDescriptor* descA = [MPSMatrixDescriptor
+            matrixDescriptorWithRows:M columns:K
+            rowBytes:K * sizeof(float) dataType:MPSDataTypeFloat32];
+
+        // B is stored as (N, K) row-major. We want B^T = (K, N).
+        // Trick: describe B as having K rows and N columns, but with
+        // rowBytes = K * sizeof(float) (the original row stride of NxK matrix).
+        // This makes MPS read column-by-column through B's original rows.
+        // Actually this doesn't work directly — MPS rowBytes must be >= columns*sizeof.
+
+        // Correct approach: we need to actually transpose into a temp buffer.
+        // On unified memory this is still fast.
+        uint32_t btSize = K * N * sizeof(float);
+        id<MTLBuffer> btBuf = [dev newBufferWithLength:btSize
+                                               options:MTLResourceStorageModeShared];
+        float* bData = (float*)[(__bridge id<MTLBuffer>)B contents];
+        float* btData = (float*)[btBuf contents];
+        for (uint32_t i = 0; i < N; i++) {
+            for (uint32_t j = 0; j < K; j++) {
+                btData[j * N + i] = bData[i * K + j];
+            }
+        }
+
+        MPSMatrixDescriptor* descBT = [MPSMatrixDescriptor
+            matrixDescriptorWithRows:K columns:N
+            rowBytes:N * sizeof(float) dataType:MPSDataTypeFloat32];
+        MPSMatrixDescriptor* descC = [MPSMatrixDescriptor
+            matrixDescriptorWithRows:M columns:N
+            rowBytes:N * sizeof(float) dataType:MPSDataTypeFloat32];
+
+        MPSMatrix* matA = [[MPSMatrix alloc] initWithBuffer:(__bridge id<MTLBuffer>)A
+                                                 descriptor:descA];
+        MPSMatrix* matBT = [[MPSMatrix alloc] initWithBuffer:btBuf descriptor:descBT];
+        MPSMatrix* matC = [[MPSMatrix alloc] initWithBuffer:(__bridge id<MTLBuffer>)C
+                                                 descriptor:descC];
+
+        MPSMatrixMultiplication* mul = [[MPSMatrixMultiplication alloc]
+            initWithDevice:dev resultRows:M resultColumns:N interiorColumns:K];
+
+        id<MTLCommandBuffer> cmdBuf = [q commandBuffer];
+        [mul encodeToCommandBuffer:cmdBuf leftMatrix:matA rightMatrix:matBT resultMatrix:matC];
+        [cmdBuf commit];
+        [cmdBuf waitUntilCompleted];
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MPS matrix multiply: C = A^T @ B
+// A is KxM (stored row-major), B is KxN, C is MxN.
+// ---------------------------------------------------------------------------
+
+void metal_mps_matmul_transA(MTLCommandQueueRef queue,
+                             MTLBufferRef A, MTLBufferRef B, MTLBufferRef C,
+                             uint32_t M, uint32_t N, uint32_t K) {
+    @autoreleasepool {
+        id<MTLCommandQueue> q = (__bridge id<MTLCommandQueue>)queue;
+        id<MTLDevice> dev = q.device;
+
+        // A is stored as (K, M) row-major. We want A^T = (M, K).
+        uint32_t atSize = M * K * sizeof(float);
+        id<MTLBuffer> atBuf = [dev newBufferWithLength:atSize
+                                               options:MTLResourceStorageModeShared];
+        float* aData = (float*)[(__bridge id<MTLBuffer>)A contents];
+        float* atData = (float*)[atBuf contents];
+        for (uint32_t i = 0; i < K; i++) {
+            for (uint32_t j = 0; j < M; j++) {
+                atData[j * K + i] = aData[i * M + j];
+            }
+        }
+
+        MPSMatrixDescriptor* descAT = [MPSMatrixDescriptor
+            matrixDescriptorWithRows:M columns:K
+            rowBytes:K * sizeof(float) dataType:MPSDataTypeFloat32];
+        MPSMatrixDescriptor* descB = [MPSMatrixDescriptor
+            matrixDescriptorWithRows:K columns:N
+            rowBytes:N * sizeof(float) dataType:MPSDataTypeFloat32];
+        MPSMatrixDescriptor* descC = [MPSMatrixDescriptor
+            matrixDescriptorWithRows:M columns:N
+            rowBytes:N * sizeof(float) dataType:MPSDataTypeFloat32];
+
+        MPSMatrix* matAT = [[MPSMatrix alloc] initWithBuffer:atBuf descriptor:descAT];
+        MPSMatrix* matB = [[MPSMatrix alloc] initWithBuffer:(__bridge id<MTLBuffer>)B
+                                                 descriptor:descB];
+        MPSMatrix* matC = [[MPSMatrix alloc] initWithBuffer:(__bridge id<MTLBuffer>)C
+                                                 descriptor:descC];
+
+        MPSMatrixMultiplication* mul = [[MPSMatrixMultiplication alloc]
+            initWithDevice:dev resultRows:M resultColumns:N interiorColumns:K];
+
+        id<MTLCommandBuffer> cmdBuf = [q commandBuffer];
+        [mul encodeToCommandBuffer:cmdBuf leftMatrix:matAT rightMatrix:matB resultMatrix:matC];
+        [cmdBuf commit];
+        [cmdBuf waitUntilCompleted];
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Generic release / string free
 // ---------------------------------------------------------------------------
 
