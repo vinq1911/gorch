@@ -1,0 +1,124 @@
+{
+  "hardware": "Apple M4",
+  "matmul_results": [
+    {
+      "size": 256,
+      "label": "256x256",
+      "cpu_time_us": 38.45,
+      "gpu_time_us": 431.75,
+      "speedup": 0.08905616676317314,
+      "cpu_gflops": 872.6770351105332,
+      "gpu_gflops": 77.71727156919513
+    },
+    {
+      "size": 512,
+      "label": "512x512",
+      "cpu_time_us": 160.3,
+      "gpu_time_us": 790.65,
+      "speedup": 0.2027445772465693,
+      "cpu_gflops": 1674.5817592014973,
+      "gpu_gflops": 339.51237083412383
+    },
+    {
+      "size": 768,
+      "label": "768x768",
+      "cpu_time_us": 580.55,
+      "gpu_time_us": 1281.45,
+      "speedup": 0.4530414764524561,
+      "cpu_gflops": 1560.536842649212,
+      "gpu_gflops": 706.9879152522533
+    },
+    {
+      "size": 1024,
+      "label": "1024x1024",
+      "cpu_time_us": 1351.25,
+      "gpu_time_us": 1103.6,
+      "speedup": 1.2244019572308809,
+      "cpu_gflops": 1589.2570938020351,
+      "gpu_gflops": 1945.8894961942735
+    },
+    {
+      "size": 1536,
+      "label": "1536x1536",
+      "cpu_time_us": 4653.3,
+      "gpu_time_us": 2410.15,
+      "speedup": 1.9307097068647179,
+      "cpu_gflops": 1557.5521268776997,
+      "gpu_gflops": 3007.181010310562
+    },
+    {
+      "size": 2048,
+      "label": "2048x2048",
+      "cpu_time_us": 11035.65,
+      "gpu_time_us": 5242.75,
+      "speedup": 2.1049353869629486,
+      "cpu_gflops": 1556.760968678782,
+      "gpu_gflops": 3276.881252014687
+    },
+    {
+      "size": 3072,
+      "label": "3072x3072",
+      "cpu_time_us": 43909.95,
+      "gpu_time_us": 18180.9,
+      "speedup": 2.41516921604541,
+      "cpu_gflops": 1320.4765319933183,
+      "gpu_gflops": 3189.1742705806646
+    },
+    {
+      "size": 4096,
+      "label": "4096x4096",
+      "cpu_time_us": 99225.9,
+      "gpu_time_us": 44527.65,
+      "speedup": 2.2284108862695424,
+      "cpu_gflops": 1385.111684267918,
+      "gpu_gflops": 3086.59795592177
+    }
+  ],
+  "transformer_results": [
+    {
+      "name": "GPT-2 Small dim (768, 2L, seq=32)",
+      "dim": 768,
+      "layers": 2,
+      "seq_len": 32,
+      "cpu_time_ms": 5.333333333333333,
+      "gpu_time_ms": 6,
+      "speedup": 0.8888888888888888
+    },
+    {
+      "name": "GPT-2 Medium dim (1024, 2L, seq=32)",
+      "dim": 1024,
+      "layers": 2,
+      "seq_len": 32,
+      "cpu_time_ms": 7.666666666666667,
+      "gpu_time_ms": 8.666666666666666,
+      "speedup": 0.8846153846153847
+    },
+    {
+      "name": "Large dim (2048, 2L, seq=32)",
+      "dim": 2048,
+      "layers": 2,
+      "seq_len": 32,
+      "cpu_time_ms": 23.333333333333332,
+      "gpu_time_ms": 24.666666666666668,
+      "speedup": 0.9459459459459458
+    },
+    {
+      "name": "Large dim (2048, 4L, seq=64)",
+      "dim": 2048,
+      "layers": 4,
+      "seq_len": 64,
+      "cpu_time_ms": 75.66666666666667,
+      "gpu_time_ms": 86,
+      "speedup": 0.8798449612403101
+    },
+    {
+      "name": "XL dim (4096, 2L, seq=32)",
+      "dim": 4096,
+      "layers": 2,
+      "seq_len": 32,
+      "cpu_time_ms": 85,
+      "gpu_time_ms": 127.66666666666667,
+      "speedup": 0.6657963446475196
+    }
+  ]
+}
