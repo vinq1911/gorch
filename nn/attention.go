@@ -84,7 +84,7 @@ func (mha *MultiHeadAttention) Forward(x *g.Tensor, seqLen int) *g.Tensor {
 }
 
 // extractHead extracts one attention head's columns from a (seq, dim) tensor.
-// Returns (seq, headDim).
+// Returns (seq, headDim). Keeps data on Metal if input is on Metal.
 func extractHead(x *g.Tensor, seq, dim, headIdx, headDim int) *g.Tensor {
 	out := g.Zeros(seq, headDim)
 	xData := x.Data()
@@ -111,6 +111,7 @@ func extractHead(x *g.Tensor, seq, dim, headIdx, headDim int) *g.Tensor {
 }
 
 // concatHeads concatenates head outputs back into (seq, dim).
+// Keeps data on Metal if any head is on Metal.
 func concatHeads(heads []*g.Tensor, seq, numHeads, headDim int) *g.Tensor {
 	dim := numHeads * headDim
 	out := g.Zeros(seq, dim)

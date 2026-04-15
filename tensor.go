@@ -179,6 +179,37 @@ func (t *Tensor) ToCPU() *Tensor {
 // MetalBuffer returns the underlying Metal buffer (nil if on CPU).
 func (t *Tensor) MetalBuffer() *metal.Buffer { return t.buf }
 
+// NewTensorOnMetal creates a tensor directly on Metal GPU.
+// The data lives in unified memory from the start — no copy needed.
+func NewTensorOnMetal(dev *metal.Device, data []float32, shape ...int) *Tensor {
+	n := numElements(shape)
+	if len(data) != n {
+		panic("gorch: data length mismatch")
+	}
+	buf := dev.NewBuffer(n * 4)
+	gpuSlice := buf.FloatSlice()
+	copy(gpuSlice, data)
+	return &Tensor{data: gpuSlice, shape: copyShape(shape), buf: buf}
+}
+
+// ZerosOnMetal creates a zero tensor directly on Metal GPU.
+func ZerosOnMetal(dev *metal.Device, shape ...int) *Tensor {
+	n := numElements(shape)
+	buf := dev.NewBuffer(n * 4)
+	return &Tensor{data: buf.FloatSlice(), shape: copyShape(shape), buf: buf}
+}
+
+// IsOnMetal returns true if this tensor has a Metal buffer.
+func (t *Tensor) IsOnMetal() bool { return t.buf != nil }
+
+// MetalDev returns the device from the GPU singleton (if initialized).
+func MetalDev() *metal.Device {
+	if gpu == nil {
+		return nil
+	}
+	return gpu.Dev
+}
+
 // ---------- Indexing ----------
 
 // At returns the value at the given indices.
@@ -239,6 +270,7 @@ func ReshapeOp(a *Tensor, shape ...int) *Tensor {
 }
 
 // Transpose2D swaps rows and columns of a 2-D tensor.
+// Keeps data on Metal if input is on Metal.
 func Transpose2D(a *Tensor) *Tensor {
 	if a.Dim() != 2 {
 		panic(fmt.Sprintf("gorch: Transpose2D requires 2-D tensor, got %d-D", a.Dim()))

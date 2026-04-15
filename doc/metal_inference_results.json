@@ -6,56 +6,56 @@
     {
       "backend": "Accelerate CPU",
       "prompt": "The quick brown fox",
-      "output": "The quick brown foxes are a great way to get a little bit of a kick out of",
-      "tokens": 15,
-      "time": "594ms",
-      "time_ms": 594,
-      "tok_per_sec": 25.242269709300075
+      "output": "The quick brown foxes are a great way to get a little bit of a kick out of your dog.\n\nThe quick brown foxes are a great way to",
+      "tokens": 30,
+      "time": "755ms",
+      "time_ms": 755,
+      "tok_per_sec": 39.73215889486324
     },
     {
       "backend": "Accelerate CPU",
       "prompt": "In the beginning there was",
-      "output": "In the beginning there was a lot of talk about the possibility of a new world, but it was",
-      "tokens": 15,
-      "time": "591ms",
-      "time_ms": 590,
-      "tok_per_sec": 25.391628845482842
+      "output": "In the beginning there was a lot of talk about the possibility of a new world, but it was never really discussed.\n\n\"I think it's a good idea to",
+      "tokens": 30,
+      "time": "766ms",
+      "time_ms": 766,
+      "tok_per_sec": 39.163131706666725
     },
     {
       "backend": "Accelerate CPU",
       "prompt": "Machine learning is",
-      "output": "Machine learning is a very powerful tool for learning about the world around us. It's a",
-      "tokens": 15,
-      "time": "419ms",
-      "time_ms": 419,
-      "tok_per_sec": 35.75872870567706
+      "output": "Machine learning is a very powerful tool for learning about the world around us. It's a tool that can help us understand the world around us, and it's a",
+      "tokens": 30,
+      "time": "745ms",
+      "time_ms": 744,
+      "tok_per_sec": 40.28037828645928
     },
     {
       "backend": "Metal GPU",
       "prompt": "The quick brown fox",
-      "output": "The quick brown foxes are a great way to get a little bit of a kick out of",
-      "tokens": 15,
-      "time": "428ms",
-      "time_ms": 427,
-      "tok_per_sec": 35.059538400274164
+      "output": "The quick brown foxes are a great way to get a little bit of a kick out of your dog.\n\nThe quick brown foxes are a great way to",
+      "tokens": 30,
+      "time": "1.123s",
+      "time_ms": 1123,
+      "tok_per_sec": 26.70842775063013
     },
     {
       "backend": "Metal GPU",
       "prompt": "In the beginning there was",
-      "output": "In the beginning there was a lot of talk about the possibility of a new world, but it was",
-      "tokens": 15,
-      "time": "397ms",
-      "time_ms": 396,
-      "tok_per_sec": 37.78452541109589
+      "output": "In the beginning there was a lot of talk about the possibility of a new world, but it was never really discussed.\n\n\"I think it's a good idea to",
+      "tokens": 30,
+      "time": "799ms",
+      "time_ms": 799,
+      "tok_per_sec": 37.52856082975528
     },
     {
       "backend": "Metal GPU",
       "prompt": "Machine learning is",
-      "output": "Machine learning is a very powerful tool for learning about the world around us. It's a",
-      "tokens": 15,
-      "time": "376ms",
-      "time_ms": 375,
-      "tok_per_sec": 39.91056924785488
+      "output": "Machine learning is a very powerful tool for learning about the world around us. It's a tool that can help us understand the world around us, and it's a",
+      "tokens": 30,
+      "time": "775ms",
+      "time_ms": 774,
+      "tok_per_sec": 38.72885029910672
     }
   ]
 }

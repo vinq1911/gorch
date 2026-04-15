@@ -66,4 +66,22 @@ kernel void vec_sum(device const float* A      [[buffer(0)]],
                     uint id [[thread_position_in_grid]]) {
     atomic_fetch_add_explicit(out, A[id], memory_order_relaxed);
 }
+
+kernel void vec_gelu(device const float* A [[buffer(0)]],
+                     device float*       B [[buffer(1)]],
+                     uint id [[thread_position_in_grid]]) {
+    float x = A[id];
+    float x3 = x * x * x;
+    float inner = 0.7978845608f * (x + 0.044715f * x3);
+    B[id] = 0.5f * x * (1.0f + tanh(inner));
+}
+
+kernel void vec_bias_add(device const float* A    [[buffer(0)]],
+                         device const float* bias  [[buffer(1)]],
+                         device float*       C     [[buffer(2)]],
+                         device const uint*  ncols [[buffer(3)]],
+                         uint id [[thread_position_in_grid]]) {
+    uint n = ncols[0];
+    C[id] = A[id] + bias[id % n];
+}
 `

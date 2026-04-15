@@ -50,7 +50,7 @@ func TestMetalVsAccelerateInference(t *testing.T) {
 		"In the beginning there was",
 		"Machine learning is",
 	}
-	maxNew := 15
+	maxNew := 30
 
 	report := metalReport{ModelName: "GPT-2 Small", Params: 0}
 

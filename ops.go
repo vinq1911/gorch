@@ -38,7 +38,8 @@ func InitMetal() (*GPU, error) {
 
 	// Pre-compile all element-wise kernels.
 	for _, name := range []string{"vec_add", "vec_sub", "vec_mul", "vec_div",
-		"vec_relu", "vec_sigmoid", "vec_tanh_act", "vec_scale", "vec_sum"} {
+		"vec_relu", "vec_sigmoid", "vec_tanh_act", "vec_scale", "vec_sum",
+		"vec_gelu", "vec_bias_add"} {
 		pipe, err := dev.CompileKernel(metal.KernelSource, name)
 		if err != nil {
 			return nil, fmt.Errorf("gorch: compile %s: %w", name, err)

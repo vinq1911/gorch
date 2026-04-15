@@ -41,6 +41,7 @@ func (ln *LayerNorm) Forward(x *g.Tensor) *g.Tensor {
 	xData := x.Data()
 	wData := ln.Weight.Data()
 	bData := ln.Bias.Data()
+
 	outData := make([]float32, M*N)
 
 	// Store normalized values for backward
