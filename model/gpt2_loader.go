@@ -4,6 +4,7 @@ package model
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 
@@ -127,10 +128,20 @@ func LoadGPT2(dir string, cfg GPT2Config) (*nn.GPT, error) {
 		copy(model.LMHead.Weight.Data(), wte.Data())
 	}
 
-	fmt.Printf("Loaded GPT-2 model: %d layers, dim=%d, heads=%d, params=%d\n",
-		cfg.NumLayers, cfg.Dim, cfg.NumHeads, model.CountParameters())
-
 	return model, nil
+}
+
+// LoadGPT2Verbose is like LoadGPT2 but prints a one-line summary to log
+// after a successful load. Existing tools that rely on the old log line can
+// switch to this; new code should prefer LoadGPT2 (silent).
+func LoadGPT2Verbose(dir string, cfg GPT2Config) (*nn.GPT, error) {
+	m, err := LoadGPT2(dir, cfg)
+	if err != nil {
+		return nil, err
+	}
+	log.Printf("Loaded GPT-2 model: %d layers, dim=%d, heads=%d, params=%d",
+		cfg.NumLayers, cfg.Dim, cfg.NumHeads, m.CountParameters())
+	return m, nil
 }
 
 // copyTensor copies data from safetensors into a gorch tensor.
