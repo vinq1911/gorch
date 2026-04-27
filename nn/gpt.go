@@ -43,10 +43,11 @@ func NewGPT(vocabSize, dim, numHeads, numLayers, maxSeq int) *GPT {
 	}
 }
 
-// Forward runs the GPT model.
-// tokenIDs: flat list of token IDs for a single sequence.
-// Returns: (seqLen, vocabSize) logits.
-func (gpt *GPT) Forward(tokenIDs []int) *g.Tensor {
+// Encode runs the GPT model up to (but not including) the language-model
+// head and returns the (seqLen, dim) hidden states after the final layer
+// norm. Useful for embeddings, retrieval, classification heads, and any
+// downstream task that does not need next-token logits.
+func (gpt *GPT) Encode(tokenIDs []int) *g.Tensor {
 	seqLen := len(tokenIDs)
 	if seqLen > gpt.MaxSeq {
 		panic("gorch: sequence length exceeds MaxSeq")
@@ -71,12 +72,16 @@ func (gpt *GPT) Forward(tokenIDs []int) *g.Tensor {
 	}
 
 	// Final layer norm
-	x = gpt.FinalNorm.Forward(x)
+	return gpt.FinalNorm.Forward(x)
+}
 
+// Forward runs the GPT model.
+// tokenIDs: flat list of token IDs for a single sequence.
+// Returns: (seqLen, vocabSize) logits.
+func (gpt *GPT) Forward(tokenIDs []int) *g.Tensor {
+	hidden := gpt.Encode(tokenIDs)
 	// Language model head: (seq, dim) → (seq, vocab)
-	logits := gpt.LMHead.Forward(x)
-
-	return logits
+	return gpt.LMHead.Forward(hidden)
 }
 
 // Parameters returns all learnable parameters.
