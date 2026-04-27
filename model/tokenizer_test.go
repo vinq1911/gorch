@@ -93,3 +93,49 @@ func TestBPEMerge(t *testing.T) {
 		t.Fatalf("bpe = %v, want [he, ll, o]", result)
 	}
 }
+
+func TestBPETokenizer_EncodeBatch_MatchesEncode(t *testing.T) {
+	tok := &BPETokenizer{
+		Encoder:    map[string]int{"he": 1, "ll": 2, "o": 3, "Ġworld": 4, "Ġ": 5, "world": 6},
+		Decoder:    map[int]string{},
+		BPERanks:   map[[2]string]int{{"h", "e"}: 0, {"l", "l"}: 1},
+		ByteEncode: make(map[byte]rune),
+	}
+	for i := 0; i < 256; i++ {
+		tok.ByteEncode[byte(i)] = rune(i)
+	}
+
+	texts := []string{"hello", "world", "hello world", "", "hello"}
+	got := tok.EncodeBatch(texts)
+	if len(got) != len(texts) {
+		t.Fatalf("len=%d; want %d", len(got), len(texts))
+	}
+	for i, text := range texts {
+		want := tok.Encode(text)
+		if !equalIntSlice(got[i], want) {
+			t.Errorf("EncodeBatch[%d]=%v; Encode(%q)=%v", i, got[i], text, want)
+		}
+	}
+}
+
+func TestBPETokenizer_EncodeBatch_Empty(t *testing.T) {
+	tok := &BPETokenizer{}
+	if got := tok.EncodeBatch(nil); len(got) != 0 {
+		t.Errorf("nil input: got len=%d", len(got))
+	}
+	if got := tok.EncodeBatch([]string{}); len(got) != 0 {
+		t.Errorf("empty input: got len=%d", len(got))
+	}
+}
+
+func equalIntSlice(a, b []int) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}

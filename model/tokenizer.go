@@ -7,8 +7,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"unicode/utf8"
 )
 
@@ -119,6 +121,49 @@ func (t *BPETokenizer) Encode(text string) []int {
 		}
 	}
 	return tokens
+}
+
+// EncodeBatch encodes texts in parallel using GOMAXPROCS workers. Output
+// order matches input order. The tokenizer's read-only state (Encoder,
+// ByteEncode, BPE merges) makes per-text Encode safe for concurrent use.
+//
+// For inputs of more than a few short strings this is a noticeable win
+// over a sequential loop in caller code, especially when the caller is
+// embedding many small chunks (RAG, retrieval, classification).
+func (t *BPETokenizer) EncodeBatch(texts []string) [][]int {
+	out := make([][]int, len(texts))
+	if len(texts) == 0 {
+		return out
+	}
+	workers := runtime.GOMAXPROCS(0)
+	if workers > len(texts) {
+		workers = len(texts)
+	}
+	if workers <= 1 {
+		for i, s := range texts {
+			out[i] = t.Encode(s)
+		}
+		return out
+	}
+
+	type job struct{ idx int }
+	jobs := make(chan job, len(texts))
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := range jobs {
+				out[j.idx] = t.Encode(texts[j.idx])
+			}
+		}()
+	}
+	for i := range texts {
+		jobs <- job{idx: i}
+	}
+	close(jobs)
+	wg.Wait()
+	return out
 }
 
 // Decode converts token IDs back to text.
