@@ -10,6 +10,12 @@ import (
 
 // MultiHeadAttention implements multi-head self-attention.
 // Uses batched matmul to process all heads in one GPU dispatch.
+//
+// The Causal field selects between causal (decoder, GPT-style) and
+// bidirectional (encoder, BERT-style) self-attention. It defaults to
+// true via NewMultiHeadAttention so that pre-existing GPT-style code
+// keeps the same behaviour. Set Causal=false on the constructed module
+// before the first Forward to make it bidirectional.
 type MultiHeadAttention struct {
 	Wq       *Linear
 	Wk       *Linear
@@ -18,9 +24,12 @@ type MultiHeadAttention struct {
 	NumHeads int
 	HeadDim  int
 	Dim      int
+	Causal   bool
 }
 
-// NewMultiHeadAttention creates a multi-head attention module.
+// NewMultiHeadAttention creates a multi-head attention module with the
+// causal-mask default (decoder/GPT-style). Use NewMultiHeadAttentionBi
+// for an encoder-style bidirectional layer.
 func NewMultiHeadAttention(dim, numHeads int) *MultiHeadAttention {
 	if dim%numHeads != 0 {
 		panic("gorch: dim must be divisible by numHeads")
@@ -34,7 +43,17 @@ func NewMultiHeadAttention(dim, numHeads int) *MultiHeadAttention {
 		NumHeads: numHeads,
 		HeadDim:  headDim,
 		Dim:      dim,
+		Causal:   true,
 	}
+}
+
+// NewMultiHeadAttentionBi creates a multi-head attention module
+// configured for bidirectional (BERT-style) self-attention. No causal
+// mask is applied; every position can attend to every other position.
+func NewMultiHeadAttentionBi(dim, numHeads int) *MultiHeadAttention {
+	mha := NewMultiHeadAttention(dim, numHeads)
+	mha.Causal = false
+	return mha
 }
 
 // Forward computes multi-head self-attention.
@@ -73,12 +92,17 @@ func (mha *MultiHeadAttention) Forward(x *g.Tensor, seqLen int) *g.Tensor {
 		for i := range scoresData {
 			scoresData[i] *= invScale
 		}
-		mask := g.CausalMask(seqLen)
+		var mask []bool
+		if mha.Causal {
+			mask = g.CausalMask(seqLen)
+		}
 		for h := 0; h < numHeads; h++ {
 			offset := h * seqLen * seqLen
-			for i, m := range mask {
-				if m {
-					scoresData[offset+i] = -1e9
+			if mask != nil {
+				for i, m := range mask {
+					if m {
+						scoresData[offset+i] = -1e9
+					}
 				}
 			}
 			softmaxInPlace(scoresData[offset:offset+seqLen*seqLen], seqLen)
@@ -98,8 +122,10 @@ func (mha *MultiHeadAttention) Forward(x *g.Tensor, seqLen int) *g.Tensor {
 
 			kT := g.Transpose2D(kh)
 			scores := g.ScaledMatMul(qh, kT, float32(headDim))
-			mask := g.CausalMask(seqLen)
-			scores = g.MaskFill(scores, mask, -1e9)
+			if mha.Causal {
+				mask := g.CausalMask(seqLen)
+				scores = g.MaskFill(scores, mask, -1e9)
+			}
 			attnWeights := g.Softmax(scores)
 			headOutputs[h] = g.MatMul(attnWeights, vh)
 		}
