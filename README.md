@@ -257,7 +257,8 @@ CGO_ENABLED=1 go test ./e2e/ -tags e2e -run TestComprehensiveBenchmark -v -timeo
 - [x] KV cache integration into GPT forward pass (`GenerateConfig.UseKVCache=true`)
 - [x] Pretrained model fine-tuning (`model.CausalLMLoss`)
 - [x] ONNX export (Sequential MLP/CNN: Linear, Conv2d, MaxPool2d, Flatten, Relu, Sigmoid, Tanh) + initializer-only import
-- [ ] GPU autograd (backward pass on Metal)
+- [x] GPU autograd: MatMul + Linear backward on Metal (matmul-first; see ADR-009)
+- [ ] GPU autograd for non-MatMul ops (LayerNorm, Softmax, GELU backward)
 - [ ] Full transformer ONNX export (attention shape ops)
 
 ## License
