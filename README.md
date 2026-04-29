@@ -255,8 +255,8 @@ CGO_ENABLED=1 go test ./e2e/ -tags e2e -run TestComprehensiveBenchmark -v -timeo
 - [x] Real-world benchmarks: Wine Quality, Breast Cancer, Fashion-MNIST
 - [x] Improvement ablation study (BN+GELU+Dropout+CosLR → +1.5%)
 - [x] KV cache integration into GPT forward pass (`GenerateConfig.UseKVCache=true`)
+- [x] Pretrained model fine-tuning (`model.CausalLMLoss`)
 - [ ] GPU autograd (backward pass on Metal)
-- [ ] Pretrained model fine-tuning
 - [ ] ONNX export/import
 
 ## License
