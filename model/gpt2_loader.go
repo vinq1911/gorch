@@ -120,13 +120,11 @@ func LoadGPT2(dir string, cfg GPT2Config) (*nn.GPT, error) {
 		return nil, err
 	}
 
-	// LM Head: GPT-2 ties weights with token embeddings (wte.weight)
-	// Copy wte.weight into LMHead.Weight
-	if wte, ok := sf.Tensors["wte.weight"]; ok {
-		// LMHead.Weight shape is (vocab, dim), wte is (vocab, dim)
-		// But our Linear expects (out, in) = (vocab, dim) — same!
-		copy(model.LMHead.Weight.Data(), wte.Data())
-	}
+	// LM Head: HuggingFace GPT-2 ties the LM head weight to the token
+	// embedding (lm_head.weight = wte.weight). Make the Go model do
+	// the same — share the underlying tensor instead of holding two
+	// copies that drift during fine-tuning.
+	model.TieLMHeadToEmbedding()
 
 	return model, nil
 }
