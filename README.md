@@ -256,8 +256,9 @@ CGO_ENABLED=1 go test ./e2e/ -tags e2e -run TestComprehensiveBenchmark -v -timeo
 - [x] Improvement ablation study (BN+GELU+Dropout+CosLR → +1.5%)
 - [x] KV cache integration into GPT forward pass (`GenerateConfig.UseKVCache=true`)
 - [x] Pretrained model fine-tuning (`model.CausalLMLoss`)
+- [x] ONNX export (Sequential MLP/CNN: Linear, Conv2d, MaxPool2d, Flatten, Relu, Sigmoid, Tanh) + initializer-only import
 - [ ] GPU autograd (backward pass on Metal)
-- [ ] ONNX export/import
+- [ ] Full transformer ONNX export (attention shape ops)
 
 ## License
 
