@@ -54,6 +54,51 @@ func BenchmarkGenerateCached(b *testing.B) {
 
 // ---------- GPU autograd benchmark ----------
 
+// BenchmarkLinearTrainStepCPULarge mirrors LinearTrainStepCPU at a
+// shape where MPS amortises its dispatch overhead and the GPU bench
+// is supposed to win. Useful crossover marker.
+func BenchmarkLinearTrainStepCPULarge(b *testing.B) {
+	const batch, in, out = 256, 2048, 2048
+	l := NewLinear(in, out)
+	xData := make([]float32, batch*in)
+	for i := range xData {
+		xData[i] = float32(i%17) * 0.01
+	}
+	x := g.NewTensor(xData, batch, in)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		l.Weight.ZeroGrad()
+		l.Bias.ZeroGrad()
+		y := l.Forward(x)
+		loss := g.Sum(y)
+		loss.Backward()
+	}
+}
+
+// BenchmarkLinearTrainStepMetalLarge — large-shape GPU bench.
+func BenchmarkLinearTrainStepMetalLarge(b *testing.B) {
+	gpu, err := g.InitMetal()
+	if err != nil {
+		b.Skipf("metal not available: %v", err)
+	}
+	const batch, in, out = 256, 2048, 2048
+	l := NewLinear(in, out)
+	l.ToMetal(gpu.Dev)
+	xData := make([]float32, batch*in)
+	for i := range xData {
+		xData[i] = float32(i%17) * 0.01
+	}
+	x := g.NewTensorOnMetal(gpu.Dev, xData, batch, in)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		l.Weight.ZeroGrad()
+		l.Bias.ZeroGrad()
+		y := l.Forward(x)
+		loss := g.Sum(y)
+		loss.Backward()
+	}
+}
+
 // BenchmarkLinearTrainStepCPU runs one full forward+backward+update
 // on a Linear-only model with weights resident on CPU.
 func BenchmarkLinearTrainStepCPU(b *testing.B) {
@@ -64,12 +109,6 @@ func BenchmarkLinearTrainStepCPU(b *testing.B) {
 		xData[i] = float32(i%17) * 0.01
 	}
 	x := g.NewTensor(xData, batch, in)
-	tgtData := make([]float32, out)
-	for i := range tgtData {
-		tgtData[i] = float32(i % out)
-	}
-	tgt := g.NewTensor(tgtData, batch, 1)
-	_ = tgt
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
