@@ -46,6 +46,21 @@ func (tb *TransformerBlock) Forward(x *g.Tensor, seqLen int) *g.Tensor {
 	return x
 }
 
+// ForwardCached runs the block using a KV cache slot at layerIdx.
+// posOffset is the absolute position of the first row of x in the
+// full sequence (cache.Len() prior to this call). Inference-only.
+func (tb *TransformerBlock) ForwardCached(x *g.Tensor, cache *KVCache, layerIdx, posOffset int) *g.Tensor {
+	normed := tb.Norm1.Forward(x)
+	attnOut := tb.Attn.ForwardCached(normed, cache, layerIdx, posOffset)
+	x = g.Add(x, attnOut)
+
+	normed2 := tb.Norm2.Forward(x)
+	ffnOut := tb.FFN1.Forward(normed2)
+	ffnOut = g.GELU(ffnOut)
+	ffnOut = tb.FFN2.Forward(ffnOut)
+	return g.Add(x, ffnOut)
+}
+
 func (tb *TransformerBlock) Parameters() []*g.Tensor {
 	var params []*g.Tensor
 	params = append(params, tb.Attn.Parameters()...)

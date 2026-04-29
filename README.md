@@ -254,8 +254,8 @@ CGO_ENABLED=1 go test ./e2e/ -tags e2e -run TestComprehensiveBenchmark -v -timeo
 - [x] Fragmind pipeline-parallel inference (TCP transport)
 - [x] Real-world benchmarks: Wine Quality, Breast Cancer, Fashion-MNIST
 - [x] Improvement ablation study (BN+GELU+Dropout+CosLR → +1.5%)
+- [x] KV cache integration into GPT forward pass (`GenerateConfig.UseKVCache=true`)
 - [ ] GPU autograd (backward pass on Metal)
-- [ ] KV cache integration into GPT forward pass
 - [ ] Pretrained model fine-tuning
 - [ ] ONNX export/import
 

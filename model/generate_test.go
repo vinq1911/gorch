@@ -101,3 +101,26 @@ func TestGenerateWithSampling(t *testing.T) {
 		t.Fatalf("output len = %d, want 12", len(output))
 	}
 }
+
+// Greedy decode with the KV cache must produce the same token
+// sequence as greedy decode without it. Anything else is a bug.
+func TestGenerateGreedyKVCacheMatchesUncached(t *testing.T) {
+	model := nn.NewGPT(32, 16, 2, 2, 64)
+	input := []int{1, 5, 10}
+
+	cfgPlain := GreedyConfig(8)
+	cfgCached := GreedyConfig(8)
+	cfgCached.UseKVCache = true
+
+	plain := GenerateWithConfig(model, input, cfgPlain)
+	cached := GenerateWithConfig(model, input, cfgCached)
+
+	if len(plain) != len(cached) {
+		t.Fatalf("length mismatch: plain=%d cached=%d", len(plain), len(cached))
+	}
+	for i := range plain {
+		if plain[i] != cached[i] {
+			t.Fatalf("token %d: plain=%d cached=%d", i, plain[i], cached[i])
+		}
+	}
+}
