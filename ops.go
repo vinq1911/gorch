@@ -250,11 +250,10 @@ func GELU(a *Tensor) *Tensor {
 	} else {
 		// CPU: compute inner = sqrt(2/pi) * (x + 0.044715*x^3) elementwise,
 		// then one vForce vector-tanh, then 0.5 * x * (1 + tanh(inner)).
-		// vForce Tanh is the expensive bit and is the only piece that
-		// benefits from vectorisation; the surrounding scalar arithmetic
-		// is tight enough that Go's loop fuses with the compiler.
+		// `inner` is a transient scratch buffer — pooled to drop
+		// allocations across calls.
 		n := len(a.data)
-		inner := make([]float32, n)
+		inner := AcquireFloat32(n)
 		for i, x := range a.data {
 			x3 := x * x * x
 			inner[i] = 0.7978845608 * (x + 0.044715*x3) // sqrt(2/pi)
@@ -263,6 +262,7 @@ func GELU(a *Tensor) *Tensor {
 		for i, x := range a.data {
 			out.data[i] = 0.5 * x * (1 + inner[i])
 		}
+		ReleaseFloat32(inner)
 	}
 
 	if GradEnabled() && (a.requiresGrad) {
