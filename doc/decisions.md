@@ -129,3 +129,57 @@ Backward passes are wired to dispatch to MPS only for MatMul (and Linear, which 
 **What works today:** Weights on `ToMetal(dev)`, run forward + Backward, dW/db match CPU within fp32 noise, training converges. Verified by `TestLinearBackwardMatchesCPUOnGPU` and `TestTrainTinyMLPOnGPU`.
 
 **What's deferred:** Custom Metal kernels for LayerNorm/Softmax/GELU backward, which would close the remaining gap for transformer training throughput.
+
+## ADR-009-update: measured wall-clock on Apple M5 — GPU autograd is currently a regression for transformer-shaped workloads
+
+**Date:** 2026-04-29
+**Status:** Findings
+
+Empirical Linear training-step benchmarks (single Linear layer, forward + Sum loss + Backward, full step) on Apple M5:
+
+| Shape | CPU (Accelerate) | Metal (MPS) | Ratio |
+| ------------------ | ---------------- | ------------- | ------- |
+| (64, 768, 768)     | 0.50 ms          | 2.27 ms       | 4.6× SLOWER on GPU |
+| (256, 2048, 2048)  | 5.48 ms          | 26.8 ms       | 4.9× SLOWER on GPU |
+
+These shapes bracket what GPT-2 small ((seq, 768, 768) for QKV/Wo, FFN expansion to 3072) and bigger transformer architectures use. **At every shape gorch is likely to encounter in a transformer, the matmul-only Metal backward path loses to Accelerate.**
+
+Likely cause: the loss in these benches is `g.Sum`, which produces a CPU-resident grad. MatMul backward checks every operand's residency at backward time and falls back to CPU when grad is on CPU — but the operand weights are still Metal-allocated, so the CPU sgemm reads/writes through unified-memory slices. That works numerically but costs L2/L3 coherence traffic over a pure-CPU baseline.
+
+This ADR-009 update therefore deprecates the recommendation to call `gpt.ToMetal()` for training. Inference-on-Metal still wins (forward MatMul without the cross-device grad flow). For training, stay on CPU until either:
+1. The whole loss path lands on Metal (so grads stay on GPU), OR
+2. Custom Metal backward kernels exist for the activation ops.
+
+Both are bigger structural changes than the matmul-first slice.
+
+## ADR-010: NoGrad gating + transient scratch pooling
+
+**Date:** 2026-04-29
+**Status:** Accepted
+
+`g.NoGrad` now actually does something. Until this change, `NoGrad` only manipulated a depth counter; no op anywhere checked `GradEnabled()`. Every op built a full autograd graph regardless. PR #15 wires `GradEnabled()` into all 31 direct field-setter sites in `ops.go` / `attention_ops.go` / `broadcast.go` / `conv.go` / `pool.go` / `loss.go`, plus into `Tensor.SetGradFn` / `SetRequiresGrad`. Inside `NoGrad`, no graph is built and activations are GC-eligible immediately after their consuming op.
+
+`AcquireFloat32` / `ReleaseFloat32` is a sync.Pool of float32 slices for *within-op transient scratch* — buffers that don't escape the op (GELU's `inner`, LayerNorm's `xNorm` and `invStd`). The pool is goroutine-safe; lifetime is bounded by the op call.
+
+Allocation pooling for *escaping* tensors (Linear.Forward output, attention reshape outputs) needs explicit Tensor.Release semantics — separate change tied to ADR-004 and not done yet.
+
+**Wall-clock impact, GPT-2 small, seq=64 (batched encode 16 at the bottom):**
+
+| Bench | original main | post-NoGrad+pool |
+| ------------------------ | ------------- | ---------------- |
+| `Encode`                 | 55.7 ms       | 25.3 ms (2.2×)   |
+| `EncodeBatch16`          | 652 ms        | 274 ms (2.4×)    |
+
+## ADR-011: KV cache delivers as advertised — measured
+
+**Date:** 2026-04-29
+**Status:** Findings
+
+Tiny GPT (vocab=256, dim=64, 4 heads, 4 layers, prompt=8, generate 64 tokens) on Apple M5:
+
+| Path | ns/op |
+| ------------------------- | --------- |
+| `BenchmarkGenerateUncached` | 35.5 ms   |
+| `BenchmarkGenerateCached`   |  4.4 ms   |
+
+**8.1× speedup at 72 tokens generated** — and the gap widens with sequence length because uncached is O(N²) per token and cached is O(N). Validates ADR-008's "expect 3-5× improvement for long sequences" claim with a concrete number on a small model. Real-world GPT-2-small numbers should be similar or better.
