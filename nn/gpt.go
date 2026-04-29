@@ -84,6 +84,37 @@ func (gpt *GPT) Forward(tokenIDs []int) *g.Tensor {
 	return gpt.LMHead.Forward(hidden)
 }
 
+// ForwardCached runs the GPT model on `newTokenIDs` against a KV
+// cache. The first call should pass the full prompt to populate the
+// cache (a prefill); subsequent calls pass one new token each. The
+// position embedding offset is taken from cache.Len() before this
+// call, so callers do not need to track it.
+//
+// Returns logits of shape (len(newTokenIDs), vocabSize). On
+// incremental calls (1 new token) only the new row is materialised.
+func (gpt *GPT) ForwardCached(newTokenIDs []int, cache *KVCache) *g.Tensor {
+	posOffset := cache.Len()
+	newSeq := len(newTokenIDs)
+	if posOffset+newSeq > gpt.MaxSeq {
+		panic("gorch: cached sequence length exceeds MaxSeq")
+	}
+
+	tokEmb := gpt.TokenEmbed.Forward(newTokenIDs)
+
+	posIDs := make([]int, newSeq)
+	for i := range posIDs {
+		posIDs[i] = posOffset + i
+	}
+	posEmb := gpt.PosEmbed.Forward(posIDs)
+
+	x := g.Add(tokEmb, posEmb)
+	for layerIdx, block := range gpt.Blocks {
+		x = block.ForwardCached(x, cache, layerIdx, posOffset)
+	}
+	x = gpt.FinalNorm.Forward(x)
+	return gpt.LMHead.Forward(x)
+}
+
 // Parameters returns all learnable parameters.
 func (gpt *GPT) Parameters() []*g.Tensor {
 	var params []*g.Tensor

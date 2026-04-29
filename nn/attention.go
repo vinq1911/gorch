@@ -287,6 +287,112 @@ func exp64(x float64) float64 {
 	return math.Exp(x)
 }
 
+// ForwardCached computes self-attention for `x` against a KV cache.
+// x is the new tokens (1 row for incremental decoding, len(prompt) on
+// prefill). The cache slot at layerIdx is updated with the new K/V.
+// posOffset is the absolute position of the first new token before
+// this call (i.e., cache.Len() prior to appending).
+//
+// Causal masking uses absolute positions: a query at absolute position
+// p may attend to keys at absolute positions 0..p inclusive. For
+// incremental decoding (1 new token), no rows of the mask are active.
+//
+// This path is inference-only — it does not record an autograd tape.
+func (mha *MultiHeadAttention) ForwardCached(x *g.Tensor, cache *KVCache, layerIdx, posOffset int) *g.Tensor {
+	numHeads := mha.NumHeads
+	headDim := mha.HeadDim
+	dim := mha.Dim
+	newSeq := x.Shape()[0]
+
+	// Project new Q/K/V — same as the standard forward.
+	q := mha.Wq.Forward(x)
+	k := mha.Wk.Forward(x)
+	v := mha.Wv.Forward(x)
+
+	// Move off Metal — cached compute happens on CPU. On Apple Silicon
+	// this is a no-op on the data (unified memory), it just clears the
+	// buf pointer so we get a normal CPU slice for the loops below.
+	if k.IsOnMetal() {
+		k.ToCPU()
+	}
+	if v.IsOnMetal() {
+		v.ToCPU()
+	}
+	if q.IsOnMetal() {
+		q.ToCPU()
+	}
+
+	// Append the new K/V to the cache. After this, the cache holds
+	// totalSeq = posOffset + newSeq tokens.
+	cache.Append(layerIdx, k.Data(), v.Data())
+	totalSeq := cache.Len()
+	cachedK := cache.Keys[layerIdx]   // flat (totalSeq, dim)
+	cachedV := cache.Values[layerIdx] // flat (totalSeq, dim)
+
+	qData := q.Data()
+	out := g.Zeros(newSeq, dim)
+	outData := out.Data()
+
+	invScale := float32(1.0 / sqrtFloat32(float32(headDim)))
+
+	// Per-head loop — no batched matmul because totalSeq ≠ newSeq.
+	// For incremental decoding newSeq=1 so this is one matmul per
+	// head per token, dominated by the (1, headDim) @ (headDim, totalSeq)
+	// score and (1, totalSeq) @ (totalSeq, headDim) attended sum.
+	scores := make([]float32, newSeq*totalSeq)
+	for h := 0; h < numHeads; h++ {
+		headOff := h * headDim
+		// scores[i, j] = q[i, h, :] · k[j, h, :] * invScale
+		for i := 0; i < newSeq; i++ {
+			qRow := qData[i*dim+headOff : i*dim+headOff+headDim]
+			for j := 0; j < totalSeq; j++ {
+				kRow := cachedK[j*dim+headOff : j*dim+headOff+headDim]
+				var sum float32
+				for d := 0; d < headDim; d++ {
+					sum += qRow[d] * kRow[d]
+				}
+				scores[i*totalSeq+j] = sum * invScale
+			}
+		}
+
+		// Causal mask in absolute coordinates and softmax per row.
+		if mha.Causal {
+			for i := 0; i < newSeq; i++ {
+				absPos := posOffset + i
+				row := scores[i*totalSeq : (i+1)*totalSeq]
+				for j := absPos + 1; j < totalSeq; j++ {
+					row[j] = -1e9
+				}
+			}
+		}
+		softmaxInPlace(scores, totalSeq)
+
+		// out[i, h, :] = sum_j scores[i, j] * v[j, h, :]
+		for i := 0; i < newSeq; i++ {
+			outRow := outData[i*dim+headOff : i*dim+headOff+headDim]
+			scoreRow := scores[i*totalSeq : (i+1)*totalSeq]
+			for j := 0; j < totalSeq; j++ {
+				if scoreRow[j] == 0 {
+					continue
+				}
+				vRow := cachedV[j*dim+headOff : j*dim+headOff+headDim]
+				w := scoreRow[j]
+				for d := 0; d < headDim; d++ {
+					outRow[d] += w * vRow[d]
+				}
+			}
+		}
+	}
+
+	return mha.Wo.Forward(out)
+}
+
+func sqrtFloat32(x float32) float32 {
+	// Avoid pulling math just for this — Newton-Raphson style.
+	// Use math.Sqrt via the existing import in this file is cleaner.
+	return float32(math.Sqrt(float64(x)))
+}
+
 func (mha *MultiHeadAttention) Parameters() []*g.Tensor {
 	var params []*g.Tensor
 	params = append(params, mha.Wq.Parameters()...)
