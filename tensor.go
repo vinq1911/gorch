@@ -47,7 +47,13 @@ type GradFn struct {
 }
 
 // SetGradFn attaches a backward function to this tensor (used by nn package).
+// Inside a NoGrad scope this is a no-op — the autograd graph is not built,
+// which keeps activations short-lived and dramatically reduces GC pressure
+// during inference.
 func (t *Tensor) SetGradFn(name string, inputs []*Tensor, backward func(grad *Tensor) []*Tensor) {
+	if !GradEnabled() {
+		return
+	}
 	t.gradFn = &GradFn{name: name, inputs: inputs, backward: backward}
 }
 
@@ -134,8 +140,13 @@ func (t *Tensor) Device() DeviceType {
 // RequiresGrad returns whether this tensor tracks gradients.
 func (t *Tensor) RequiresGrad() bool { return t.requiresGrad }
 
-// SetRequiresGrad enables or disables gradient tracking.
+// SetRequiresGrad enables or disables gradient tracking. Inside a
+// NoGrad scope, attempts to enable tracking are silently ignored;
+// disabling always works.
 func (t *Tensor) SetRequiresGrad(b bool) *Tensor {
+	if b && !GradEnabled() {
+		return t
+	}
 	t.requiresGrad = b
 	return t
 }

@@ -31,7 +31,7 @@ func CrossEntropyLoss(logits, targets *Tensor) *Tensor {
 	}
 	loss := NewTensor([]float32{total / float32(batch)}, 1)
 
-	if logits.requiresGrad {
+	if GradEnabled() && (logits.requiresGrad) {
 		loss.requiresGrad = true
 		loss.gradFn = &GradFn{
 			name:   "CrossEntropyLoss",

@@ -61,7 +61,7 @@ func (g *GPU) pipe(name string) *metal.Pipeline {
 func Add(a, b *Tensor) *Tensor {
 	assertSameShape(a, b)
 	out := binaryOp(a, b, "vec_add", func(x, y float32) float32 { return x + y })
-	if a.requiresGrad || b.requiresGrad {
+	if GradEnabled() && (a.requiresGrad || b.requiresGrad) {
 		out.requiresGrad = true
 		out.gradFn = &GradFn{
 			name:   "Add",
@@ -78,7 +78,7 @@ func Add(a, b *Tensor) *Tensor {
 func Sub(a, b *Tensor) *Tensor {
 	assertSameShape(a, b)
 	out := binaryOp(a, b, "vec_sub", func(x, y float32) float32 { return x - y })
-	if a.requiresGrad || b.requiresGrad {
+	if GradEnabled() && (a.requiresGrad || b.requiresGrad) {
 		out.requiresGrad = true
 		out.gradFn = &GradFn{
 			name:   "Sub",
@@ -95,7 +95,7 @@ func Sub(a, b *Tensor) *Tensor {
 func Mul(a, b *Tensor) *Tensor {
 	assertSameShape(a, b)
 	out := binaryOp(a, b, "vec_mul", func(x, y float32) float32 { return x * y })
-	if a.requiresGrad || b.requiresGrad {
+	if GradEnabled() && (a.requiresGrad || b.requiresGrad) {
 		out.requiresGrad = true
 		out.gradFn = &GradFn{
 			name:   "Mul",
@@ -116,7 +116,7 @@ func Mul(a, b *Tensor) *Tensor {
 func Div(a, b *Tensor) *Tensor {
 	assertSameShape(a, b)
 	out := binaryOp(a, b, "vec_div", func(x, y float32) float32 { return x / y })
-	if a.requiresGrad || b.requiresGrad {
+	if GradEnabled() && (a.requiresGrad || b.requiresGrad) {
 		out.requiresGrad = true
 		out.gradFn = &GradFn{
 			name:   "Div",
@@ -143,7 +143,7 @@ func Neg(a *Tensor) *Tensor {
 	for i, v := range a.data {
 		out.data[i] = -v
 	}
-	if a.requiresGrad {
+	if GradEnabled() && (a.requiresGrad) {
 		out.requiresGrad = true
 		out.gradFn = &GradFn{
 			name:   "Neg",
@@ -164,7 +164,7 @@ func ReLU(a *Tensor) *Tensor {
 		}
 		return 0
 	})
-	if a.requiresGrad {
+	if GradEnabled() && (a.requiresGrad) {
 		out.requiresGrad = true
 		out.gradFn = &GradFn{
 			name:   "ReLU",
@@ -188,7 +188,7 @@ func Sigmoid(a *Tensor) *Tensor {
 	out := unaryOp(a, "vec_sigmoid", func(x float32) float32 {
 		return float32(1.0 / (1.0 + math.Exp(float64(-x))))
 	})
-	if a.requiresGrad {
+	if GradEnabled() && (a.requiresGrad) {
 		out.requiresGrad = true
 		out.gradFn = &GradFn{
 			name:   "Sigmoid",
@@ -211,7 +211,7 @@ func Tanh(a *Tensor) *Tensor {
 	out := unaryOp(a, "vec_tanh_act", func(x float32) float32 {
 		return float32(math.Tanh(float64(x)))
 	})
-	if a.requiresGrad {
+	if GradEnabled() && (a.requiresGrad) {
 		out.requiresGrad = true
 		out.gradFn = &GradFn{
 			name:   "Tanh",
@@ -250,11 +250,10 @@ func GELU(a *Tensor) *Tensor {
 	} else {
 		// CPU: compute inner = sqrt(2/pi) * (x + 0.044715*x^3) elementwise,
 		// then one vForce vector-tanh, then 0.5 * x * (1 + tanh(inner)).
-		// vForce Tanh is the expensive bit and is the only piece that
-		// benefits from vectorisation; the surrounding scalar arithmetic
-		// is tight enough that Go's loop fuses with the compiler.
+		// `inner` is a transient scratch buffer — pooled to drop
+		// allocations across calls.
 		n := len(a.data)
-		inner := make([]float32, n)
+		inner := AcquireFloat32(n)
 		for i, x := range a.data {
 			x3 := x * x * x
 			inner[i] = 0.7978845608 * (x + 0.044715*x3) // sqrt(2/pi)
@@ -263,9 +262,10 @@ func GELU(a *Tensor) *Tensor {
 		for i, x := range a.data {
 			out.data[i] = 0.5 * x * (1 + inner[i])
 		}
+		ReleaseFloat32(inner)
 	}
 
-	if a.requiresGrad {
+	if GradEnabled() && (a.requiresGrad) {
 		out.requiresGrad = true
 		out.gradFn = &GradFn{
 			name:   "GELU",
@@ -293,7 +293,7 @@ func GELU(a *Tensor) *Tensor {
 func Exp(a *Tensor) *Tensor {
 	out := Zeros(a.shape...)
 	accelerate.Exp(a.data, out.data)
-	if a.requiresGrad {
+	if GradEnabled() && (a.requiresGrad) {
 		out.requiresGrad = true
 		out.gradFn = &GradFn{
 			name:   "Exp",
@@ -315,7 +315,7 @@ func Exp(a *Tensor) *Tensor {
 func Log(a *Tensor) *Tensor {
 	out := Zeros(a.shape...)
 	accelerate.Log(a.data, out.data)
-	if a.requiresGrad {
+	if GradEnabled() && (a.requiresGrad) {
 		out.requiresGrad = true
 		out.gradFn = &GradFn{
 			name:   "Log",
@@ -361,7 +361,7 @@ func Softmax(a *Tensor) *Tensor {
 		}
 	}
 
-	if a.requiresGrad {
+	if GradEnabled() && (a.requiresGrad) {
 		out.requiresGrad = true
 		out.gradFn = &GradFn{
 			name:   "Softmax",
@@ -416,7 +416,7 @@ func LogSoftmax(a *Tensor) *Tensor {
 		}
 	}
 
-	if a.requiresGrad {
+	if GradEnabled() && (a.requiresGrad) {
 		out.requiresGrad = true
 		out.gradFn = &GradFn{
 			name:   "LogSoftmax",
@@ -445,7 +445,7 @@ func LogSoftmax(a *Tensor) *Tensor {
 func Sum(a *Tensor) *Tensor {
 	s := accelerate.Sum(a.data)
 	out := NewTensor([]float32{s}, 1)
-	if a.requiresGrad {
+	if GradEnabled() && (a.requiresGrad) {
 		out.requiresGrad = true
 		out.gradFn = &GradFn{
 			name:   "Sum",
@@ -464,7 +464,7 @@ func Mean(a *Tensor) *Tensor {
 	s := Sum(a)
 	n := float32(a.Size())
 	out := NewTensor([]float32{s.data[0] / n}, 1)
-	if a.requiresGrad {
+	if GradEnabled() && (a.requiresGrad) {
 		out.requiresGrad = true
 		out.gradFn = &GradFn{
 			name:   "Mean",
@@ -504,7 +504,7 @@ func MatMul(a, b *Tensor) *Tensor {
 		accelerate.Sgemm(M, N, K, 1.0, a.data, b.data, 0.0, out.data)
 	}
 
-	if a.requiresGrad || b.requiresGrad {
+	if GradEnabled() && (a.requiresGrad || b.requiresGrad) {
 		out.requiresGrad = true
 		out.gradFn = &GradFn{
 			name:   "MatMul",

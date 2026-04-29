@@ -126,7 +126,7 @@ func AddB(a, b *Tensor) *Tensor {
 	}
 	out := NewTensor(outData, outShape...)
 
-	if a.requiresGrad || b.requiresGrad {
+	if GradEnabled() && (a.requiresGrad || b.requiresGrad) {
 		out.requiresGrad = true
 		out.gradFn = &GradFn{
 			name:   "AddB",
@@ -158,7 +158,7 @@ func SubB(a, b *Tensor) *Tensor {
 	}
 	out := NewTensor(outData, outShape...)
 
-	if a.requiresGrad || b.requiresGrad {
+	if GradEnabled() && (a.requiresGrad || b.requiresGrad) {
 		out.requiresGrad = true
 		out.gradFn = &GradFn{
 			name: "SubB", inputs: []*Tensor{a, b},
@@ -193,7 +193,7 @@ func MulB(a, b *Tensor) *Tensor {
 	}
 	out := NewTensor(outData, outShape...)
 
-	if a.requiresGrad || b.requiresGrad {
+	if GradEnabled() && (a.requiresGrad || b.requiresGrad) {
 		out.requiresGrad = true
 		out.gradFn = &GradFn{
 			name: "MulB", inputs: []*Tensor{a, b},
@@ -231,7 +231,7 @@ func DivB(a, b *Tensor) *Tensor {
 	}
 	out := NewTensor(outData, outShape...)
 
-	if a.requiresGrad || b.requiresGrad {
+	if GradEnabled() && (a.requiresGrad || b.requiresGrad) {
 		out.requiresGrad = true
 		out.gradFn = &GradFn{
 			name: "DivB", inputs: []*Tensor{a, b},
