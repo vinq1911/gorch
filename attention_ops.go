@@ -21,7 +21,7 @@ func MaskFill(a *Tensor, mask []bool, val float32) *Tensor {
 			out.data[i] = val
 		}
 	}
-	if a.requiresGrad {
+	if GradEnabled() && (a.requiresGrad) {
 		out.requiresGrad = true
 		out.gradFn = &GradFn{
 			name:   "MaskFill",
@@ -68,7 +68,7 @@ func EmbeddingLookup(weight *Tensor, ids []int) *Tensor {
 		copy(out.data[i*dim:(i+1)*dim], weight.data[id*dim:(id+1)*dim])
 	}
 
-	if weight.requiresGrad {
+	if GradEnabled() && (weight.requiresGrad) {
 		out.requiresGrad = true
 		out.gradFn = &GradFn{
 			name:   "EmbeddingLookup",
@@ -95,7 +95,7 @@ func ScaledMatMul(a, b *Tensor, scale float32) *Tensor {
 	result := Zeros(out.shape...)
 	accelerate.VScale(out.data, invScale, result.data)
 
-	if out.requiresGrad {
+	if GradEnabled() && (out.requiresGrad) {
 		result.requiresGrad = true
 		result.gradFn = &GradFn{
 			name:   "ScaledMatMul",

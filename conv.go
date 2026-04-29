@@ -130,7 +130,7 @@ func Conv2dForward(input *Tensor, weight *Tensor, bias *Tensor, stride, pad int)
 	out := &Tensor{data: outData, shape: []int{batch, outC, outH, outW}}
 
 	// Autograd
-	if input.requiresGrad || weight.requiresGrad || (bias != nil && bias.requiresGrad) {
+	if GradEnabled() && (input.requiresGrad || weight.requiresGrad || (bias != nil && bias.requiresGrad)) {
 		out.requiresGrad = true
 		inputs := []*Tensor{input, weight}
 		if bias != nil {
@@ -167,13 +167,13 @@ func conv2dBackward(gradOutput *Tensor, input *Tensor, weight *Tensor, bias *Ten
 	is1x1 := kH == 1 && kW == 1 && stride == 1 && pad == 0
 
 	var dInput *Tensor
-	if input.requiresGrad {
+	if GradEnabled() && (input.requiresGrad) {
 		dInput = Zeros(input.shape...)
 	}
 	dWeight := Zeros(weight.shape...)
 
 	var dBias *Tensor
-	if bias != nil && bias.requiresGrad {
+	if GradEnabled() && (bias != nil && bias.requiresGrad) {
 		dBias = Zeros(bias.shape...)
 	}
 
@@ -181,7 +181,7 @@ func conv2dBackward(gradOutput *Tensor, input *Tensor, weight *Tensor, bias *Ten
 	var dcolBuf []float32
 	if !is1x1 {
 		colBuf = make([]float32, K*N)
-		if input.requiresGrad {
+		if GradEnabled() && (input.requiresGrad) {
 			dcolBuf = make([]float32, K*N)
 		}
 	}
@@ -208,7 +208,7 @@ func conv2dBackward(gradOutput *Tensor, input *Tensor, weight *Tensor, bias *Ten
 		accelerate.SgemmTransB(M, K, N, 1.0, gradSample, colData, 1.0, dWeight.data)
 
 		// dInput: dcol = weight^T @ gradSample => (K, M) @ (M, N) = (K, N)
-		if input.requiresGrad {
+		if GradEnabled() && (input.requiresGrad) {
 			if is1x1 {
 				dcolBuf = dInput.data[b*inC*H*W : (b+1)*inC*H*W]
 				accelerate.SgemmTransA(K, N, M, 1.0, weight.data, gradSample, 0.0, dcolBuf)
