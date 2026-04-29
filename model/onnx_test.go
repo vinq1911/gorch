@@ -147,11 +147,47 @@ func TestExportCNNRoundTripsInitializers(t *testing.T) {
 }
 
 func TestExportRejectsUnsupportedLayer(t *testing.T) {
-	// LayerNorm is intentionally not in the v1 exporter.
-	seq := nn.NewSequential(nn.NewLayerNorm(4))
+	// Dropout is intentionally not in the exporter — there's no
+	// ONNX-side semantic for "dropout in eval mode" that round-trips
+	// cleanly with our explicit-eval-mode design.
+	seq := nn.NewSequential(nn.NewDropout(0.1))
 	err := ExportSequentialToONNX(seq, []int{1, 4}, filepath.Join(t.TempDir(), "x.onnx"))
 	if err == nil {
 		t.Fatal("expected error for unsupported layer, got nil")
+	}
+}
+
+func TestExportLayerNormRoundTrip(t *testing.T) {
+	// Sequential with LayerNorm + Linear — common pre-classifier
+	// pattern (e.g., transformer encoder output classifier).
+	ln := nn.NewLayerNorm(8)
+	for i := range ln.Weight.Data() {
+		ln.Weight.Data()[i] = 1 + float32(i)*0.1
+	}
+	lin := nn.NewLinear(8, 3)
+	seq := nn.NewSequential(ln, nn.NewReLU(), lin)
+
+	path := filepath.Join(t.TempDir(), "ln.onnx")
+	if err := ExportSequentialToONNX(seq, []int{1, 8}, path); err != nil {
+		t.Fatalf("export: %v", err)
+	}
+
+	loaded, err := LoadONNX(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	// Expect 4 initializers: ln.W, ln.B, lin.W, lin.B
+	if got := len(loaded.Names); got != 4 {
+		t.Fatalf("expected 4 initializers, got %d (%v)", got, loaded.Names)
+	}
+	wantOps := []string{"LayerNormalization", "Relu", "Gemm"}
+	if len(loaded.Nodes) != len(wantOps) {
+		t.Fatalf("got %d nodes, want %d", len(loaded.Nodes), len(wantOps))
+	}
+	for i, op := range wantOps {
+		if loaded.Nodes[i].OpType != op {
+			t.Fatalf("node %d: got %q want %q", i, loaded.Nodes[i].OpType, op)
+		}
 	}
 }
 

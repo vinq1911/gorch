@@ -27,11 +27,12 @@ const (
 	onnxAttrInts    = 7
 )
 
-// ONNX IR version we target. 7 corresponds to opset 14, which covers
-// every op we emit (Gemm, Relu, Sigmoid, Tanh, Softmax, Conv,
-// MaxPool, Flatten).
-const onnxIRVersion = 7
-const onnxOpset = 14
+// ONNX IR version we target. IR version 8 with opset 17 is needed
+// for the LayerNormalization op (added in opset 17). All earlier ops
+// we emit (Gemm, Relu, Sigmoid, Tanh, Conv, MaxPool, Flatten) are
+// stable and well-supported at this opset.
+const onnxIRVersion = 8
+const onnxOpset = 17
 
 // ExportSequentialToONNX serialises a Sequential of supported
 // layers to an ONNX model file at path. inputShape is the static
@@ -156,9 +157,42 @@ func (gr *onnxGraph) addLayer(layer nn.Module) error {
 		return gr.addMaxPool2d(l)
 	case *nn.Flatten:
 		return gr.addFlatten()
+	case *nn.LayerNorm:
+		return gr.addLayerNorm(l)
 	default:
 		return fmt.Errorf("onnx: unsupported layer type %T", layer)
 	}
+}
+
+// addLayerNorm emits an ONNX LayerNormalization node (opset 17+).
+// gorch normalises the last dim and applies learnable gamma+beta;
+// LayerNormalization with default axis=-1 matches exactly.
+func (gr *onnxGraph) addLayerNorm(ln *nn.LayerNorm) error {
+	if len(gr.outputShape) < 2 || gr.outputShape[len(gr.outputShape)-1] != ln.Dim {
+		return fmt.Errorf("onnx: LayerNorm input shape %v incompatible with dim %d",
+			gr.outputShape, ln.Dim)
+	}
+
+	wName := gr.freshName("ln_w")
+	bName := gr.freshName("ln_b")
+	outName := gr.freshName("ln")
+
+	gr.addInitializerFloat32(wName, ln.Weight, []int64{int64(ln.Dim)})
+	gr.addInitializerFloat32(bName, ln.Bias, []int64{int64(ln.Dim)})
+
+	gr.nodes = append(gr.nodes, onnxNode{
+		opType:  "LayerNormalization",
+		name:    gr.freshName("LayerNorm"),
+		inputs:  []string{gr.outputName, wName, bName},
+		outputs: []string{outName},
+		attrs: []onnxAttr{
+			{name: "axis", kind: onnxAttrInt, i: -1},
+			{name: "epsilon", kind: onnxAttrFloat, f: ln.Eps},
+		},
+	})
+	gr.outputName = outName
+	// Shape unchanged — LayerNorm is per-row.
+	return nil
 }
 
 func (gr *onnxGraph) addLinear(l *nn.Linear) error {
