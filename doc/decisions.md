@@ -116,3 +116,16 @@ NumPy-compatible broadcasting via separate `AddB`/`SubB`/`MulB`/`DivB` functions
 Generation supports: greedy (argmax), temperature scaling, top-K filtering, and top-P nucleus sampling. KV cache struct exists for future incremental decoding but is not yet integrated into the GPT forward pass (full sequence recomputation per token).
 
 **Current throughput:** ~40 tok/s on GPT-2 small (124M params) without KV cache. With KV cache, expect 3-5x improvement for long sequences.
+
+## ADR-009: GPU autograd is matmul-first, not all-or-nothing
+
+**Date:** 2026-04-29
+**Status:** Accepted
+
+Backward passes are wired to dispatch to MPS only for MatMul (and Linear, which composes MatMul). Other ops (LayerNorm, Softmax, GELU, etc.) keep their CPU backwards. Gradients flowing through a chain therefore land on Metal whenever the surrounding ops are MatMul-shaped, and on CPU otherwise.
+
+**Rationale:** MatMul is the dominant cost in transformer training (typically >80% of FLOPs) and the math maps cleanly onto two transposed MPS calls (`MatMulTransA` and `MatMulTransB`, both already exposed for forward use). The remaining ops require either custom Metal kernels or significant per-op work, and shipping them piecemeal would clutter the codebase faster than it helps. Apple Silicon's unified memory makes the mixed-device chain cheap — Metal-backed slices are still float32 slices that CPU loops can iterate.
+
+**What works today:** Weights on `ToMetal(dev)`, run forward + Backward, dW/db match CPU within fp32 noise, training converges. Verified by `TestLinearBackwardMatchesCPUOnGPU` and `TestTrainTinyMLPOnGPU`.
+
+**What's deferred:** Custom Metal kernels for LayerNorm/Softmax/GELU backward, which would close the remaining gap for transformer training throughput.

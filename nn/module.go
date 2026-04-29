@@ -87,8 +87,17 @@ func (l *Linear) Forward(x *g.Tensor) *g.Tensor {
 		capturedBatch := batch
 
 		out.SetGradFn("Linear", []*g.Tensor{capturedX, capturedW, l.Bias}, func(grad *g.Tensor) []*g.Tensor {
-			gData := grad.Data()
+			// GPU path: when grad, x, and W are all on Metal, dispatch
+			// dx and dW through MPS. The bias sum is always done on
+			// CPU because it touches at most a few thousand floats.
+			if grad.IsOnMetal() && capturedX.IsOnMetal() && capturedW.IsOnMetal() {
+				dx := gpuLinearDx(grad, capturedW, capturedBatch, capturedIn, capturedOut, capturedX.RequiresGrad())
+				dw := gpuLinearDw(grad, capturedX, capturedBatch, capturedIn, capturedOut)
+				db := linearDb(grad, capturedBatch, capturedOut)
+				return []*g.Tensor{dx, dw, db}
+			}
 
+			gData := grad.Data()
 			// dL/dx = grad @ W  (batch, out) @ (out, in) = (batch, in)
 			var dx *g.Tensor
 			if capturedX.RequiresGrad() {
@@ -104,13 +113,7 @@ func (l *Linear) Forward(x *g.Tensor) *g.Tensor {
 			accelerate.SgemmTransA(capturedOut, capturedIn, capturedBatch, 1.0, gData, capturedX.Data(), 0.0, dwData)
 			dw := g.NewTensor(dwData, capturedOut, capturedIn)
 
-			// dL/db = sum of grad over batch (column sums)
-			dbData := make([]float32, capturedOut)
-			for i := 0; i < capturedBatch; i++ {
-				row := gData[i*capturedOut : (i+1)*capturedOut]
-				accelerate.VAdd(dbData, row, dbData)
-			}
-			db := g.NewTensor(dbData, 1, capturedOut)
+			db := linearDb(grad, capturedBatch, capturedOut)
 
 			return []*g.Tensor{dx, dw, db}
 		})

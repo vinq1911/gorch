@@ -485,15 +485,31 @@ func MatMul(a, b *Tensor) *Tensor {
 			name:   "MatMul",
 			inputs: []*Tensor{a, b},
 			backward: func(grad *Tensor) []*Tensor {
-				// dL/dA = grad @ B^T  (using BLAS transB)
-				// dL/dB = A^T @ grad  (using BLAS transA)
+				// dL/dA = grad @ B^T  (M, N) @ (N, K) -> (M, K)
+				// dL/dB = A^T @ grad  (K, M) @ (M, N) -> (K, N)
 				gM, gN := grad.shape[0], grad.shape[1]
-				bK := b.shape[0] // B is KxN, we want grad @ B^T = (gM, gN) @ (gN, bK) but bK=K, gN=N
-				dA := Zeros(gM, b.shape[0])
-				accelerate.SgemmTransB(gM, b.shape[0], gN, 1.0, grad.data, b.data, 0.0, dA.data)
+				bK := b.shape[0]
+
+				// GPU path: dispatch to MPS when every operand is on Metal
+				// at backward time. We check IsOnMetal() per call (not per
+				// forward) because tensors can be moved between devices
+				// after forward returns.
+				if gpu != nil && a.buf != nil && b.buf != nil && grad.buf != nil {
+					dABuf := gpu.Dev.NewBuffer(gM * bK * 4)
+					gpu.Queue.MatMulTransB(grad.buf, b.buf, dABuf, gM, bK, gN)
+					dA := &Tensor{data: dABuf.FloatSlice(), shape: []int{gM, bK}, buf: dABuf}
+
+					dBBuf := gpu.Dev.NewBuffer(a.shape[1] * gN * 4)
+					gpu.Queue.MatMulTransA(a.buf, grad.buf, dBBuf, a.shape[1], gN, a.shape[0])
+					dB := &Tensor{data: dBBuf.FloatSlice(), shape: []int{a.shape[1], gN}, buf: dBBuf}
+					return []*Tensor{dA, dB}
+				}
+
+				// CPU path: Accelerate BLAS.
+				dA := Zeros(gM, bK)
+				accelerate.SgemmTransB(gM, bK, gN, 1.0, grad.data, b.data, 0.0, dA.data)
 
 				dB := Zeros(a.shape[1], gN)
-				_ = bK
 				accelerate.SgemmTransA(a.shape[1], gN, a.shape[0], 1.0, a.data, grad.data, 0.0, dB.data)
 
 				return []*Tensor{dA, dB}
@@ -529,6 +545,31 @@ func MatMulTransB(a, b *Tensor) *Tensor {
 	}
 
 	// No autograd for now — used in inference-only Linear forward
+	return out
+}
+
+// MatMulTransA computes a^T @ b. a is (K, M), b is (K, N), result is (M, N).
+// No autograd — used inside backward functions where the inputs are
+// gradient tensors that should not extend the autograd graph.
+func MatMulTransA(a, b *Tensor) *Tensor {
+	if a.Dim() != 2 || b.Dim() != 2 {
+		panic("gorch: MatMulTransA requires 2-D tensors")
+	}
+	K, M := a.shape[0], a.shape[1]
+	K2, N := b.shape[0], b.shape[1]
+	if K != K2 {
+		panic(fmt.Sprintf("gorch: MatMulTransA shape mismatch: (%d,%d)^T @ (%d,%d)", K, M, K2, N))
+	}
+
+	out := Zeros(M, N)
+	if a.buf != nil && b.buf != nil && gpu != nil {
+		outBuf := gpu.Dev.NewBuffer(M * N * 4)
+		gpu.Queue.MatMulTransA(a.buf, b.buf, outBuf, M, N, K)
+		out.data = outBuf.FloatSlice()
+		out.buf = outBuf
+	} else {
+		accelerate.SgemmTransA(M, N, K, 1.0, a.data, b.data, 0.0, out.data)
+	}
 	return out
 }
 
