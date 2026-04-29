@@ -257,9 +257,12 @@ CGO_ENABLED=1 go test ./e2e/ -tags e2e -run TestComprehensiveBenchmark -v -timeo
 - [x] KV cache integration into GPT forward pass (`GenerateConfig.UseKVCache=true`)
 - [x] Pretrained model fine-tuning (`model.CausalLMLoss`)
 - [x] ONNX export (Sequential MLP/CNN: Linear, Conv2d, MaxPool2d, Flatten, Relu, Sigmoid, Tanh) + initializer-only import
-- [x] GPU autograd: MatMul + Linear backward on Metal (matmul-first; see ADR-009)
-- [ ] GPU autograd for non-MatMul ops (LayerNorm, Softmax, GELU backward)
-- [ ] Full transformer ONNX export (attention shape ops)
+- [x] GPU autograd: MatMul + Linear backward on Metal (matmul-first; see ADR-009/-fix). Crossover threshold at ~512M FMAs so small shapes don't regress.
+- [x] NoGrad gating + transient scratch pooling — `g.NoGrad(fn)` skips graph construction; 2.4× faster batched encode (see ADR-010)
+- [x] LayerNorm in ONNX export (opset 17)
+- [ ] GPU autograd for non-MatMul ops (LayerNorm, Softmax, GELU backward) — needed before large-shape (>1G FMAs) training is end-to-end on Metal
+- [ ] Full transformer ONNX export (attention shape ops + integer model input)
+- [ ] fp16/bf16 dtype support (~2× memory + ~2× compute available on Apple Silicon)
 
 ## License
 
