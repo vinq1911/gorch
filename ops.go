@@ -479,6 +479,27 @@ func Mean(a *Tensor) *Tensor {
 
 // ---------- MatMul ----------
 
+// MatMulMetalThreshold is the M*N*K product below which gorch uses
+// Accelerate sgemm even when both operands are on Metal. Empirically
+// (see doc/metal_crossover_results.json), MPS dispatch overhead on
+// Apple M-series is ~1ms; below ~1G FMAs the dispatch dominates and
+// CPU sgemm wins. Crossover lives between 768³ (GPU 0.45×) and
+// 1024³ (GPU 1.22×). Threshold set conservatively at 512M FMAs.
+//
+// This is a package-level variable so callers benchmarking large-
+// matmul GPU paths can lower it. Setting to 0 always uses GPU when
+// possible.
+var MatMulMetalThreshold = 512_000_000
+
+// shouldUseMetalMatMul returns true when M*N*K is large enough that
+// MPS dispatch is faster than Accelerate sgemm.
+func shouldUseMetalMatMul(M, N, K int) bool {
+	if gpu == nil {
+		return false
+	}
+	return int64(M)*int64(N)*int64(K) >= int64(MatMulMetalThreshold)
+}
+
 // MatMul computes matrix multiplication: a @ b.
 // a is (M, K), b is (K, N), result is (M, N).
 func MatMul(a, b *Tensor) *Tensor {
@@ -493,14 +514,16 @@ func MatMul(a, b *Tensor) *Tensor {
 
 	out := Zeros(M, N)
 
-	if a.buf != nil && b.buf != nil && gpu != nil {
-		// GPU path: MPS matmul
+	if a.buf != nil && b.buf != nil && shouldUseMetalMatMul(M, N, K) {
+		// GPU path: MPS matmul. Only dispatched when M*N*K is large
+		// enough for compute to pay off the dispatch overhead.
 		outBuf := gpu.Dev.NewBuffer(M * N * 4)
 		gpu.Queue.MatMul(a.buf, b.buf, outBuf, M, N, K)
 		out.data = outBuf.FloatSlice()
 		out.buf = outBuf
 	} else {
-		// CPU path: Accelerate BLAS sgemm
+		// CPU path: Accelerate BLAS sgemm. Reads through unified-
+		// memory slices when operands are Metal-backed.
 		accelerate.Sgemm(M, N, K, 1.0, a.data, b.data, 0.0, out.data)
 	}
 
@@ -515,11 +538,11 @@ func MatMul(a, b *Tensor) *Tensor {
 				gM, gN := grad.shape[0], grad.shape[1]
 				bK := b.shape[0]
 
-				// GPU path: dispatch to MPS when every operand is on Metal
-				// at backward time. We check IsOnMetal() per call (not per
-				// forward) because tensors can be moved between devices
-				// after forward returns.
-				if gpu != nil && a.buf != nil && b.buf != nil && grad.buf != nil {
+				// GPU path: every operand on Metal AND the dW shape
+				// (gM*bK*gN ≈ M*N*K of the original forward) clears
+				// the threshold. Otherwise CPU.
+				if a.buf != nil && b.buf != nil && grad.buf != nil &&
+					shouldUseMetalMatMul(gM, bK, gN) {
 					dABuf := gpu.Dev.NewBuffer(gM * bK * 4)
 					gpu.Queue.MatMulTransB(grad.buf, b.buf, dABuf, gM, bK, gN)
 					dA := &Tensor{data: dABuf.FloatSlice(), shape: []int{gM, bK}, buf: dABuf}
@@ -558,14 +581,12 @@ func MatMulTransB(a, b *Tensor) *Tensor {
 
 	out := Zeros(M, N)
 
-	if a.buf != nil && b.buf != nil && gpu != nil {
-		// GPU path: MPS matmul with transB
+	if a.buf != nil && b.buf != nil && shouldUseMetalMatMul(M, N, K) {
 		outBuf := gpu.Dev.NewBuffer(M * N * 4)
 		gpu.Queue.MatMulTransB(a.buf, b.buf, outBuf, M, N, K)
 		out.data = outBuf.FloatSlice()
 		out.buf = outBuf
 	} else {
-		// CPU path: Accelerate BLAS
 		accelerate.SgemmTransB(M, N, K, 1.0, a.data, b.data, 0.0, out.data)
 	}
 
@@ -587,7 +608,7 @@ func MatMulTransA(a, b *Tensor) *Tensor {
 	}
 
 	out := Zeros(M, N)
-	if a.buf != nil && b.buf != nil && gpu != nil {
+	if a.buf != nil && b.buf != nil && shouldUseMetalMatMul(M, N, K) {
 		outBuf := gpu.Dev.NewBuffer(M * N * 4)
 		gpu.Queue.MatMulTransA(a.buf, b.buf, outBuf, M, N, K)
 		out.data = outBuf.FloatSlice()
@@ -604,7 +625,10 @@ func MatMulTransA(a, b *Tensor) *Tensor {
 func BatchedMatMul(a, b *Tensor, batchSize, M, N, K int) *Tensor {
 	out := Zeros(batchSize, M, N)
 
-	if a.buf != nil && b.buf != nil && gpu != nil {
+	// For batched matmul the total compute is batchSize*M*N*K, but the
+	// dispatch overhead is amortised across the batch — one MPS call
+	// for the whole group. Use the total work as the threshold input.
+	if a.buf != nil && b.buf != nil && shouldUseMetalMatMul(batchSize*M, N, K) {
 		outBuf := gpu.Dev.NewBuffer(batchSize * M * N * 4)
 		gpu.Queue.BatchedMatMul(a.buf, b.buf, outBuf, M, N, K, batchSize)
 		out.data = outBuf.FloatSlice()
@@ -626,7 +650,7 @@ func BatchedMatMul(a, b *Tensor, batchSize, M, N, K int) *Tensor {
 func BatchedMatMulTransB(a, b *Tensor, batchSize, M, N, K int) *Tensor {
 	out := Zeros(batchSize, M, N)
 
-	if a.buf != nil && b.buf != nil && gpu != nil {
+	if a.buf != nil && b.buf != nil && shouldUseMetalMatMul(batchSize*M, N, K) {
 		outBuf := gpu.Dev.NewBuffer(batchSize * M * N * 4)
 		gpu.Queue.BatchedMatMulTransB(a.buf, b.buf, outBuf, M, N, K, batchSize)
 		out.data = outBuf.FloatSlice()

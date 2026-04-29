@@ -15,6 +15,10 @@ func TestGPUMatMulBackwardMatchesCPU(t *testing.T) {
 	if err != nil {
 		t.Skipf("metal not available: %v", err)
 	}
+	// Force GPU dispatch regardless of shape (the threshold otherwise
+	// keeps small matmuls on CPU; this test wants the GPU code path
+	// for correctness verification).
+	defer setMatMulMetalThresholdForTest(t, 0)()
 
 	// Deterministic small inputs.
 	M, K, N := 4, 6, 5
@@ -90,6 +94,7 @@ func TestMatMulTransAPublicOp(t *testing.T) {
 	if err != nil {
 		t.Skipf("metal not available: %v", err)
 	}
+	defer setMatMulMetalThresholdForTest(t, 0)()
 	K, M, N := 3, 4, 5
 	aData := make([]float32, K*M)
 	bData := make([]float32, K*N)
@@ -112,6 +117,16 @@ func TestMatMulTransAPublicOp(t *testing.T) {
 		t.Error("expected GPU result on Metal")
 	}
 	checkClose(t, "MatMulTransA", cpuOut.Data(), gpuOut.Data(), 1e-3)
+}
+
+// setMatMulMetalThresholdForTest temporarily lowers the threshold
+// so tests can exercise the GPU dispatch path on small shapes.
+// Returns a restore func to defer.
+func setMatMulMetalThresholdForTest(t *testing.T, v int) func() {
+	t.Helper()
+	prev := MatMulMetalThreshold
+	MatMulMetalThreshold = v
+	return func() { MatMulMetalThreshold = prev }
 }
 
 func checkClose(t *testing.T, label string, a, b []float32, tol float32) {
