@@ -20,6 +20,11 @@ type GPT struct {
 	NumHeads   int
 	MaxSeq     int
 	VocabSize  int
+	// TiedLMHead reports whether LMHead.Weight aliases TokenEmbed.Weight.
+	// When true, Parameters() returns the shared tensor only once and
+	// gradient updates from both the embedding lookup and the output
+	// projection accumulate into the same buffer (HF GPT-2 behaviour).
+	TiedLMHead bool
 }
 
 // NewGPT creates a GPT model with the given hyperparameters.
@@ -115,7 +120,30 @@ func (gpt *GPT) ForwardCached(newTokenIDs []int, cache *KVCache) *g.Tensor {
 	return gpt.LMHead.Forward(x)
 }
 
-// Parameters returns all learnable parameters.
+// TieLMHeadToEmbedding aliases the language-model head's weight to
+// the token-embedding weight. Both modules then share the same
+// underlying buffer — what HuggingFace GPT-2 does as
+// `lm_head.weight = wte.weight`. Gradient updates to the LM head
+// from the cross-entropy loss and updates to the embedding from
+// the lookup path both accumulate into the shared tensor.
+//
+// Parameters() de-duplicates the alias so the optimizer sees one
+// parameter slot, not two.
+//
+// Idempotent — calling it twice is a no-op.
+func (gpt *GPT) TieLMHeadToEmbedding() {
+	if gpt.TiedLMHead {
+		return
+	}
+	if gpt.LMHead.Weight.Size() != gpt.TokenEmbed.Weight.Size() {
+		panic("gorch/nn: cannot tie LMHead to embedding — sizes differ")
+	}
+	gpt.LMHead.Weight = gpt.TokenEmbed.Weight
+	gpt.TiedLMHead = true
+}
+
+// Parameters returns all learnable parameters. When TiedLMHead is
+// true, the shared embedding/LM-head weight appears once.
 func (gpt *GPT) Parameters() []*g.Tensor {
 	var params []*g.Tensor
 	params = append(params, gpt.TokenEmbed.Parameters()...)
@@ -124,7 +152,13 @@ func (gpt *GPT) Parameters() []*g.Tensor {
 		params = append(params, block.Parameters()...)
 	}
 	params = append(params, gpt.FinalNorm.Parameters()...)
-	params = append(params, gpt.LMHead.Parameters()...)
+	if gpt.TiedLMHead {
+		// LMHead.Weight aliases TokenEmbed.Weight, already in the
+		// list. Append only the bias.
+		params = append(params, gpt.LMHead.Bias)
+	} else {
+		params = append(params, gpt.LMHead.Parameters()...)
+	}
 	return params
 }
 
