@@ -152,6 +152,32 @@ This ADR-009 update therefore deprecates the recommendation to call `gpt.ToMetal
 
 Both are bigger structural changes than the matmul-first slice.
 
+## ADR-009-fix: matmul size-threshold for Metal dispatch
+
+**Date:** 2026-04-29
+**Status:** Accepted
+
+The regression in ADR-009-update wasn't about autograd specifically — it was about Metal dispatching at all for shapes too small to amortise MPS launch overhead. The existing `doc/metal_crossover_results.json` shows the actual crossover: 768³ matmul GPU is 0.45× CPU; 1024³ is 1.22× CPU; the inflection lives between 768³ and 1024³ on M-series.
+
+`MatMulMetalThreshold` is a package-level int (default 512_000_000 FMAs) that all matmul dispatch sites consult. Below it, the CPU Accelerate path runs even when both operands are on Metal — Accelerate sgemm reads through unified-memory slices fine, no actual transfer cost. Above it, MPS dispatches as before.
+
+This applies to `MatMul`, `MatMulTransA`, `MatMulTransB`, `BatchedMatMul`, `BatchedMatMulTransB` for both forward and backward.
+
+**Wall-clock impact, Apple M5, single-Linear training step (forward + Sum + Backward):**
+
+| Shape | pre-threshold Metal | post-threshold Metal | CPU |
+| ------------------ | ------------------- | -------------------- | --- |
+| (64, 768, 768)     | 2.27 ms             | **0.32 ms**          | 0.35 ms |
+
+At GPT-2 small dims with weights on Metal, the train step is now **at parity with pure CPU** rather than 4.6× slower. `gpt.ToMetal()` is no longer actively harmful at small shapes; it falls back to CPU Accelerate transparently. At shapes above the threshold (≥1G FMAs, e.g., 2048×2048×256+ batched workloads) MPS dispatches as before.
+
+Tests that exercise the GPU code path (`TestGPUMatMulBackwardMatchesCPU`, `TestMatMulTransAPublicOp`) lower the threshold to 0 via `setMatMulMetalThresholdForTest` so they keep verifying numerical equivalence.
+
+**What this fixes vs. doesn't:**
+- ✓ `gpt.ToMetal()` no longer causes a 4.6× training regression at GPT-2 small dims
+- ✓ Forward inference at small shapes is at parity with CPU (no penalty for ToMetal)
+- ✗ Above the threshold, large-shape training (2048+) still has the cross-device grad-coherence cost — addressing it needs the full Metal loss path or custom backward kernels (still ADR-009 deferred work)
+
 ## ADR-010: NoGrad gating + transient scratch pooling
 
 **Date:** 2026-04-29
