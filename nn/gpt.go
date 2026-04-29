@@ -142,6 +142,72 @@ func (gpt *GPT) TieLMHeadToEmbedding() {
 	gpt.TiedLMHead = true
 }
 
+// EncodeBatch runs the GPT encoder on a batch of variable-length
+// sequences in a single forward. Sequences shorter than the batch's
+// max length are padded with the model's pad token (default 0); a
+// length mask hides padded positions in the attention softmax so
+// they don't contaminate real positions.
+//
+// Returns a (B, S, dim) hidden-state tensor where S is the longest
+// sequence in idsList. Inference-only — the activation graph is not
+// built. See issue #9.
+//
+// Use Output for slice b, position i:
+//
+//	row := h.Data()[(b*S+i)*dim : (b*S+i+1)*dim]
+func (gpt *GPT) EncodeBatch(idsList [][]int) *g.Tensor {
+	return gpt.EncodeBatchPad(idsList, 0)
+}
+
+// EncodeBatchPad is EncodeBatch with an explicit pad token id.
+func (gpt *GPT) EncodeBatchPad(idsList [][]int, padToken int) *g.Tensor {
+	batch := len(idsList)
+	if batch == 0 {
+		panic("gorch/nn: EncodeBatch requires at least one sequence")
+	}
+
+	// Find max length and validate.
+	maxLen := 0
+	lengths := make([]int, batch)
+	for i, ids := range idsList {
+		if len(ids) > gpt.MaxSeq {
+			panic("gorch/nn: sequence length exceeds MaxSeq")
+		}
+		lengths[i] = len(ids)
+		if len(ids) > maxLen {
+			maxLen = len(ids)
+		}
+	}
+	if maxLen == 0 {
+		panic("gorch/nn: EncodeBatch needs at least one non-empty sequence")
+	}
+
+	// Pad and flatten.
+	flatTokens := make([]int, batch*maxLen)
+	flatPos := make([]int, batch*maxLen)
+	for b, ids := range idsList {
+		for i := 0; i < maxLen; i++ {
+			if i < len(ids) {
+				flatTokens[b*maxLen+i] = ids[i]
+			} else {
+				flatTokens[b*maxLen+i] = padToken
+			}
+			flatPos[b*maxLen+i] = i
+		}
+	}
+
+	tokEmb := gpt.TokenEmbed.Forward(flatTokens) // (B*S, D)
+	posEmb := gpt.PosEmbed.Forward(flatPos)      // (B*S, D)
+	x := g.Add(tokEmb, posEmb)
+
+	for _, block := range gpt.Blocks {
+		x = block.ForwardBatched(x, batch, maxLen, lengths)
+	}
+	x = gpt.FinalNorm.Forward(x)
+	// Reshape to (B, S, D) view.
+	return x.Reshape(batch, maxLen, gpt.Dim)
+}
+
 // Parameters returns all learnable parameters. When TiedLMHead is
 // true, the shared embedding/LM-head weight appears once.
 func (gpt *GPT) Parameters() []*g.Tensor {

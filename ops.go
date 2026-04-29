@@ -233,13 +233,38 @@ func Tanh(a *Tensor) *Tensor {
 
 // GELU returns the Gaussian Error Linear Unit activation: x * Phi(x).
 // Uses the tanh approximation: 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+//
+// Forward path is dispatched: Metal kernel (vec_gelu) on GPU, vForce
+// vectorised tanh on CPU. The naive per-element math.Tanh loop was
+// the dominant cost in transformer FFN forward (≈60% of EncodeBatch
+// time on M5 before this).
 func GELU(a *Tensor) *Tensor {
 	out := Zeros(a.shape...)
-	for i, x := range a.data {
-		x3 := x * x * x
-		inner := float32(0.7978845608) * (x + 0.044715*x3) // sqrt(2/pi) ≈ 0.7978845608
-		out.data[i] = 0.5 * x * (1 + float32(math.Tanh(float64(inner))))
+
+	if a.buf != nil && gpu != nil {
+		// GPU: single dispatch of the precompiled vec_gelu kernel.
+		outBuf := gpu.Dev.NewBuffer(a.Size() * 4)
+		gpu.Queue.Dispatch1D(gpu.pipe("vec_gelu"), []*metal.Buffer{a.buf, outBuf}, a.Size())
+		out.data = outBuf.FloatSlice()
+		out.buf = outBuf
+	} else {
+		// CPU: compute inner = sqrt(2/pi) * (x + 0.044715*x^3) elementwise,
+		// then one vForce vector-tanh, then 0.5 * x * (1 + tanh(inner)).
+		// vForce Tanh is the expensive bit and is the only piece that
+		// benefits from vectorisation; the surrounding scalar arithmetic
+		// is tight enough that Go's loop fuses with the compiler.
+		n := len(a.data)
+		inner := make([]float32, n)
+		for i, x := range a.data {
+			x3 := x * x * x
+			inner[i] = 0.7978845608 * (x + 0.044715*x3) // sqrt(2/pi)
+		}
+		accelerate.Tanh(inner, inner)
+		for i, x := range a.data {
+			out.data[i] = 0.5 * x * (1 + inner[i])
+		}
 	}
+
 	if a.requiresGrad {
 		out.requiresGrad = true
 		out.gradFn = &GradFn{
