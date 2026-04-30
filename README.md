@@ -8,10 +8,15 @@ Pure Go framework logic (tensors, autograd, nn modules, optimizers) with Apple's
 
 ## Highlights
 
-- **GPT-2 inference** — load pretrained weights from HuggingFace safetensors, generate text with temperature/top-k sampling
-- **97.2% MNIST** in ~1 second, **90.6% Fashion-MNIST CNN**, **97.4% breast cancer diagnosis** in 64ms
-- **Pipeline parallelism** — split transformer blocks across processes via TCP (fragmind)
-- **628x matmul speedup** via Apple Accelerate BLAS over naive Go loops
+- **GPT-2 inference** — load pretrained weights from HuggingFace safetensors, generate text with temperature/top-k sampling. **Streaming loader** drops ~622 MB peak transient RSS on a 622 MB safetensors file.
+- **8× faster generation with KV cache** — `GenerateConfig.UseKVCache=true` flips per-token cost from O(N²) to O(N) (measured 35.5 ms → 4.4 ms at 72 tokens, see ADR-011).
+- **2.4× faster batched encode** — `GPT.EncodeBatch([][]int)` runs N variable-length sequences in one forward; combined with vectorised GELU (vForce + Metal), single-pass `Encode` dropped from 55.7 ms → 25.3 ms on M5.
+- **97.2% MNIST** in ~1 second, **90.6% Fashion-MNIST CNN**, **97.4% breast cancer diagnosis** in 64ms.
+- **Pretrained fine-tuning** — `model.CausalLMLoss(model, tokens)` + `gpt.TieLMHeadToEmbedding()`. Real GPT-2 fine-tune converges 5 orders of magnitude in 60 steps (see `e2e/finetune_test.go`).
+- **Pipeline parallelism** — split transformer blocks across processes via TCP (fragmind).
+- **GPU autograd (matmul-first)** — `gpt.ToMetal()` runs matmul forward + Linear backward on Metal MPS at large shapes; size threshold falls back to Accelerate for small matmuls so it never regresses (ADR-009/-fix).
+- **`g.NoGrad(fn)`** actually does something: skips autograd graph construction and lets activations be GC'd between forwards. Pair with sync.Pool of within-op scratch (GELU, LayerNorm) for ~20% fewer allocations per inference.
+- **628× matmul speedup** via Apple Accelerate BLAS over naive Go loops.
 
 ## Features
 
@@ -229,6 +234,25 @@ CGO_ENABLED=1 go test ./e2e/ -tags e2e -run TestComprehensiveBenchmark -v -timeo
 | Fragmind 2-frag local | 39.7 tok/s | <3% overhead |
 | Accelerate matmul 512x512 | 158 µs | 628x vs naive |
 
+## Embedded inference (work in progress)
+
+Microcontroller inference is a separate track on branch [`claude/gorch-microcontroller-inference-Uw9vI`](https://github.com/vinq1911/gorch/tree/claude/gorch-microcontroller-inference-Uw9vI):
+
+- **`embedded/gm1_avr.h`** — header-only int8 inference kernel (Linear + ReLU + argmax) for AVR (ATmega2560/328p) and host. Weights in flash via `PROGMEM`, int8 activations, int32 accumulators, fused Q0.31 requantisation matching TFLite byte-for-byte.
+- **`embedded/avr_runner/`** — libsimavr host runner that loads an AVR ELF, hooks UART0 TX, streams bytes to stdout. The harness builds firmware, runs it through simulated AVR, asserts byte-equality with the Go reference.
+- **`embedded/riscv/`** + **`embedded/iris/`** — same model on simulated ESP32-C3-class RISC-V via QEMU; trains an Iris-flowers MLP in Go, exports it, runs on-device.
+- **`embedded/esp32c3/`** — real ESP32-C3 firmware via Espressif QEMU.
+
+The track has its own report PDFs: `gorch-microcontroller-report.pdf` and `gorch-esp32c3-report.pdf` on the branch.
+
+## Plans
+
+Forward-looking design notes (status `proposed`/`in progress`) live in [`doc/plans/`](https://github.com/vinq1911/gorch/tree/claude/gorch-microcontroller-inference-Uw9vI/doc/plans) on the same branch:
+
+- **0001 — OpenMythos port.** Recurrent-Depth Transformer (Prelude + recurrent block + Coda) with GQA/MLA attention and sparse MoE FFN. v1 success = `mythos_tiny` on TinyStories.
+- **0002 — bf16/fp16 dtype support.** ~2× memory + ~2× MPS throughput on Apple Silicon. Pretrained safetensors are already bf16 on disk; gorch promotes to fp32 internally today, wasted memory.
+- **0003 — External-advisory review.** What's right, what's already in gorch, and what's wrong (e.g. RoPE doesn't need complex-typed Metal shaders).
+
 ## Roadmap
 
 - [x] Tensors with CPU/Metal dual dispatch
@@ -254,15 +278,20 @@ CGO_ENABLED=1 go test ./e2e/ -tags e2e -run TestComprehensiveBenchmark -v -timeo
 - [x] Fragmind pipeline-parallel inference (TCP transport)
 - [x] Real-world benchmarks: Wine Quality, Breast Cancer, Fashion-MNIST
 - [x] Improvement ablation study (BN+GELU+Dropout+CosLR → +1.5%)
-- [x] KV cache integration into GPT forward pass (`GenerateConfig.UseKVCache=true`)
-- [x] Pretrained model fine-tuning (`model.CausalLMLoss`)
-- [x] ONNX export (Sequential MLP/CNN: Linear, Conv2d, MaxPool2d, Flatten, Relu, Sigmoid, Tanh) + initializer-only import
-- [x] GPU autograd: MatMul + Linear backward on Metal (matmul-first; see ADR-009/-fix). Crossover threshold at ~512M FMAs so small shapes don't regress.
-- [x] NoGrad gating + transient scratch pooling — `g.NoGrad(fn)` skips graph construction; 2.4× faster batched encode (see ADR-010)
-- [x] LayerNorm in ONNX export (opset 17)
+- [x] KV cache integration into GPT forward pass — `GenerateConfig.UseKVCache=true`, 8× faster at 72 tokens (ADR-011)
+- [x] Pretrained model fine-tuning — `model.CausalLMLoss`; e2e converges loss 5 orders of magnitude on real GPT-2 in 60 steps
+- [x] Tied LM head ↔ token embedding (HF GPT-2 parity, `gpt.TieLMHeadToEmbedding()`)
+- [x] Streaming safetensors loader — closes [#10](https://github.com/vinq1911/gorch/issues/10), ~half peak transient RSS on 600 MB files
+- [x] Batched GPT encoder — closes [#9](https://github.com/vinq1911/gorch/issues/9), `GPT.EncodeBatch([][]int)` with length mask
+- [x] Vectorised GELU — vForce on CPU, `vec_gelu` Metal kernel; 60% of FFN forward time recovered
+- [x] NoGrad gating + transient scratch sync.Pool — `g.NoGrad(fn)` actually skips the graph (ADR-010)
+- [x] ONNX export: Linear, Conv2d, MaxPool2d, Flatten, Relu, Sigmoid, Tanh, LayerNorm (opset 17) + initializer-only import
+- [x] GPU autograd: MatMul + Linear backward on Metal (matmul-first; ADR-009/-fix). Size threshold at ~512M FMAs keeps small shapes on CPU so `gpt.ToMetal()` never regresses.
 - [ ] GPU autograd for non-MatMul ops (LayerNorm, Softmax, GELU backward) — needed before large-shape (>1G FMAs) training is end-to-end on Metal
 - [ ] Full transformer ONNX export (attention shape ops + integer model input)
-- [ ] fp16/bf16 dtype support (~2× memory + ~2× compute available on Apple Silicon)
+- [ ] **fp16/bf16 dtype support** — ~2× memory + ~2× compute available on Apple Silicon. Plan in [`doc/plans/0002-bf16-support.md`](https://github.com/vinq1911/gorch/tree/claude/gorch-microcontroller-inference-Uw9vI/doc/plans/0002-bf16-support.md)
+- [ ] OpenMythos port — recurrent-depth transformer with MoE/GQA/MLA. Plan in [`doc/plans/0001-openmythos-port.md`](https://github.com/vinq1911/gorch/tree/claude/gorch-microcontroller-inference-Uw9vI/doc/plans/0001-openmythos-port.md)
+- [ ] Embedded inference track — AVR/RISC-V/ESP32-C3 already prototyped on `claude/gorch-microcontroller-inference-Uw9vI`
 
 ## License
 
