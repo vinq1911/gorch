@@ -622,19 +622,20 @@ func MatMulTransA(a, b *Tensor) *Tensor {
 // BatchedMatMul computes out[i] = a[i] @ b[i] for i in 0..batchSize-1.
 // a: (batchSize, M, K), b: (batchSize, K, N), out: (batchSize, M, N).
 // Dispatches to MPS batched matmul on GPU, Accelerate BLAS loop on CPU.
+//
+// Backward (CPU-loop, no batched-MPS-transA today):
+//
+//	dL/dA[i] = grad[i] @ B[i]^T  (per-batch SgemmTransB)
+//	dL/dB[i] = A[i]^T @ grad[i]  (per-batch SgemmTransA)
 func BatchedMatMul(a, b *Tensor, batchSize, M, N, K int) *Tensor {
 	out := Zeros(batchSize, M, N)
 
-	// For batched matmul the total compute is batchSize*M*N*K, but the
-	// dispatch overhead is amortised across the batch — one MPS call
-	// for the whole group. Use the total work as the threshold input.
 	if a.buf != nil && b.buf != nil && shouldUseMetalMatMul(batchSize*M, N, K) {
 		outBuf := gpu.Dev.NewBuffer(batchSize * M * N * 4)
 		gpu.Queue.BatchedMatMul(a.buf, b.buf, outBuf, M, N, K, batchSize)
 		out.data = outBuf.FloatSlice()
 		out.buf = outBuf
 	} else {
-		// CPU: loop over batch
 		for i := 0; i < batchSize; i++ {
 			aOff := i * M * K
 			bOff := i * K * N
@@ -642,11 +643,42 @@ func BatchedMatMul(a, b *Tensor, batchSize, M, N, K int) *Tensor {
 			accelerate.Sgemm(M, N, K, 1.0, a.data[aOff:aOff+M*K], b.data[bOff:bOff+K*N], 0.0, out.data[cOff:cOff+M*N])
 		}
 	}
+
+	if GradEnabled() && (a.requiresGrad || b.requiresGrad) {
+		out.requiresGrad = true
+		out.gradFn = &GradFn{
+			name:   "BatchedMatMul",
+			inputs: []*Tensor{a, b},
+			backward: func(grad *Tensor) []*Tensor {
+				dA := Zeros(batchSize, M, K)
+				dB := Zeros(batchSize, K, N)
+				for i := 0; i < batchSize; i++ {
+					aOff := i * M * K
+					bOff := i * K * N
+					cOff := i * M * N
+					// dA[i] = grad[i] @ B[i]^T
+					accelerate.SgemmTransB(M, K, N, 1.0,
+						grad.data[cOff:cOff+M*N], b.data[bOff:bOff+K*N],
+						0.0, dA.data[aOff:aOff+M*K])
+					// dB[i] = A[i]^T @ grad[i]
+					accelerate.SgemmTransA(K, N, M, 1.0,
+						a.data[aOff:aOff+M*K], grad.data[cOff:cOff+M*N],
+						0.0, dB.data[bOff:bOff+K*N])
+				}
+				return []*Tensor{dA, dB}
+			},
+		}
+	}
 	return out
 }
 
 // BatchedMatMulTransB computes out[i] = a[i] @ b[i]^T for i in 0..batchSize-1.
 // a: (batchSize, M, K), b: (batchSize, N, K), out: (batchSize, M, N).
+//
+// Backward (CPU-loop):
+//
+//	dL/dA[i] = grad[i] @ B[i]      (per-batch Sgemm)
+//	dL/dB[i] = grad[i]^T @ A[i]    (per-batch SgemmTransA)
 func BatchedMatMulTransB(a, b *Tensor, batchSize, M, N, K int) *Tensor {
 	out := Zeros(batchSize, M, N)
 
@@ -661,6 +693,32 @@ func BatchedMatMulTransB(a, b *Tensor, batchSize, M, N, K int) *Tensor {
 			bOff := i * N * K
 			cOff := i * M * N
 			accelerate.SgemmTransB(M, N, K, 1.0, a.data[aOff:aOff+M*K], b.data[bOff:bOff+N*K], 0.0, out.data[cOff:cOff+M*N])
+		}
+	}
+
+	if GradEnabled() && (a.requiresGrad || b.requiresGrad) {
+		out.requiresGrad = true
+		out.gradFn = &GradFn{
+			name:   "BatchedMatMulTransB",
+			inputs: []*Tensor{a, b},
+			backward: func(grad *Tensor) []*Tensor {
+				dA := Zeros(batchSize, M, K)
+				dB := Zeros(batchSize, N, K)
+				for i := 0; i < batchSize; i++ {
+					aOff := i * M * K
+					bOff := i * N * K
+					cOff := i * M * N
+					// dA[i] = grad[i] @ B[i]   (no transpose)
+					accelerate.Sgemm(M, K, N, 1.0,
+						grad.data[cOff:cOff+M*N], b.data[bOff:bOff+N*K],
+						0.0, dA.data[aOff:aOff+M*K])
+					// dB[i] = grad[i]^T @ A[i] — shape (N, M) @ (M, K) = (N, K)
+					accelerate.SgemmTransA(N, K, M, 1.0,
+						grad.data[cOff:cOff+M*N], a.data[aOff:aOff+M*K],
+						0.0, dB.data[bOff:bOff+N*K])
+				}
+				return []*Tensor{dA, dB}
+			},
 		}
 	}
 	return out
