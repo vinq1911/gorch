@@ -1,9 +1,44 @@
 # Plan 0001: OpenMythos port to gorch
 
-**Status:** proposed (planning, no code yet)
+**Status:** in progress (Phase 1 ✓, Phase 2 ✓; Phases 3–4 ahead)
 **Branch:** `claude/gorch-microcontroller-inference-Uw9vI` (planning notes only;
 implementation work would land on dedicated feature branches per phase).
-**Last updated:** 2026-04-29
+**Last updated:** 2026-04-30
+
+## Status
+
+- **Phase 1 — primitives in gorch main + AdamW + grad clip.** Complete.
+  Eleven primitive PRs shipped between #11 and #39 on main; AdamW and
+  grad clip live in `optim/`.
+- **Phase 2 — `model/mythos/` assembly.** Shipped 2026-04-30 as
+  `feature/mythos-phase2`. Files: `config.go` (with `TinyConfig`),
+  `block.go` (TransformerBlock = pre-norm RMSNorm + GQA + residual +
+  pre-norm RMSNorm + MoE + residual), `lti.go` (per-channel diagonal
+  LTI mixing via sigmoid-of-logit), `mythos.go` (top-level
+  Embedding → Prelude → Recurrent loop → Coda → final RMSNorm → tied
+  LM head). Tests cover: forward shape & no-NaN, recurrent-iter count
+  affects output (the architecture's central claim), one optimiser
+  step decreases CE loss, every parameter receives a gradient, the
+  LTI logits train, UseMLA=true panics until plan 0001's MLA-autograd
+  follow-up lands.
+
+  v1 simplifications carried forward (each is a clearly scoped
+  follow-up):
+
+    - Recurrent block weights are SHARED across iterations; depth-wise
+      LoRA adapters are deferred (matches the OpenMythos repo's
+      USE_LORA=False branch).
+    - LTI is per-channel diagonal damping, not the full matrix-A
+      eigenvalue parameterisation. Stability holds via sigmoid clamp.
+    - No ACT halting: `cfg.MaxLoopIters` is a fixed loop count.
+    - UseMLA=true panics — the MLA module's autograd through Slice/
+      Concat is partially broken; pinned in `TestMythosUseMLAPanics`.
+
+- **Phase 3 — training infra (TinyStories streaming + checkpoint
+  helper).** Not started.
+- **Phase 4 — `mythos_tiny` convergence on TinyStories with recurrent-
+  depth ablation.** Not started.
+- **Phase 5 — scale-up.** Deferred per plan-original wording.
 
 ## Goal
 
