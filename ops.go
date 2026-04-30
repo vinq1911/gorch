@@ -60,6 +60,10 @@ func (g *GPU) pipe(name string) *metal.Pipeline {
 // Add returns a + b element-wise.
 func Add(a, b *Tensor) *Tensor {
 	assertSameShape(a, b)
+	requireSameDtype(a, b, "Add")
+	if a.dtype == BFloat16 {
+		return downcastToBF16(Add(promoteToF32(a), promoteToF32(b)))
+	}
 	out := binaryOp(a, b, "vec_add", func(x, y float32) float32 { return x + y })
 	if GradEnabled() && (a.requiresGrad || b.requiresGrad) {
 		out.requiresGrad = true
@@ -77,6 +81,10 @@ func Add(a, b *Tensor) *Tensor {
 // Sub returns a - b element-wise.
 func Sub(a, b *Tensor) *Tensor {
 	assertSameShape(a, b)
+	requireSameDtype(a, b, "Sub")
+	if a.dtype == BFloat16 {
+		return downcastToBF16(Sub(promoteToF32(a), promoteToF32(b)))
+	}
 	out := binaryOp(a, b, "vec_sub", func(x, y float32) float32 { return x - y })
 	if GradEnabled() && (a.requiresGrad || b.requiresGrad) {
 		out.requiresGrad = true
@@ -94,6 +102,10 @@ func Sub(a, b *Tensor) *Tensor {
 // Mul returns a * b element-wise.
 func Mul(a, b *Tensor) *Tensor {
 	assertSameShape(a, b)
+	requireSameDtype(a, b, "Mul")
+	if a.dtype == BFloat16 {
+		return downcastToBF16(Mul(promoteToF32(a), promoteToF32(b)))
+	}
 	out := binaryOp(a, b, "vec_mul", func(x, y float32) float32 { return x * y })
 	if GradEnabled() && (a.requiresGrad || b.requiresGrad) {
 		out.requiresGrad = true
@@ -115,6 +127,10 @@ func Mul(a, b *Tensor) *Tensor {
 // Div returns a / b element-wise.
 func Div(a, b *Tensor) *Tensor {
 	assertSameShape(a, b)
+	requireSameDtype(a, b, "Div")
+	if a.dtype == BFloat16 {
+		return downcastToBF16(Div(promoteToF32(a), promoteToF32(b)))
+	}
 	out := binaryOp(a, b, "vec_div", func(x, y float32) float32 { return x / y })
 	if GradEnabled() && (a.requiresGrad || b.requiresGrad) {
 		out.requiresGrad = true
@@ -139,6 +155,9 @@ func Div(a, b *Tensor) *Tensor {
 
 // Neg returns -a element-wise.
 func Neg(a *Tensor) *Tensor {
+	if a.dtype == BFloat16 {
+		return downcastToBF16(Neg(promoteToF32(a)))
+	}
 	out := Zeros(a.shape...)
 	for i, v := range a.data {
 		out.data[i] = -v
@@ -158,6 +177,9 @@ func Neg(a *Tensor) *Tensor {
 
 // ReLU returns max(0, a) element-wise.
 func ReLU(a *Tensor) *Tensor {
+	if a.dtype == BFloat16 {
+		return downcastToBF16(ReLU(promoteToF32(a)))
+	}
 	out := unaryOp(a, "vec_relu", func(x float32) float32 {
 		if x > 0 {
 			return x
@@ -185,6 +207,9 @@ func ReLU(a *Tensor) *Tensor {
 
 // Sigmoid returns 1/(1+exp(-a)) element-wise.
 func Sigmoid(a *Tensor) *Tensor {
+	if a.dtype == BFloat16 {
+		return downcastToBF16(Sigmoid(promoteToF32(a)))
+	}
 	out := unaryOp(a, "vec_sigmoid", func(x float32) float32 {
 		return float32(1.0 / (1.0 + math.Exp(float64(-x))))
 	})
@@ -208,6 +233,9 @@ func Sigmoid(a *Tensor) *Tensor {
 
 // Tanh returns tanh(a) element-wise.
 func Tanh(a *Tensor) *Tensor {
+	if a.dtype == BFloat16 {
+		return downcastToBF16(Tanh(promoteToF32(a)))
+	}
 	out := unaryOp(a, "vec_tanh_act", func(x float32) float32 {
 		return float32(math.Tanh(float64(x)))
 	})
@@ -239,6 +267,9 @@ func Tanh(a *Tensor) *Tensor {
 // the dominant cost in transformer FFN forward (≈60% of EncodeBatch
 // time on M5 before this).
 func GELU(a *Tensor) *Tensor {
+	if a.dtype == BFloat16 {
+		return downcastToBF16(GELU(promoteToF32(a)))
+	}
 	out := Zeros(a.shape...)
 
 	if a.buf != nil && gpu != nil {
@@ -291,6 +322,9 @@ func GELU(a *Tensor) *Tensor {
 
 // Exp returns e^a element-wise.
 func Exp(a *Tensor) *Tensor {
+	if a.dtype == BFloat16 {
+		return downcastToBF16(Exp(promoteToF32(a)))
+	}
 	out := Zeros(a.shape...)
 	accelerate.Exp(a.data, out.data)
 	if GradEnabled() && (a.requiresGrad) {
@@ -313,6 +347,9 @@ func Exp(a *Tensor) *Tensor {
 
 // Log returns ln(a) element-wise.
 func Log(a *Tensor) *Tensor {
+	if a.dtype == BFloat16 {
+		return downcastToBF16(Log(promoteToF32(a)))
+	}
 	out := Zeros(a.shape...)
 	accelerate.Log(a.data, out.data)
 	if GradEnabled() && (a.requiresGrad) {
@@ -339,6 +376,9 @@ func Log(a *Tensor) *Tensor {
 func Softmax(a *Tensor) *Tensor {
 	if a.Dim() != 2 {
 		panic("gorch: Softmax requires 2-D tensor (batch, classes)")
+	}
+	if a.dtype == BFloat16 {
+		return downcastToBF16(Softmax(promoteToF32(a)))
 	}
 	batch, classes := a.shape[0], a.shape[1]
 	out := Zeros(batch, classes)
@@ -390,6 +430,9 @@ func Softmax(a *Tensor) *Tensor {
 func LogSoftmax(a *Tensor) *Tensor {
 	if a.Dim() != 2 {
 		panic("gorch: LogSoftmax requires 2-D tensor (batch, classes)")
+	}
+	if a.dtype == BFloat16 {
+		return downcastToBF16(LogSoftmax(promoteToF32(a)))
 	}
 	batch, classes := a.shape[0], a.shape[1]
 	out := Zeros(batch, classes)
@@ -443,6 +486,9 @@ func LogSoftmax(a *Tensor) *Tensor {
 
 // Sum returns the sum of all elements as a scalar tensor.
 func Sum(a *Tensor) *Tensor {
+	if a.dtype == BFloat16 {
+		return downcastToBF16(Sum(promoteToF32(a)))
+	}
 	s := accelerate.Sum(a.data)
 	out := NewTensor([]float32{s}, 1)
 	if GradEnabled() && (a.requiresGrad) {
@@ -461,6 +507,9 @@ func Sum(a *Tensor) *Tensor {
 
 // Mean returns the mean of all elements as a scalar tensor.
 func Mean(a *Tensor) *Tensor {
+	if a.dtype == BFloat16 {
+		return downcastToBF16(Mean(promoteToF32(a)))
+	}
 	s := Sum(a)
 	n := float32(a.Size())
 	out := NewTensor([]float32{s.data[0] / n}, 1)
@@ -505,6 +554,10 @@ func shouldUseMetalMatMul(M, N, K int) bool {
 func MatMul(a, b *Tensor) *Tensor {
 	if a.Dim() != 2 || b.Dim() != 2 {
 		panic("gorch: MatMul requires 2-D tensors")
+	}
+	requireSameDtype(a, b, "MatMul")
+	if a.dtype == BFloat16 {
+		return downcastToBF16(MatMul(promoteToF32(a), promoteToF32(b)))
 	}
 	M, K := a.shape[0], a.shape[1]
 	K2, N := b.shape[0], b.shape[1]
@@ -573,6 +626,10 @@ func MatMulTransB(a, b *Tensor) *Tensor {
 	if a.Dim() != 2 || b.Dim() != 2 {
 		panic("gorch: MatMulTransB requires 2-D tensors")
 	}
+	requireSameDtype(a, b, "MatMulTransB")
+	if a.dtype == BFloat16 {
+		return downcastToBF16(MatMulTransB(promoteToF32(a), promoteToF32(b)))
+	}
 	M, K := a.shape[0], a.shape[1]
 	N, K2 := b.shape[0], b.shape[1]
 	if K != K2 {
@@ -601,6 +658,10 @@ func MatMulTransA(a, b *Tensor) *Tensor {
 	if a.Dim() != 2 || b.Dim() != 2 {
 		panic("gorch: MatMulTransA requires 2-D tensors")
 	}
+	requireSameDtype(a, b, "MatMulTransA")
+	if a.dtype == BFloat16 {
+		return downcastToBF16(MatMulTransA(promoteToF32(a), promoteToF32(b)))
+	}
 	K, M := a.shape[0], a.shape[1]
 	K2, N := b.shape[0], b.shape[1]
 	if K != K2 {
@@ -628,6 +689,10 @@ func MatMulTransA(a, b *Tensor) *Tensor {
 //	dL/dA[i] = grad[i] @ B[i]^T  (per-batch SgemmTransB)
 //	dL/dB[i] = A[i]^T @ grad[i]  (per-batch SgemmTransA)
 func BatchedMatMul(a, b *Tensor, batchSize, M, N, K int) *Tensor {
+	requireSameDtype(a, b, "BatchedMatMul")
+	if a.dtype == BFloat16 {
+		return downcastToBF16(BatchedMatMul(promoteToF32(a), promoteToF32(b), batchSize, M, N, K))
+	}
 	out := Zeros(batchSize, M, N)
 
 	if a.buf != nil && b.buf != nil && shouldUseMetalMatMul(batchSize*M, N, K) {
@@ -680,6 +745,10 @@ func BatchedMatMul(a, b *Tensor, batchSize, M, N, K int) *Tensor {
 //	dL/dA[i] = grad[i] @ B[i]      (per-batch Sgemm)
 //	dL/dB[i] = grad[i]^T @ A[i]    (per-batch SgemmTransA)
 func BatchedMatMulTransB(a, b *Tensor, batchSize, M, N, K int) *Tensor {
+	requireSameDtype(a, b, "BatchedMatMulTransB")
+	if a.dtype == BFloat16 {
+		return downcastToBF16(BatchedMatMulTransB(promoteToF32(a), promoteToF32(b), batchSize, M, N, K))
+	}
 	out := Zeros(batchSize, M, N)
 
 	if a.buf != nil && b.buf != nil && shouldUseMetalMatMul(batchSize*M, N, K) {

@@ -27,6 +27,9 @@ func Gather(src *Tensor, idx []int) *Tensor {
 	if src.Dim() != 2 {
 		panic("gorch: Gather requires 2-D source")
 	}
+	if src.dtype == BFloat16 {
+		return downcastToBF16(Gather(promoteToF32(src), idx))
+	}
 	N, D := src.shape[0], src.shape[1]
 	M := len(idx)
 
@@ -84,6 +87,9 @@ func Gather(src *Tensor, idx []int) *Tensor {
 func ScatterAdd(src *Tensor, idx []int, N int) *Tensor {
 	if src.Dim() != 2 {
 		panic("gorch: ScatterAdd requires 2-D source")
+	}
+	if src.dtype == BFloat16 {
+		return downcastToBF16(ScatterAdd(promoteToF32(src), idx, N))
 	}
 	M, D := src.shape[0], src.shape[1]
 	if len(idx) != M {
@@ -237,6 +243,9 @@ func RepeatInterleave(src *Tensor, n int) *Tensor {
 	}
 	if n <= 0 {
 		panic("gorch: RepeatInterleave n must be ≥ 1")
+	}
+	if src.dtype == BFloat16 {
+		return downcastToBF16(RepeatInterleave(promoteToF32(src), n))
 	}
 	dim := nd - 2
 	srcShape := src.shape

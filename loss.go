@@ -13,9 +13,17 @@ func MSELoss(pred, target *Tensor) *Tensor {
 // logits: (batch, classes) raw scores (pre-softmax).
 // targets: (batch, 1) integer class labels stored as float32.
 // Returns a scalar loss = -mean(logsoftmax(logits)[i, target[i]]).
+//
+// Following the standard mixed-precision pattern, the loss is computed
+// in fp32 over fp32 logits. If logits arrive bf16, they're upcast and
+// the scalar loss returns f32 — losses don't need bf16 storage and
+// keeping them f32 avoids extra rounding noise in the optimiser.
 func CrossEntropyLoss(logits, targets *Tensor) *Tensor {
 	if logits.Dim() != 2 {
 		panic("gorch: CrossEntropyLoss requires 2-D logits (batch, classes)")
+	}
+	if logits.dtype == BFloat16 {
+		return CrossEntropyLoss(promoteToF32(logits), targets)
 	}
 	batch := logits.shape[0]
 	classes := logits.shape[1]

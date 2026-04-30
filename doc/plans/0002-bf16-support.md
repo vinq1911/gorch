@@ -1,9 +1,41 @@
 # Plan 0002: bf16 / fp16 dtype support in gorch
 
-**Status:** proposed
+**Status:** in progress (PR 1 + PR 2 shipped)
 **Tracks alongside:** README roadmap item "fp16/bf16 dtype support
 (~2× memory + ~2× compute available on Apple Silicon)" — already public.
-**Last updated:** 2026-04-29
+**Last updated:** 2026-04-30
+
+## Status
+
+- **PR 1 — storage type + Tensor.Dtype field.** Shipped 2026-04-30 as
+  `feature/bf16-tensor` (#40). Adds `BFloat16` enum, `data16 []uint16`
+  storage, `NewTensorBF16`, `ToF32` / `ToBF16` conversions, and unit
+  tests for round-trip + special values.
+- **PR 2 — per-op dispatch.** Shipped 2026-04-30 as `feature/bf16-ops`.
+  Every public op grows a 3-line dispatch block at the top: bf16 input
+  is upcast to f32, the existing f32 path runs, the result is downcast
+  back to bf16. Autograd is preserved through autograd-aware
+  `upcastBF16` / `downcastToBF16` wrappers; `Backward()` seeds the loss
+  grad with the loss's dtype and accumulates bf16 grads via
+  upcast → add → downcast. Mixed-dtype inputs panic. Forward parity
+  (5e-2 rel) and gradient parity (8e-2 rel) tested across the unary,
+  binary, MatMul, Softmax, Sum/Mean, GELU, and a small Linear-style
+  chain.
+
+  What PR 2 deliberately does NOT change:
+
+    - The optimiser still assumes f32 — bf16 weights with Adam state
+      need PR 3 (master-fp32 moments). Calling AdamW on bf16 weights
+      today will trip the f32 path.
+    - Safetensors still upcasts on load. PR for that comes after PR 3
+      so the loaded bf16 weights have an optimiser path that works.
+    - Conv2d / pool ops do not dispatch — they remain f32-only,
+      consistent with the plan's note that MNIST/Fashion-MNIST CNNs
+      need fp32 to keep their accuracy numbers.
+    - GPU kernels are still f32. bf16 inputs upcast on CPU before
+      hitting any Metal kernel; the dedicated bf16 Metal variants are
+      a follow-up (plan section "Per-backend kernels"; ~1 wk of shader
+      work).
 
 ## Why
 
