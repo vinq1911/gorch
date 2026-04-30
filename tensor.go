@@ -151,6 +151,18 @@ func (t *Tensor) SetRequiresGrad(b bool) *Tensor {
 	return t
 }
 
+// Detach returns a new Tensor sharing the same underlying data
+// (and Metal buffer, if any) as t but with requires_grad=false and
+// no gradFn. Use it as a goroutine-local "no autograd" escape hatch
+// when the process-global g.NoGrad scope isn't safe to use — e.g.,
+// concurrent inference goroutines mixed with a training loop in
+// another goroutine. Mutating the returned tensor's data mutates t's
+// data too; treat Detach as "make a non-tracking handle to the same
+// memory," not a copy.
+func (t *Tensor) Detach() *Tensor {
+	return &Tensor{data: t.data, shape: copyShape(t.shape), buf: t.buf}
+}
+
 // Grad returns the accumulated gradient, or nil.
 func (t *Tensor) Grad() *Tensor { return t.grad }
 

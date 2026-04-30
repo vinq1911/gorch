@@ -58,10 +58,30 @@ func (t *Tensor) Backward() {
 }
 
 // noGradDepth tracks nested NoGrad scopes.
+//
+// IMPORTANT: this counter is process-global, not goroutine-local. A
+// NoGrad scope opened in goroutine A turns off gradient tracking for
+// every other goroutine until the scope closes — which is wrong if
+// another goroutine is in the middle of a training step. There is no
+// race on the counter itself (single-threaded reads dominate, and the
+// observable failure mode is "wrong answer" not "data race"), but the
+// semantic limitation is real.
+//
+// If you need to disable gradient tracking on specific tensors without
+// affecting other goroutines, use Tensor.Detach() — it returns a new
+// tensor handle sharing the same data but with requires_grad=false and
+// no gradFn. That works at any scope and doesn't touch global state.
+//
+// PyTorch's torch.no_grad() has the same global-thread-local-ish
+// limitation, and tensor.detach() is the same goroutine/thread-local
+// escape hatch. Mirroring that pairing intentionally.
 var noGradDepth int
 
 // NoGrad executes fn with gradient tracking disabled.
-// Any tensors created inside fn will not track gradients.
+//
+// Process-global state — see the IMPORTANT note on noGradDepth above.
+// For goroutine-local "don't track this" semantics, use Tensor.Detach()
+// instead.
 func NoGrad(fn func()) {
 	noGradDepth++
 	defer func() { noGradDepth-- }()
@@ -69,6 +89,9 @@ func NoGrad(fn func()) {
 }
 
 // GradEnabled returns true if gradient tracking is currently active.
+//
+// Reads the process-global counter. See Tensor.Detach for a goroutine-
+// local opt-out that doesn't touch this state.
 func GradEnabled() bool {
 	return noGradDepth == 0
 }
