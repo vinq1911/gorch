@@ -197,6 +197,52 @@ func TestMoELoadBalanceLossHighWhenSkewed(t *testing.T) {
 	}
 }
 
+// TestMoEExpertWeightsReceiveGradient: with the autograd-aware path
+// (Gather + Mul + ScatterAdd + Add), every expert that processed at
+// least one token must receive a non-zero gradient on its Linear
+// weights. Pre-fix MoE.Forward used a manual-scatter loop that broke
+// the chain; expert weights stayed at init.
+func TestMoEExpertWeightsReceiveGradient(t *testing.T) {
+	const dim, expDim, M, N, K = 8, 16, 6, 4, 2
+	moe := NewMoE(dim, expDim, N, K)
+
+	x := g.RandN(M, dim)
+	y := moe.Forward(x)
+	loss := g.Sum(y)
+	loss.Backward()
+
+	// Find which experts processed tokens this batch.
+	logits := moe.Router.Forward(x)
+	_, topIdx := g.TopK(logits, K)
+	used := make(map[int]bool)
+	for _, e := range topIdx {
+		used[e] = true
+	}
+	if len(used) == 0 {
+		t.Fatal("no experts used — test setup error")
+	}
+	for e := range used {
+		params := moe.Experts[e].Parameters()
+		any := false
+		for _, p := range params {
+			if grad := p.Grad(); grad != nil {
+				for _, v := range grad.Data() {
+					if v != 0 {
+						any = true
+						break
+					}
+				}
+			}
+			if any {
+				break
+			}
+		}
+		if !any {
+			t.Errorf("expert %d processed tokens but received no gradient", e)
+		}
+	}
+}
+
 func TestMoEValidatesK(t *testing.T) {
 	cases := []struct {
 		k        int

@@ -58,6 +58,67 @@ func Gather(src *Tensor, idx []int) *Tensor {
 	return out
 }
 
+// ScatterAdd is the autograd-aware inverse of Gather.
+//
+//	src: (M, D), idx: []int of length M, dim N
+//	out: (N, D) initially zeroed; for each i:
+//	     out[idx[i], :] += src[i, :]
+//
+// Indices that appear multiple times in idx accumulate the rows of
+// src at those positions (the "add" in scatter-add). Indices that
+// don't appear keep their initial zero. PyTorch equivalent:
+// torch.zeros(N, D).index_add_(0, idx, src).
+//
+// MoE's expert-dispatch scatter is the canonical use case:
+// after each expert produces its output rows, scatter-add them
+// (weighted by routing probabilities) back into the global output
+// at the correct token positions.
+//
+// Backward (with respect to src): for each i,
+//
+//	d/dsrc[i, :] = grad[idx[i], :]
+//
+// — the same operation as Gather. Gather and ScatterAdd are duals.
+//
+// Plan 0001 Phase 1 follow-up; needed by MoE training.
+func ScatterAdd(src *Tensor, idx []int, N int) *Tensor {
+	if src.Dim() != 2 {
+		panic("gorch: ScatterAdd requires 2-D source")
+	}
+	M, D := src.shape[0], src.shape[1]
+	if len(idx) != M {
+		panic(fmt.Sprintf("gorch: ScatterAdd idx length %d != src rows %d", len(idx), M))
+	}
+
+	out := Zeros(N, D)
+	for i, j := range idx {
+		if j < 0 || j >= N {
+			panic(fmt.Sprintf("gorch: ScatterAdd index %d out of range [0, %d)", j, N))
+		}
+		for d := 0; d < D; d++ {
+			out.data[j*D+d] += src.data[i*D+d]
+		}
+	}
+
+	if GradEnabled() && src.requiresGrad {
+		out.requiresGrad = true
+		idxCopy := append([]int{}, idx...)
+		out.gradFn = &GradFn{
+			name:   "ScatterAdd",
+			inputs: []*Tensor{src},
+			backward: func(grad *Tensor) []*Tensor {
+				// d/dsrc[i, :] = grad[idx[i], :] — that's just Gather(grad, idx).
+				dSrc := Zeros(M, D)
+				for i, j := range idxCopy {
+					copy(dSrc.data[i*D:(i+1)*D], grad.data[j*D:(j+1)*D])
+				}
+				return []*Tensor{dSrc}
+			},
+		}
+	}
+	return out
+}
+
 // TopK returns the values and indices of the K largest elements
 // along the last dimension of a 2-D tensor.
 //

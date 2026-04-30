@@ -103,8 +103,23 @@ func NewMoE(dim, expertDim, numExperts, numExpertsPerToken int) *MoE {
 //	   scatter outputs back to original positions, weight by routing
 //	5. sum across the K expert contributions per token
 //
-// Inference-only — autograd through the gather/scatter would need
-// proper Scatter op work (Plan 0001 doesn't ship it; Phase 5).
+// Autograd flows through:
+//   - g.Gather (autograd) for input collection per expert
+//   - Expert.Forward's chained Linear+SwiGLU+Linear (autograd)
+//   - g.Mul broadcasting per-row routing weight (autograd wrt expert
+//     output; the weight tensor itself is detached — see note below)
+//   - g.ScatterAdd (autograd) to scatter-add the weighted expert
+//     outputs back to the global accumulator
+//   - g.Add (autograd) to accumulate across experts
+//
+// Note: the routing weights are computed via a non-autograd-aware
+// softmax over topVals.Data() (raw float32). Gradient does NOT flow
+// from the loss through routing weights back to the router, because
+// TopK selection is non-differentiable and we don't have a per-row
+// gather along axis 1 yet. The router IS still trained — through the
+// LoadBalanceLoss helper, which uses the autograd-aware Softmax on
+// the full router output. Two-stage training is standard for MoE
+// (Mixtral, DeepSeek both do this).
 //
 // Returns: (M, dim) output.
 func (m *MoE) Forward(x *g.Tensor) *g.Tensor {
@@ -112,17 +127,11 @@ func (m *MoE) Forward(x *g.Tensor) *g.Tensor {
 	dim := m.Dim
 	K := m.NumExpertsPerToken
 
-	// Router scores → top-K per token.
-	logits := m.Router.Forward(x) // (M, numExperts)
+	logits := m.Router.Forward(x)
 	topVals, topIdx := g.TopK(logits, K)
-
-	// Softmax over the top-K values (re-normalise within the chosen
-	// experts so weights sum to 1). DeepSeek/Mixtral both do this.
 	weights := softmaxRows(topVals.Data(), M, K)
 
 	// Group token indices by destination expert.
-	// expertTokens[e] = list of (token_idx, slot_idx) pairs where
-	// slot_idx ∈ [0, K) tells which of the token's K experts this is.
 	type assign struct {
 		token, slot int
 	}
@@ -134,37 +143,36 @@ func (m *MoE) Forward(x *g.Tensor) *g.Tensor {
 		}
 	}
 
-	// Run each expert on its assigned tokens; scatter weighted output.
-	out := g.Zeros(M, dim)
-	outData := out.Data()
+	// Start with a zero accumulator. Each expert's weighted output
+	// scatter-adds into it via the autograd-aware path.
+	var out *g.Tensor = g.Zeros(M, dim)
 
 	for e := 0; e < m.NumExperts; e++ {
 		group := expertTokens[e]
 		if len(group) == 0 {
 			continue
 		}
-		// Gather token rows for this expert.
 		idxList := make([]int, len(group))
+		wRow := make([]float32, len(group)*dim)
 		for i, a := range group {
 			idxList[i] = a.token
-		}
-		input := g.Gather(x, idxList) // (len(group), dim)
-
-		// Run expert.
-		exOut := m.Experts[e].Forward(input) // (len(group), dim)
-		exData := exOut.Data()
-
-		// Scatter weighted output back.
-		for i, a := range group {
 			w := weights[a.token*K+a.slot]
-			rowOff := i * dim
-			outOff := a.token * dim
 			for d := 0; d < dim; d++ {
-				outData[outOff+d] += w * exData[rowOff+d]
+				wRow[i*dim+d] = w
 			}
 		}
-	}
+		input := g.Gather(x, idxList)        // autograd ✓
+		exOut := m.Experts[e].Forward(input) // autograd ✓ (Linear→SwiGLU→Linear)
 
+		// Per-row routing-weight scaling via Mul (autograd wrt exOut).
+		wTensor := g.NewTensor(wRow, len(group), dim)
+		weighted := g.Mul(exOut, wTensor)
+
+		// Scatter-add this expert's weighted contribution to the
+		// (M, dim) accumulator. Autograd-aware end-to-end.
+		contribution := g.ScatterAdd(weighted, idxList, M)
+		out = g.Add(out, contribution)
+	}
 	return out
 }
 
