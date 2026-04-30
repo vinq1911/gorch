@@ -154,24 +154,34 @@ func (m *MLA) Forward(x *g.Tensor, startPos int) *g.Tensor {
 	// 5. Q_full = concat(Q_nope, Q_rope). Then scores = Q · K^T / sqrt(headDim).
 	qFull := mlaConcatLast(qNope, qRope, H, seqLen, nopeDim, ropeDim)
 	scores := g.BatchedMatMulTransB(qFull, kFull, H, seqLen, seqLen, headDim)
+
+	// Autograd-aware scale + mask + softmax (replaces in-place
+	// mutation that broke the chain). Note: MLA's chain is still
+	// not fully autograd-trainable upstream of this point because
+	// mlaSliceLast/mlaConcatLast/mlaConcatRopeKey are pure-data
+	// helpers without autograd. Fixing those needs a Slice and
+	// Concat primitive — separate change.
 	invScale := float32(1.0 / math.Sqrt(float64(headDim)))
-	for i := range scores.Data() {
-		scores.Data()[i] *= invScale
-	}
-	for h := 0; h < H; h++ {
-		block := scores.Data()[h*seqLen*seqLen : (h+1)*seqLen*seqLen]
-		if m.Causal {
-			for i := 0; i < seqLen; i++ {
-				for j := i + 1; j < seqLen; j++ {
-					block[i*seqLen+j] = -1e9
-				}
-			}
+	scaleVec := g.Full(invScale, scores.Shape()...)
+	scoredScaled := g.Mul(scores, scaleVec)
+
+	var masked *g.Tensor
+	if m.Causal {
+		flatScores := scoredScaled.Reshape(H*seqLen, seqLen)
+		baseMask := g.CausalMask(seqLen)
+		fullMask := make([]bool, H*seqLen*seqLen)
+		for h := 0; h < H; h++ {
+			copy(fullMask[h*seqLen*seqLen:(h+1)*seqLen*seqLen], baseMask)
 		}
-		softmaxInPlace(block, seqLen)
+		masked = g.MaskFill(flatScores, fullMask, -1e9)
+	} else {
+		masked = scoredScaled.Reshape(H*seqLen, seqLen)
 	}
+	softmaxed := g.Softmax(masked)
+	scoresOut := softmaxed.Reshape(H, seqLen, seqLen)
 
 	// 6. attn @ V → (H, seq, valueDim) → (seq, H, valueDim) → (seq, H*valueDim)
-	attnOut := g.BatchedMatMul(scores, v, H, seqLen, valDim, seqLen)
+	attnOut := g.BatchedMatMul(scoresOut, v, H, seqLen, valDim, seqLen)
 	concat := g.Permute(attnOut, []int{1, 0, 2}).Reshape(seqLen, H*valDim)
 	return m.Wo.Forward(concat)
 }

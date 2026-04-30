@@ -120,27 +120,40 @@ func (gqa *GQA) Forward(x *g.Tensor, startPos int) *g.Tensor {
 
 	// Batched scores: (numQ, seq, headDim) × (numQ, headDim, seq) → (numQ, seq, seq)
 	scores := g.BatchedMatMulTransB(qH, kH, numQ, seqLen, seqLen, headDim)
+
+	// Scale by 1/sqrt(headDim) using a broadcast multiply so the
+	// gradient flows back through scores. (Was an in-place mutation
+	// before, which broke the autograd chain.)
 	invScale := float32(1.0 / math.Sqrt(float64(headDim)))
-	scoresData := scores.Data()
-	for i := range scoresData {
-		scoresData[i] *= invScale
+	scaleVec := g.Full(invScale, scores.Shape()...)
+	scoredScaled := g.Mul(scores, scaleVec)
+
+	// Apply causal mask via autograd-aware MaskFill on the
+	// (numQ*seq, seq) reshaped view. The mask has the same upper-
+	// triangular pattern repeated per (head, row) — build once and
+	// apply.
+	var masked *g.Tensor
+	if gqa.Causal {
+		flatScores := scoredScaled.Reshape(numQ*seqLen, seqLen)
+		// Mask shape matches the flat tensor; tile causal upper-tri
+		// over numQ heads.
+		baseMask := g.CausalMask(seqLen)
+		fullMask := make([]bool, numQ*seqLen*seqLen)
+		for h := 0; h < numQ; h++ {
+			copy(fullMask[h*seqLen*seqLen:(h+1)*seqLen*seqLen], baseMask)
+		}
+		masked = g.MaskFill(flatScores, fullMask, -1e9)
+	} else {
+		masked = scoredScaled.Reshape(numQ*seqLen, seqLen)
 	}
 
-	// Causal mask + softmax per (head, row).
-	for h := 0; h < numQ; h++ {
-		block := scoresData[h*seqLen*seqLen : (h+1)*seqLen*seqLen]
-		if gqa.Causal {
-			for i := 0; i < seqLen; i++ {
-				for j := i + 1; j < seqLen; j++ {
-					block[i*seqLen+j] = -1e9
-				}
-			}
-		}
-		softmaxInPlace(block, seqLen)
-	}
+	// Autograd-aware softmax along the last dim of the
+	// (numQ*seq, seq) view.
+	softmaxed := g.Softmax(masked)
+	scoresOut := softmaxed.Reshape(numQ, seqLen, seqLen)
 
 	// attn @ V: (numQ, seq, seq) × (numQ, seq, headDim) → (numQ, seq, headDim)
-	attnOut := g.BatchedMatMul(scores, vH, numQ, seqLen, headDim, seqLen)
+	attnOut := g.BatchedMatMul(scoresOut, vH, numQ, seqLen, headDim, seqLen)
 
 	// Permute back: (numQ, seq, headDim) → (seq, numQ, headDim) → (seq, dim).
 	concat := g.Permute(attnOut, []int{1, 0, 2}).Reshape(seqLen, dim)

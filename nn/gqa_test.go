@@ -208,6 +208,50 @@ func TestGQAValidatesShapes(t *testing.T) {
 	}
 }
 
+// TestGQAGradientFlowsToAllProjections: with autograd-aware
+// MaskFill + Softmax replacing softmaxInPlace (and BatchedMatMul
+// already autograd-aware from PR #34), gradient should now flow
+// through the entire attention chain to Wq, Wk, Wv (not just Wo).
+//
+// Pre-fix: only Wo received gradient (via Linear's own autograd
+// hook); Wq/Wk/Wv had nil gradients because softmaxInPlace broke
+// the chain. Post-fix: all four projections train.
+func TestGQAGradientFlowsToAllProjections(t *testing.T) {
+	const dim, numQ, numKV, seqLen = 16, 4, 2, 5
+	gqa := NewGQA(dim, numQ, numKV)
+
+	x := g.RandN(seqLen, dim)
+	y := gqa.Forward(x, 0)
+	loss := g.Sum(y)
+	loss.Backward()
+
+	for _, p := range []struct {
+		name string
+		t    *g.Tensor
+	}{
+		{"Wq.Weight", gqa.Wq.Weight},
+		{"Wk.Weight", gqa.Wk.Weight},
+		{"Wv.Weight", gqa.Wv.Weight},
+		{"Wo.Weight", gqa.Wo.Weight},
+	} {
+		grad := p.t.Grad()
+		if grad == nil {
+			t.Errorf("%s has no gradient — autograd chain still broken", p.name)
+			continue
+		}
+		nonZero := false
+		for _, v := range grad.Data() {
+			if v != 0 {
+				nonZero = true
+				break
+			}
+		}
+		if !nonZero {
+			t.Errorf("%s gradient is all zeros — flowed through but contributed nothing", p.name)
+		}
+	}
+}
+
 func shapesEqual4(a, b []int) bool {
 	if len(a) != len(b) {
 		return false
