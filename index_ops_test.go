@@ -69,6 +69,89 @@ func TestGatherInvalidIndexPanics(t *testing.T) {
 	Gather(src, []int{0, 10})
 }
 
+// ---------- ScatterAdd ----------
+
+func TestScatterAddForwardSpec(t *testing.T) {
+	// src 3 rows, scatter into N=5 with overlap (idx[0] = idx[2] = 1).
+	src := NewTensor([]float32{
+		1, 2,
+		3, 4,
+		5, 6,
+	}, 3, 2)
+	idx := []int{1, 3, 1}
+	out := ScatterAdd(src, idx, 5)
+	want := []float32{
+		0, 0, // row 0 untouched
+		6, 8, // row 1 = src[0] + src[2] = (1+5, 2+6)
+		0, 0,
+		3, 4, // row 3 = src[1]
+		0, 0,
+	}
+	for i, w := range want {
+		if out.Data()[i] != w {
+			t.Fatalf("[%d] got %g want %g", i, out.Data()[i], w)
+		}
+	}
+}
+
+// TestScatterAddIsGatherInverse: Scatter then Gather at the same
+// indices must round-trip src exactly (up to overlap edge cases).
+func TestScatterAddIsGatherInverse(t *testing.T) {
+	src := NewTensor([]float32{1, 2, 3, 4, 5, 6, 7, 8}, 4, 2)
+	idx := []int{2, 0, 5, 7} // no overlaps
+	scatterOut := ScatterAdd(src, idx, 8)
+	gatherBack := Gather(scatterOut, idx)
+	for i, want := range src.Data() {
+		if gatherBack.Data()[i] != want {
+			t.Fatalf("[%d] round-trip failed: got %g want %g", i, gatherBack.Data()[i], want)
+		}
+	}
+}
+
+// TestScatterAddBackwardMatchesNumerical: analytical-vs-numerical for
+// both unique indices and overlapping ones.
+func TestScatterAddBackwardMatchesNumerical(t *testing.T) {
+	src := RandN(4, 3).SetRequiresGrad(true)
+	idx := []int{2, 0, 2, 5} // index 2 appears twice
+	loss := Sum(ScatterAdd(src, idx, 6))
+	loss.Backward()
+	dSrcAnalytic := append([]float32{}, src.Grad().Data()...)
+
+	const h = 1e-3
+	for i := range src.Data() {
+		orig := src.Data()[i]
+		src.Data()[i] = orig + h
+		yPlus := Sum(ScatterAdd(src, idx, 6)).Data()[0]
+		src.Data()[i] = orig - h
+		yMinus := Sum(ScatterAdd(src, idx, 6)).Data()[0]
+		src.Data()[i] = orig
+		num := (yPlus - yMinus) / (2 * h)
+		if math.Abs(float64(dSrcAnalytic[i]-num)) > 1e-2 {
+			t.Fatalf("[%d] analytic=%g numeric=%g", i, dSrcAnalytic[i], num)
+		}
+	}
+}
+
+func TestScatterAddInvalidIndexPanics(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected panic on out-of-range index")
+		}
+	}()
+	src := RandN(2, 3)
+	ScatterAdd(src, []int{0, 99}, 5)
+}
+
+func TestScatterAddIdxLengthMismatchPanics(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected panic on idx length mismatch")
+		}
+	}()
+	src := RandN(3, 2)
+	ScatterAdd(src, []int{0, 1}, 5) // idx length 2 != src rows 3
+}
+
 // ---------- TopK ----------
 
 func TestTopKValuesAndIndices(t *testing.T) {
