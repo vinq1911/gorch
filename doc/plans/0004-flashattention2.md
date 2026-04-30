@@ -1,9 +1,25 @@
 # Plan 0004: Native Metal FlashAttention-2 + non-MatMul GPU autograd
 
-**Status:** proposed
+**Status:** in progress (part A kernel 1 of 6 shipped)
 **Tracks:** README roadmap items "GPU autograd for non-MatMul ops" and the
 FlashAttention claim called out in `0003-gemini-review.md`.
 **Last updated:** 2026-04-30
+
+## Status
+
+- **Part A — RMSNorm Metal forward + dx backward** shipped 2026-04-30
+  as `feature/rmsnorm-metal-backward`. New kernels `rmsnorm_forward`
+  and `rmsnorm_dx` in `metal/kernels.go`; threadgroup-controlled
+  dispatch via the new `Dispatch1DThreadgroups` shim;
+  `RMSNormForwardMetal` / `RMSNormBackwardDXMetal` in
+  `gorch/rmsnorm_metal.go`; `nn.RMSNorm.Forward` routes to the GPU
+  path when both x and gamma live on Metal. dW remains a host loop
+  over `(M, N)` reading through unified memory — folding it into a
+  per-column kernel is part of the next non-MatMul item. Tests:
+  `TestRMSNormMetalForwardMatchesCPU` (1e-4 abs),
+  `TestRMSNormMetalBackwardMatchesCPU` (1e-3),
+  `TestRMSNormMetalBackwardMatchesNumerical` (2e-2 — finite-difference
+  gold standard against the GPU forward).
 
 ## Why these are grouped
 
