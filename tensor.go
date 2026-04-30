@@ -5,6 +5,7 @@ package gorch
 
 import (
 	"fmt"
+	"math"
 	"math/rand"
 	"strings"
 
@@ -15,8 +16,29 @@ import (
 type DType int
 
 const (
+	// Float32 is the default and only fully-supported dtype as of plan
+	// 0002 PR 1. All ops (forward, backward, autograd) work on F32.
 	Float32 DType = iota
+	// BFloat16 is a 1-bit-sign + 8-bit-exponent + 7-bit-mantissa float
+	// stored as []uint16 in the tensor. Same exponent range as F32 so
+	// no loss-scaling is needed for training. THIS PR ships ONLY the
+	// storage type and conversion helpers; no kernels operate on it
+	// yet. Calling forward/backward ops on a BFloat16 tensor will
+	// panic until the per-op dispatch lands (Plan 0002 PRs 4–7).
+	BFloat16
 )
+
+// String renders a DType for diagnostics.
+func (d DType) String() string {
+	switch d {
+	case Float32:
+		return "F32"
+	case BFloat16:
+		return "BF16"
+	default:
+		return "DType(?)"
+	}
+}
 
 // Device represents where tensor data lives.
 type DeviceType int
@@ -28,15 +50,126 @@ const (
 
 // Tensor is an N-dimensional array that can live on CPU or Metal GPU.
 // When on Metal, the underlying data uses unified memory (zero-copy).
+//
+// As of plan 0002 PR 1, a Tensor holds either F32 data (in `data`)
+// or BF16 data (in `data16`); exactly one of the two is non-nil and
+// `dtype` records which. F32 remains the default for every existing
+// constructor and op; BF16 ships with constructors and conversion
+// only — actual ops on BF16 tensors arrive in subsequent PRs.
 type Tensor struct {
-	data  []float32     // CPU data or unified-memory slice (backed by Metal buffer)
-	shape []int         // dimensions, e.g. [2, 3] for a 2x3 matrix
-	buf   *metal.Buffer // non-nil when on Metal device
+	dtype  DType
+	data   []float32     // F32 path: CPU or unified-memory slice
+	data16 []uint16      // BF16 path: bf16-as-uint16 storage
+	shape  []int
+	buf    *metal.Buffer // non-nil when on Metal device
 
 	// Autograd fields
 	requiresGrad bool
 	grad         *Tensor
 	gradFn       *GradFn // backward function that produced this tensor
+}
+
+// Dtype returns the tensor's element type.
+func (t *Tensor) Dtype() DType { return t.dtype }
+
+// ---------- BF16 conversion helpers ----------
+//
+// Bfloat16 is a 32-bit IEEE 754 float with the lower 16 mantissa bits
+// truncated. Conversion is a bit-shift and a round-to-nearest-even
+// adjustment for the truncated bits. Same exponent range as F32 — no
+// scaling needed.
+
+// f32ToBF16 converts a float32 to a bfloat16 stored in a uint16.
+// Round-to-nearest-even on the truncated bits matches the standard
+// PyTorch / hardware behaviour for bf16 storage.
+func f32ToBF16(v float32) uint16 {
+	bits := math.Float32bits(v)
+	// NaN handling: preserve quiet NaN bit pattern; flush sub-NaNs to NaN.
+	if (bits>>23)&0xff == 0xff && bits&0x7fffff != 0 {
+		return uint16((bits >> 16) | 0x40)
+	}
+	// Round-to-nearest-even on the truncated low 16 bits.
+	rounding := uint32(0x7fff + ((bits >> 16) & 1))
+	return uint16((bits + rounding) >> 16)
+}
+
+// bf16ToF32 reverses f32ToBF16. Lossless in the bf16 → f32 direction.
+func bf16ToF32(v uint16) float32 {
+	return math.Float32frombits(uint32(v) << 16)
+}
+
+// F32ToBF16Slice and BF16ToF32Slice are public conversion utilities
+// for callers loading or saving bf16 weights. They allocate; pass a
+// pre-sized output slice to avoid the allocation.
+
+// F32ToBF16Slice converts each f32 to bf16 in a fresh slice.
+func F32ToBF16Slice(in []float32) []uint16 {
+	out := make([]uint16, len(in))
+	for i, v := range in {
+		out[i] = f32ToBF16(v)
+	}
+	return out
+}
+
+// BF16ToF32Slice converts each bf16 back to f32 in a fresh slice.
+func BF16ToF32Slice(in []uint16) []float32 {
+	out := make([]float32, len(in))
+	for i, v := range in {
+		out[i] = bf16ToF32(v)
+	}
+	return out
+}
+
+// NewTensorBF16 creates a tensor with bfloat16 storage. The caller
+// supplies bf16 data (already-converted uint16 values); use
+// F32ToBF16Slice to convert from f32 first if needed.
+//
+// Op support: as of plan 0002 PR 1, no op accepts a BF16 tensor.
+// Calling forward/backward ops on it will panic until the per-op
+// dispatch lands. The constructor + storage exist so safetensors
+// loaders can preserve native bf16 from disk instead of upcasting
+// to f32 (the existing waste documented in plan 0002).
+func NewTensorBF16(data []uint16, shape ...int) *Tensor {
+	n := numElements(shape)
+	if len(data) != n {
+		panic(fmt.Sprintf("gorch: bf16 data length %d does not match shape %v (need %d)", len(data), shape, n))
+	}
+	cp := make([]uint16, n)
+	copy(cp, data)
+	return &Tensor{dtype: BFloat16, data16: cp, shape: copyShape(shape)}
+}
+
+// ToF32 returns a fresh F32 tensor with the same logical values as t.
+// If t is already F32, returns a deep copy (callers can mutate the
+// result without affecting t). Used as the slow-path interop hook
+// for callers that hold a BF16 tensor but need to call an op that
+// hasn't gained BF16 dispatch yet.
+func (t *Tensor) ToF32() *Tensor {
+	switch t.dtype {
+	case Float32:
+		cp := make([]float32, len(t.data))
+		copy(cp, t.data)
+		return &Tensor{dtype: Float32, data: cp, shape: copyShape(t.shape)}
+	case BFloat16:
+		return &Tensor{dtype: Float32, data: BF16ToF32Slice(t.data16), shape: copyShape(t.shape)}
+	default:
+		panic("gorch: unknown dtype")
+	}
+}
+
+// ToBF16 returns a fresh BF16 tensor with t's values rounded to bf16.
+// If t is already BF16, returns a deep copy.
+func (t *Tensor) ToBF16() *Tensor {
+	switch t.dtype {
+	case Float32:
+		return &Tensor{dtype: BFloat16, data16: F32ToBF16Slice(t.data), shape: copyShape(t.shape)}
+	case BFloat16:
+		cp := make([]uint16, len(t.data16))
+		copy(cp, t.data16)
+		return &Tensor{dtype: BFloat16, data16: cp, shape: copyShape(t.shape)}
+	default:
+		panic("gorch: unknown dtype")
+	}
 }
 
 // GradFn records how a tensor was computed, enabling backward pass.
