@@ -128,6 +128,40 @@ void metal_dispatch_1d(MTLCommandQueueRef queue,
     }
 }
 
+void metal_dispatch_threadgroups_1d(MTLCommandQueueRef queue,
+                                    MTLComputePipelineRef pipeline,
+                                    MTLBufferRef* bufs, uint32_t bufCount,
+                                    uint32_t groupCount,
+                                    uint32_t groupThreads) {
+    @autoreleasepool {
+        id<MTLCommandQueue> q = (__bridge id<MTLCommandQueue>)queue;
+        id<MTLComputePipelineState> pso = (__bridge id<MTLComputePipelineState>)pipeline;
+
+        id<MTLCommandBuffer> cmdBuf = [q commandBuffer];
+        id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
+        [enc setComputePipelineState:pso];
+
+        for (uint32_t i = 0; i < bufCount; i++) {
+            [enc setBuffer:(__bridge id<MTLBuffer>)bufs[i] offset:0 atIndex:i];
+        }
+
+        // Cap requested threadgroup size to the pipeline's max — silent
+        // truncation is fine for our uses (always 256 today, well under
+        // the 1024 default cap on Apple Silicon).
+        NSUInteger cap = [pso maxTotalThreadsPerThreadgroup];
+        NSUInteger threads = groupThreads;
+        if (threads > cap) threads = cap;
+
+        MTLSize grid = MTLSizeMake(groupCount, 1, 1);
+        MTLSize group = MTLSizeMake(threads, 1, 1);
+        [enc dispatchThreadgroups:grid threadsPerThreadgroup:group];
+
+        [enc endEncoding];
+        [cmdBuf commit];
+        [cmdBuf waitUntilCompleted];
+    }
+}
+
 // ---------------------------------------------------------------------------
 // MPS matrix multiply: C = A @ B  (row-major float32)
 // ---------------------------------------------------------------------------

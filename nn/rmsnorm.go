@@ -30,6 +30,12 @@ func NewRMSNorm(dim int) *RMSNorm {
 
 // Forward normalises the last dimension and scales by the learnable gamma.
 // Input shape: (M, dim). Output: (M, dim).
+//
+// When x and Weight both live on Metal and the RMSNorm Metal pipelines
+// are compiled, dispatches to a custom Metal forward kernel that
+// fuses the per-row sum-of-squares reduction with the elementwise
+// rescale; backward dispatches the matching dx kernel and computes
+// dW on the host. Plan 0004 part A.
 func (rn *RMSNorm) Forward(x *g.Tensor) *g.Tensor {
 	if x.Dim() != 2 {
 		panic("gorch/nn: RMSNorm requires 2-D tensor")
@@ -38,6 +44,10 @@ func (rn *RMSNorm) Forward(x *g.Tensor) *g.Tensor {
 	N := x.Shape()[1]
 	if N != rn.Dim {
 		panic("gorch/nn: RMSNorm dim mismatch")
+	}
+
+	if x.IsOnMetal() && rn.Weight.IsOnMetal() && g.MetalGPU() != nil {
+		return rn.forwardMetal(x, M, N)
 	}
 
 	xData := x.Data()
@@ -113,4 +123,34 @@ func (rn *RMSNorm) Forward(x *g.Tensor) *g.Tensor {
 
 func (rn *RMSNorm) Parameters() []*g.Tensor {
 	return []*g.Tensor{rn.Weight}
+}
+
+// forwardMetal is the GPU branch of Forward — invoked when both x and
+// the gamma weight live in Metal unified memory. Uses the custom
+// rmsnorm_forward / rmsnorm_dx kernels (plan 0004 part A) and
+// preserves autograd by registering a backward closure that calls the
+// matching backward dispatch.
+func (rn *RMSNorm) forwardMetal(x *g.Tensor, M, N int) *g.Tensor {
+	y, invRMS := g.RMSNormForwardMetal(x, rn.Weight, rn.Eps)
+
+	if g.GradEnabled() && (x.RequiresGrad() || rn.Weight.RequiresGrad()) {
+		y.SetRequiresGrad(true)
+		y.SetGradFn("RMSNormMetal", []*g.Tensor{x, rn.Weight}, func(grad *g.Tensor) []*g.Tensor {
+			// The dx kernel needs grad on Metal too. If the upstream
+			// gradient is CPU-resident (ToCPU was called somewhere
+			// upstream), copy it onto the GPU. In practice training
+			// runs keep gradients on Metal end-to-end, so this hot
+			// path stays GPU-resident.
+			gradMetal := grad
+			if !grad.IsOnMetal() {
+				dev := g.MetalGPU().Dev
+				gradMetal = g.NewTensorOnMetal(dev, grad.Data(), grad.Shape()...)
+			}
+			dx, dw := g.RMSNormBackwardDXMetal(x, rn.Weight, gradMetal, invRMS)
+			return []*g.Tensor{dx, dw}
+		})
+	}
+	_ = M
+	_ = N
+	return y
 }

@@ -39,7 +39,9 @@ func InitMetal() (*GPU, error) {
 	// Pre-compile all element-wise kernels.
 	for _, name := range []string{"vec_add", "vec_sub", "vec_mul", "vec_div",
 		"vec_relu", "vec_sigmoid", "vec_tanh_act", "vec_scale", "vec_sum",
-		"vec_gelu", "vec_bias_add"} {
+		"vec_gelu", "vec_bias_add",
+		// Plan 0004 part A — non-MatMul backward kernels.
+		"rmsnorm_forward", "rmsnorm_dx"} {
 		pipe, err := dev.CompileKernel(metal.KernelSource, name)
 		if err != nil {
 			return nil, fmt.Errorf("gorch: compile %s: %w", name, err)
@@ -54,6 +56,27 @@ func InitMetal() (*GPU, error) {
 func (g *GPU) pipe(name string) *metal.Pipeline {
 	return g.pipelines[name]
 }
+
+// MetalGPU returns the global Metal GPU singleton, or nil if
+// InitMetal hasn't been called. Exposed so packages outside gorch
+// (e.g. nn) can dispatch their own custom kernels via this GPU's
+// queue, without each package wiring up its own Metal init path.
+func MetalGPU() *GPU { return gpu }
+
+// Pipe returns a pre-compiled pipeline by kernel name. Panics if
+// the kernel wasn't registered at InitMetal time. Used by package-
+// external dispatch helpers (e.g. RMSNormForwardMetal).
+func (g *GPU) Pipe(name string) *metal.Pipeline {
+	p, ok := g.pipelines[name]
+	if !ok {
+		panic("gorch: pipeline " + name + " not registered; add it to InitMetal's kernel list")
+	}
+	return p
+}
+
+// Queue returns the underlying Metal command queue. Same pattern as
+// Pipe — exposed so external dispatch helpers can submit work.
+func (g *GPU) MetalQueue() *metal.CommandQueue { return g.Queue }
 
 // ---------- Element-wise binary ops ----------
 
