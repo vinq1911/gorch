@@ -7,13 +7,18 @@ package gorch
 //
 // This implements reverse-mode automatic differentiation by walking the
 // computation graph backward through GradFn pointers.
+//
+// Mixed dtypes: when the loss is bf16, the seed grad is bf16 and grad
+// accumulation upcasts to f32 for the addition, then rounds back to
+// bf16 storage — same shape as PyTorch's bf16 mixed-precision: rounding
+// noise on storage but not on the running sum.
 func (t *Tensor) Backward() {
 	if t.Size() != 1 {
 		panic("gorch: Backward() only supported on scalar tensors (call Sum or Mean first)")
 	}
 
-	// Seed gradient: dL/dL = 1
-	t.grad = Ones(1)
+	// Seed gradient: dL/dL = 1, in the loss's dtype.
+	t.grad = onesLike(t)
 
 	// Topological sort: collect all nodes in reverse order.
 	visited := make(map[*Tensor]bool)
@@ -48,12 +53,33 @@ func (t *Tensor) Backward() {
 			if inp.grad == nil {
 				inp.grad = inputGrads[j]
 			} else {
-				// Accumulate gradients (for tensors used multiple times).
-				for k := range inp.grad.data {
-					inp.grad.data[k] += inputGrads[j].data[k]
-				}
+				accumulateGrad(inp.grad, inputGrads[j])
 			}
 		}
+	}
+}
+
+// onesLike returns a 1-element tensor with value 1 in t's dtype.
+func onesLike(t *Tensor) *Tensor {
+	if t.dtype == BFloat16 {
+		return NewTensorBF16([]uint16{f32ToBF16(1)}, 1)
+	}
+	return Ones(1)
+}
+
+// accumulateGrad does dst += add in-place, dispatching on dtype. For
+// bf16 the addition runs in fp32 (upcast → add → downcast) which keeps
+// the per-step rounding noise the same as a single bf16 store.
+func accumulateGrad(dst, add *Tensor) {
+	if dst.dtype == BFloat16 {
+		for k := range dst.data16 {
+			sum := bf16ToF32(dst.data16[k]) + bf16ToF32(add.data16[k])
+			dst.data16[k] = f32ToBF16(sum)
+		}
+		return
+	}
+	for k := range dst.data {
+		dst.data[k] += add.data[k]
 	}
 }
 

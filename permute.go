@@ -25,6 +25,9 @@ func Permute(t *Tensor, perm []int) *Tensor {
 	if len(perm) != nd {
 		panic(fmt.Sprintf("gorch: Permute perm length %d != tensor ndim %d", len(perm), nd))
 	}
+	if t.dtype == BFloat16 {
+		return downcastToBF16(Permute(promoteToF32(t), perm))
+	}
 	// Validate perm is a permutation of (0..nd-1).
 	seen := make([]bool, nd)
 	for _, p := range perm {

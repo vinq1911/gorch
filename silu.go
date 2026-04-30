@@ -11,6 +11,9 @@ import "math"
 //	silu(x) = x * σ(x)
 //	silu'(x) = σ(x) * (1 + x * (1 - σ(x)))
 func SiLU(a *Tensor) *Tensor {
+	if a.dtype == BFloat16 {
+		return downcastToBF16(SiLU(promoteToF32(a)))
+	}
 	out := Zeros(a.shape...)
 
 	// Cache sigmoid for backward — SiLU's derivative needs it.
@@ -63,6 +66,10 @@ func SiLU(a *Tensor) *Tensor {
 func SwiGLU(gate, value *Tensor) *Tensor {
 	if !sameShape(gate.shape, value.shape) {
 		panic("gorch: SwiGLU requires gate and value to have the same shape")
+	}
+	requireSameDtype(gate, value, "SwiGLU")
+	if gate.dtype == BFloat16 {
+		return downcastToBF16(SwiGLU(promoteToF32(gate), promoteToF32(value)))
 	}
 	out := Zeros(gate.shape...)
 

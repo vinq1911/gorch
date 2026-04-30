@@ -291,9 +291,15 @@ func (t *Tensor) SetRequiresGrad(b bool) *Tensor {
 // concurrent inference goroutines mixed with a training loop in
 // another goroutine. Mutating the returned tensor's data mutates t's
 // data too; treat Detach as "make a non-tracking handle to the same
-// memory," not a copy.
+// memory," not a copy. dtype (F32 or BF16) is preserved.
 func (t *Tensor) Detach() *Tensor {
-	return &Tensor{data: t.data, shape: copyShape(t.shape), buf: t.buf}
+	return &Tensor{
+		dtype:  t.dtype,
+		data:   t.data,
+		data16: t.data16,
+		shape:  copyShape(t.shape),
+		buf:    t.buf,
+	}
 }
 
 // Grad returns the accumulated gradient, or nil.
@@ -404,15 +410,27 @@ func (t *Tensor) Reshape(shape ...int) *Tensor {
 	if n != t.Size() {
 		panic(fmt.Sprintf("gorch: cannot reshape %v to %v", t.shape, shape))
 	}
-	out := &Tensor{data: t.data, shape: copyShape(shape), buf: t.buf}
+	out := &Tensor{
+		dtype:  t.dtype,
+		data:   t.data,
+		data16: t.data16,
+		shape:  copyShape(shape),
+		buf:    t.buf,
+	}
 	if GradEnabled() && t.requiresGrad {
 		origShape := copyShape(t.shape)
+		dtype := t.dtype
 		out.requiresGrad = true
 		out.gradFn = &GradFn{
 			name:   "Reshape",
 			inputs: []*Tensor{t},
 			backward: func(grad *Tensor) []*Tensor {
-				return []*Tensor{&Tensor{data: grad.data, shape: origShape}}
+				return []*Tensor{&Tensor{
+					dtype:  dtype,
+					data:   grad.data,
+					data16: grad.data16,
+					shape:  origShape,
+				}}
 			},
 		}
 	}
@@ -427,15 +445,27 @@ func ReshapeOp(a *Tensor, shape ...int) *Tensor {
 	if n != a.Size() {
 		panic(fmt.Sprintf("gorch: cannot reshape %v to %v", a.shape, shape))
 	}
-	out := &Tensor{data: a.data, shape: copyShape(shape), buf: a.buf}
+	out := &Tensor{
+		dtype:  a.dtype,
+		data:   a.data,
+		data16: a.data16,
+		shape:  copyShape(shape),
+		buf:    a.buf,
+	}
 	if a.requiresGrad {
 		origShape := copyShape(a.shape)
+		dtype := a.dtype
 		out.requiresGrad = true
 		out.gradFn = &GradFn{
 			name:   "Reshape",
 			inputs: []*Tensor{a},
 			backward: func(grad *Tensor) []*Tensor {
-				return []*Tensor{&Tensor{data: grad.data, shape: origShape}}
+				return []*Tensor{&Tensor{
+					dtype:  dtype,
+					data:   grad.data,
+					data16: grad.data16,
+					shape:  origShape,
+				}}
 			},
 		}
 	}
@@ -447,6 +477,9 @@ func ReshapeOp(a *Tensor, shape ...int) *Tensor {
 func Transpose2D(a *Tensor) *Tensor {
 	if a.Dim() != 2 {
 		panic(fmt.Sprintf("gorch: Transpose2D requires 2-D tensor, got %d-D", a.Dim()))
+	}
+	if a.dtype == BFloat16 {
+		return downcastToBF16(Transpose2D(promoteToF32(a)))
 	}
 	M, N := a.shape[0], a.shape[1]
 	out := Zeros(N, M)
@@ -473,6 +506,10 @@ func Transpose2D(a *Tensor) *Tensor {
 func AddBias(a, bias *Tensor) *Tensor {
 	if a.Dim() != 2 {
 		panic("gorch: AddBias requires 2-D tensor for a")
+	}
+	requireSameDtype(a, bias, "AddBias")
+	if a.dtype == BFloat16 {
+		return downcastToBF16(AddBias(promoteToF32(a), promoteToF32(bias)))
 	}
 	M, N := a.shape[0], a.shape[1]
 	bData := bias.data
@@ -513,12 +550,21 @@ func AddBias(a, bias *Tensor) *Tensor {
 func (t *Tensor) String() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "tensor(")
+	// Render via the active storage so bf16 tensors don't crash on a
+	// nil .data slice. Materialise as f32 for display only.
+	display := t.data
+	if t.dtype == BFloat16 {
+		display = BF16ToF32Slice(t.data16)
+	}
 	if t.Size() <= 20 {
-		b.WriteString(fmt.Sprintf("%v", t.data))
+		b.WriteString(fmt.Sprintf("%v", display))
 	} else {
-		b.WriteString(fmt.Sprintf("[%v ... %v]", t.data[:3], t.data[len(t.data)-3:]))
+		b.WriteString(fmt.Sprintf("[%v ... %v]", display[:3], display[len(display)-3:]))
 	}
 	fmt.Fprintf(&b, ", shape=%v", t.shape)
+	if t.dtype != Float32 {
+		fmt.Fprintf(&b, ", dtype=%s", t.dtype)
+	}
 	if t.buf != nil {
 		b.WriteString(", device=metal")
 	}
