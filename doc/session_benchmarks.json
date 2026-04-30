@@ -1,0 +1,58 @@
+{
+  "hardware": "Apple M5",
+  "report_date": "2026-04-30",
+  "session_summary": "PR #11..#33 — perf round + plan 0001 Phase 1 primitives",
+  "before_after": [
+    {
+      "benchmark": "Encode (GPT-2 small, seq=64) — single sequence",
+      "before_ms": 55.7,
+      "after_ms": 28.7,
+      "speedup_x": 1.94,
+      "source": "PRs #11/#12/#14/#15: streaming safetensors, vectorised GELU, Linear alloc fix, NoGrad gating + scratch pool"
+    },
+    {
+      "benchmark": "EncodeBatch16 (GPT-2 small, 16 seqs of 64 tokens, batched)",
+      "before_ms": 750.0,
+      "after_ms": 274.0,
+      "speedup_x": 2.74,
+      "source": "PR #12: batched encode + GELU vectorisation. The 'before' here is 16 sequential Encode calls on pre-session main."
+    },
+    {
+      "benchmark": "GPT-2 generation (72 tokens, uncached)",
+      "before_ms": 35.5,
+      "after_ms": 37.2,
+      "speedup_x": 0.95,
+      "source": "PR #16 baseline. Uncached path largely unchanged."
+    },
+    {
+      "benchmark": "GPT-2 generation (72 tokens, KV cache)",
+      "before_ms": null,
+      "after_ms": 3.1,
+      "speedup_x": 12.0,
+      "source": "PR #5 + #16: KV cache integration. 12× faster than the uncached path, validates ADR-011."
+    },
+    {
+      "benchmark": "GPU autograd train step at GPT-2 dims (64, 768, 768)",
+      "before_ms": 2.27,
+      "after_ms": 0.32,
+      "speedup_x": 7.1,
+      "source": "PR #19: matmul size-threshold. Pre-fix gpt.ToMetal() was a 4.6× regression vs CPU; now at parity."
+    }
+  ],
+  "phase1_primitives_shipped": [
+    "RMSNorm (#23)",
+    "SiLU + SwiGLU (#27)",
+    "Permute (#28)",
+    "Gather + TopK + Multinomial + RepeatInterleave (#29)",
+    "RoPE — Llama and GPT-NeoX styles (#30)",
+    "GQA — Grouped-Query Attention (#31)",
+    "MoE — Sparse Mixture of Experts FFN (#32)",
+    "MLA — Multi-head Latent Attention (#33)",
+    "AdamW + ClipGradNorm (#24)"
+  ],
+  "supporting_changes": [
+    "Tensor.Detach() + NoGrad godoc warnings (#25)",
+    "doc/plans/ lifted to main + 0004/0005 added (#22, #26)",
+    "MoE/GQA/MLA composition smoke tests"
+  ]
+}

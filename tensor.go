@@ -261,12 +261,29 @@ func (t *Tensor) flatIndex(indices []int) int {
 // ---------- Reshape ----------
 
 // Reshape returns a new tensor with the same data but different shape.
+// The returned tensor preserves autograd: when the source has
+// requires_grad=true, the reshape's backward is "reshape grad back to
+// the original shape." This matches PyTorch's tensor.reshape — the
+// no-autograd variant was a bug that broke autograd through every
+// multi-head attention reshape.
 func (t *Tensor) Reshape(shape ...int) *Tensor {
 	n := numElements(shape)
 	if n != t.Size() {
 		panic(fmt.Sprintf("gorch: cannot reshape %v to %v", t.shape, shape))
 	}
-	return &Tensor{data: t.data, shape: copyShape(shape), buf: t.buf}
+	out := &Tensor{data: t.data, shape: copyShape(shape), buf: t.buf}
+	if GradEnabled() && t.requiresGrad {
+		origShape := copyShape(t.shape)
+		out.requiresGrad = true
+		out.gradFn = &GradFn{
+			name:   "Reshape",
+			inputs: []*Tensor{t},
+			backward: func(grad *Tensor) []*Tensor {
+				return []*Tensor{&Tensor{data: grad.data, shape: origShape}}
+			},
+		}
+	}
+	return out
 }
 
 // ---------- Reshape / Transpose ----------
