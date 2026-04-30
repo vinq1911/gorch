@@ -86,8 +86,14 @@ func (mha *MultiHeadAttention) Forward(x *g.Tensor, seqLen int) *g.Tensor {
 		// Batched Q @ K^T → (numHeads, seq, seq)
 		scores := g.BatchedMatMulTransB(qHeads, kHeads, numHeads, seqLen, seqLen, headDim)
 
-		// Scale, mask, softmax (in-place on unified memory)
-		invScale := float32(1.0 / float64(headDim))
+		// Scale by 1/sqrt(headDim) — the standard scaled-dot-product
+		// attention scale (Vaswani et al. 2017). The previous version
+		// of this path divided by headDim instead of sqrt(headDim);
+		// that bug made the per-head loop path (which uses
+		// g.ScaledMatMul correctly with sqrt) and the batched path
+		// disagree, and softened the attention distribution by a
+		// factor of sqrt(headDim) on inference.
+		invScale := float32(1.0 / math.Sqrt(float64(headDim)))
 		scoresData := scores.Data()
 		for i := range scoresData {
 			scoresData[i] *= invScale
