@@ -10,6 +10,7 @@ import (
 
 	g "github.com/vinq1911/gorch"
 	"github.com/vinq1911/gorch/model"
+	"github.com/vinq1911/gorch/nn"
 )
 
 // hfConvPrefixes returns the HF checkpoint key prefix (without
@@ -102,6 +103,95 @@ func loadSEANetFrom(sf *model.SafetensorsFile) (*SEANet, error) {
 			len(problems), strings.Join(problems, "\n  "))
 	}
 	return s, nil
+}
+
+// Load builds the full pre-quantizer Encoder (SEANet + transformer +
+// downsample) from a kyutai/mimi model.safetensors checkpoint, with
+// the same fail-loudly key/shape validation as LoadSEANet. Keys under
+// decoder.*, decoder_transformer.*, upsample.* and quantizer.* are
+// ignored (quantizer arrives in Phase 7, decoder never).
+func Load(path string) (*Encoder, error) {
+	sf, err := model.LoadSafetensors(path)
+	if err != nil {
+		return nil, err
+	}
+	return loadEncoderFrom(sf)
+}
+
+func loadEncoderFrom(sf *model.SafetensorsFile) (*Encoder, error) {
+	seanet, err := loadSEANetFrom(sf)
+	if err != nil {
+		return nil, err
+	}
+	e := NewEncoder(seanet.Cfg)
+	e.SEANet = seanet
+
+	consumed := map[string]bool{}
+	var problems []string
+
+	// take fetches a checkpoint tensor, validates its shape and hands
+	// it to assign; missing keys and shape mismatches are collected.
+	take := func(key string, want []int, assign func(*g.Tensor)) {
+		t, ok := sf.Tensors[key]
+		if !ok {
+			problems = append(problems, "missing: "+key)
+			return
+		}
+		consumed[key] = true
+		if !shapeEq(t.Shape(), want) {
+			problems = append(problems, fmt.Sprintf("shape: %s is %v, want %v", key, t.Shape(), want))
+			return
+		}
+		assign(t)
+	}
+
+	dim, inter := e.Cfg.HiddenSize, e.Cfg.Intermediate
+	for i, l := range e.Layers {
+		l := l
+		p := fmt.Sprintf("encoder_transformer.layers.%d.", i)
+		for _, proj := range []struct {
+			key  string
+			dst  *nn.Linear
+			want []int
+		}{
+			{p + "self_attn.q_proj.weight", l.Wq, []int{dim, dim}},
+			{p + "self_attn.k_proj.weight", l.Wk, []int{dim, dim}},
+			{p + "self_attn.v_proj.weight", l.Wv, []int{dim, dim}},
+			{p + "self_attn.o_proj.weight", l.Wo, []int{dim, dim}},
+			{p + "mlp.fc1.weight", l.Fc1, []int{inter, dim}},
+			{p + "mlp.fc2.weight", l.Fc2, []int{dim, inter}},
+		} {
+			proj := proj
+			take(proj.key, proj.want, func(t *g.Tensor) { proj.dst.Weight = t })
+		}
+		take(p+"input_layernorm.weight", []int{dim}, func(t *g.Tensor) { l.Norm1.Weight = t })
+		take(p+"input_layernorm.bias", []int{dim}, func(t *g.Tensor) { l.Norm1.Bias = t })
+		take(p+"post_attention_layernorm.weight", []int{dim}, func(t *g.Tensor) { l.Norm2.Weight = t })
+		take(p+"post_attention_layernorm.bias", []int{dim}, func(t *g.Tensor) { l.Norm2.Bias = t })
+		take(p+"self_attn_layer_scale.scale", []int{dim}, func(t *g.Tensor) { l.AttnScale = t })
+		take(p+"mlp_layer_scale.scale", []int{dim}, func(t *g.Tensor) { l.MlpScale = t })
+	}
+
+	take("downsample.conv.weight", []int{dim, dim, 4}, func(t *g.Tensor) { e.Downsample.Weight = t })
+
+	// Every encoder_transformer.* and downsample.* key must have been
+	// consumed (encoder.* was validated by loadSEANetFrom).
+	var unexpected []string
+	for _, name := range sf.Names {
+		if (strings.HasPrefix(name, "encoder_transformer.") || strings.HasPrefix(name, "downsample.")) && !consumed[name] {
+			unexpected = append(unexpected, name)
+		}
+	}
+	sort.Strings(unexpected)
+	for _, name := range unexpected {
+		problems = append(problems, "unexpected: "+name)
+	}
+
+	if len(problems) > 0 {
+		return nil, fmt.Errorf("mimi: encoder checkpoint mismatch (%d problems):\n  %s",
+			len(problems), strings.Join(problems, "\n  "))
+	}
+	return e, nil
 }
 
 // convWeight fetches a conv weight by prefix. Primary path: the plain

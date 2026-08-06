@@ -81,6 +81,51 @@ void acc_vexp(const float* A, float* C, int n) {
     vvexpf(C, A, &n);
 }
 
+void acc_velu(const float* restrict A, float* restrict C, int n) {
+    // Single pass with an inlined Cephes-style expf polynomial instead
+    // of vvexpf: vForce's expf rounds differently depending on the
+    // call's array length (large-array vs small-array code paths), so
+    // the same input value run offline (one big call) and streamed
+    // (many small calls) came out ulp-different — breaking the
+    // bit-exact streaming == offline property the Mimi encoder tests
+    // assert. This loop is strictly element-wise: every operation is
+    // an fmaf/rint/convert with identical fused semantics in clang's
+    // auto-vectorized body (fmla/frintn) and the scalar tail
+    // (fmadd/frintx under round-to-nearest-even), so results do not
+    // depend on position or call size. Accuracy ~2 ulp on exp(x) for
+    // x in [-87, 0], which only feeds the x <= 0 arm.
+    for (int i = 0; i < n; i++) {
+        float x = A[i];
+        float xn = x < 0.0f ? x : 0.0f;      // exp arg: min(x, 0)
+        xn = xn < -87.0f ? -87.0f : xn;      // stay in normal float range
+        float k = rintf(xn * 1.44269504088896341f); // x/ln2
+        float r = fmaf(k, -0.693359375f, xn);       // x - k*ln2_hi
+        r = fmaf(k, 2.12194440e-4f, r);             // - k*ln2_lo
+        float y = 1.9875691500e-4f;
+        y = fmaf(y, r, 1.3981999507e-3f);
+        y = fmaf(y, r, 8.3334519073e-3f);
+        y = fmaf(y, r, 4.1665795894e-2f);
+        y = fmaf(y, r, 1.6666665459e-1f);
+        y = fmaf(y, r, 5.0000001201e-1f);
+        y = fmaf(y * r, r, r);               // r + r^2*P(r)
+        union { int32_t i; float f; } s;
+        s.i = ((int32_t)k + 127) << 23;      // 2^k
+        float e = fmaf(y, s.f, s.f);         // exp(xn) = 2^k * (1 + y)
+        C[i] = x > 0.0f ? x : e - 1.0f;
+    }
+}
+
+void acc_vgelu_erf(const float* restrict A, float* restrict C, int n) {
+    // Exact-erf GELU: C = 0.5*x*(1+erf(x/sqrt(2))). erff has no vForce
+    // equivalent; the float32 libm call is still ~2x faster than Go's
+    // float64 math.Erf per element.
+    const float invSqrt2 = 0.70710678118654752440f;
+    for (int i = 0; i < n; i++) {
+        float x = A[i];
+        C[i] = 0.5f * x * (1.0f + erff(x * invSqrt2));
+    }
+}
+
 void acc_vlog(const float* A, float* C, int n) {
     vvlogf(C, A, &n);
 }

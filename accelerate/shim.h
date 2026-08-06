@@ -40,6 +40,10 @@ void acc_vrelu(const float* A, float* C, int64_t n);
 // ---------- vForce transcendentals ----------
 
 void acc_vexp(const float* A, float* C, int n);
+// ELU alpha=1: C = A > 0 ? A : exp(A) - 1. A and C must not overlap.
+void acc_velu(const float* restrict A, float* restrict C, int n);
+// Exact-erf GELU: C = 0.5*A*(1+erf(A/sqrt(2))). A and C must not overlap.
+void acc_vgelu_erf(const float* restrict A, float* restrict C, int n);
 void acc_vlog(const float* A, float* C, int n);
 void acc_vtanh(const float* A, float* C, int n);
 

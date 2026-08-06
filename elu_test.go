@@ -73,6 +73,37 @@ func TestGELUErfDiffersFromTanhGELU(t *testing.T) {
 	}
 }
 
+// TestELUPositionInvariant guards the bit-exact streaming == offline
+// property of the Mimi encoder: ELU of the same value must produce the
+// same bits regardless of where it sits in the tensor or how large
+// the call is. (vForce's vvexpf violates this — its rounding depends
+// on the call's array length — which is why the accelerate shim
+// carries its own element-wise expf.)
+func TestELUPositionInvariant(t *testing.T) {
+	n := 100003 // odd length exercises the vector body + scalar tail
+	x := make([]float32, n)
+	for i := range x {
+		x[i] = -8 + 16*float32(i)/float32(n-1)
+	}
+	whole := ELU(NewTensor(x, n)).Data()
+
+	// Same values re-run in small shifted chunks.
+	const chunk = 1920
+	for start := 0; start < n; start += chunk {
+		end := start + chunk
+		if end > n {
+			end = n
+		}
+		part := ELU(NewTensor(x[start:end], end-start)).Data()
+		for i, v := range part {
+			if v != whole[start+i] {
+				t.Fatalf("ELU position-dependent at %d: chunked=%g whole=%g (x=%g)",
+					start+i, v, whole[start+i], x[start+i])
+			}
+		}
+	}
+}
+
 // TestELUBackwardMatchesNumerical: analytic vs central-difference
 // gradients (repo convention, see reshape_batched_grad_test.go).
 func TestELUBackwardMatchesNumerical(t *testing.T) {
