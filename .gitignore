@@ -28,3 +28,6 @@ Thumbs.db
 
 # MNIST data cache
 mnist_data/
+
+# Exported audio embeddings (regenerate with audio/export_fsdd_mimi.py)
+audio/*.safetensors
