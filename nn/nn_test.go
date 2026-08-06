@@ -66,15 +66,11 @@ func TestSequentialParameters(t *testing.T) {
 }
 
 // TestTrainXOR trains a small network to learn XOR — the "hello world" of neural nets.
+// XOR with ReLU+MSE has a genuine local minimum at loss 0.125 (one sample
+// wrong), so an unlucky random init can stall there. Weight init draws from
+// the auto-seeded global rand, so the test retries from a fresh init rather
+// than failing on a bad draw — training must still converge to pass.
 func TestTrainXOR(t *testing.T) {
-	model := NewSequential(
-		NewLinear(2, 8),
-		NewReLU(),
-		NewLinear(8, 1),
-	)
-
-	opt := optim.NewAdam(model.Parameters(), 0.01)
-
 	// XOR dataset: 4 samples
 	inputs := g.NewTensor([]float32{
 		0, 0,
@@ -85,20 +81,37 @@ func TestTrainXOR(t *testing.T) {
 
 	targets := g.NewTensor([]float32{0, 1, 1, 0}, 4, 1)
 
+	const maxAttempts = 5
+	var model *Sequential
 	var finalLoss float32
-	for epoch := 0; epoch < 500; epoch++ {
-		opt.ZeroGrad()
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		model = NewSequential(
+			NewLinear(2, 8),
+			NewReLU(),
+			NewLinear(8, 1),
+		)
 
-		pred := model.Forward(inputs)
-		loss := g.MSELoss(pred, targets)
-		loss.Backward()
-		opt.Step()
+		opt := optim.NewAdam(model.Parameters(), 0.01)
 
-		finalLoss = loss.Data()[0]
+		for epoch := 0; epoch < 500; epoch++ {
+			opt.ZeroGrad()
+
+			pred := model.Forward(inputs)
+			loss := g.MSELoss(pred, targets)
+			loss.Backward()
+			opt.Step()
+
+			finalLoss = loss.Data()[0]
+		}
+
+		if finalLoss <= 0.05 {
+			break
+		}
+		t.Logf("attempt %d stalled at loss %f, retrying from fresh init", attempt, finalLoss)
 	}
 
 	if finalLoss > 0.05 {
-		t.Fatalf("XOR training failed: final loss = %f (want < 0.05)", finalLoss)
+		t.Fatalf("XOR training failed after %d inits: final loss = %f (want < 0.05)", maxAttempts, finalLoss)
 	}
 
 	// Verify predictions
