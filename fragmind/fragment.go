@@ -30,8 +30,8 @@ import (
 type Fragment struct {
 	ID         int
 	Blocks     []*nn.TransformerBlock
-	HasEmbed   bool       // true if this fragment handles embedding
-	HasLMHead  bool       // true if this fragment handles final norm + LM head
+	HasEmbed   bool // true if this fragment handles embedding
+	HasLMHead  bool // true if this fragment handles final norm + LM head
 	TokenEmbed *nn.Embedding
 	PosEmbed   *nn.Embedding
 	FinalNorm  *nn.LayerNorm

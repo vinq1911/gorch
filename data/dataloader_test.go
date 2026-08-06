@@ -11,9 +11,9 @@ type simpleDataset struct {
 	n int
 }
 
-func (d *simpleDataset) Len() int                                { return d.n }
-func (d *simpleDataset) InputShape() []int                       { return []int{2} }
-func (d *simpleDataset) TargetShape() []int                      { return []int{1} }
+func (d *simpleDataset) Len() int           { return d.n }
+func (d *simpleDataset) InputShape() []int  { return []int{2} }
+func (d *simpleDataset) TargetShape() []int { return []int{1} }
 func (d *simpleDataset) Get(i int) ([]float32, []float32) {
 	return []float32{float32(i), float32(i * 10)}, []float32{float32(i % 2)}
 }

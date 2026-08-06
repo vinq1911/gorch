@@ -190,8 +190,8 @@ func TestGQACausalMaskApplied(t *testing.T) {
 // TestGQAValidatesShapes: panic on misconfigured dim/heads.
 func TestGQAValidatesShapes(t *testing.T) {
 	cases := []struct {
-		name        string
-		dim, q, kv  int
+		name       string
+		dim, q, kv int
 	}{
 		{"dim not div by numQ", 17, 4, 2},
 		{"numQ not div by numKV", 16, 6, 4},

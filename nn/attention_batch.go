@@ -121,4 +121,3 @@ func reshapeFromHeadsBatched(x *g.Tensor, batch, seq, numHeads, headDim int) *g.
 	}
 	return g.NewTensor(outData, batch*seq, dim)
 }
-

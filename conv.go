@@ -86,9 +86,9 @@ func Conv2dForward(input *Tensor, weight *Tensor, bias *Tensor, stride, pad int)
 
 	// Weight reshaped: (outC, inC*kH*kW) — it's already stored this way
 	wData := weight.data
-	M := outC            // rows of weight matrix
-	K := inC * kH * kW   // columns of weight matrix = rows of col matrix
-	N := outH * outW     // columns of col matrix = spatial output size
+	M := outC          // rows of weight matrix
+	K := inC * kH * kW // columns of weight matrix = rows of col matrix
+	N := outH * outW   // columns of col matrix = spatial output size
 
 	// 1x1 optimization: skip im2col, input is already in GEMM-ready shape
 	is1x1 := kH == 1 && kW == 1 && stride == 1 && pad == 0

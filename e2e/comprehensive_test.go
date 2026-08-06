@@ -421,10 +421,10 @@ func TestComprehensiveBenchmark(t *testing.T) {
 		t.Logf("  Save: %v, Load: %v, Match: %s", saveTime.Round(time.Microsecond), loadTime.Round(time.Microsecond), status)
 		results = append(results, benchResult{
 			Category: "Model I/O", Name: "Safetensors Save/Load Round-Trip",
-			TrainTime: fmt.Sprintf("save=%v load=%v", saveTime.Round(time.Microsecond), loadTime.Round(time.Microsecond)),
-			TrainTimeMs: float64(saveTime.Microseconds() + loadTime.Microseconds()) / 1000.0,
-			Params: countParams(mdl),
-			Details: fmt.Sprintf("4 tensors, exact value match: %s", status),
+			TrainTime:   fmt.Sprintf("save=%v load=%v", saveTime.Round(time.Microsecond), loadTime.Round(time.Microsecond)),
+			TrainTimeMs: float64(saveTime.Microseconds()+loadTime.Microseconds()) / 1000.0,
+			Params:      countParams(mdl),
+			Details:     fmt.Sprintf("4 tensors, exact value match: %s", status),
 		})
 	}
 

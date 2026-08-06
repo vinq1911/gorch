@@ -21,10 +21,10 @@ const (
 
 // AttributeProto.AttributeType
 const (
-	onnxAttrFloat   = 1
-	onnxAttrInt     = 2
-	onnxAttrString  = 3
-	onnxAttrInts    = 7
+	onnxAttrFloat  = 1
+	onnxAttrInt    = 2
+	onnxAttrString = 3
+	onnxAttrInts   = 7
 )
 
 // ONNX IR version we target. IR version 8 with opset 17 is needed
@@ -219,9 +219,9 @@ func (gr *onnxGraph) addLinear(l *nn.Linear) error {
 	gr.addInitializerFloat32(bName, biasFlat, []int64{int64(out)})
 
 	gr.nodes = append(gr.nodes, onnxNode{
-		opType: "Gemm",
-		name:   gr.freshName("Gemm"),
-		inputs: []string{gr.outputName, wName, bName},
+		opType:  "Gemm",
+		name:    gr.freshName("Gemm"),
+		inputs:  []string{gr.outputName, wName, bName},
 		outputs: []string{outName},
 		attrs: []onnxAttr{
 			{name: "alpha", kind: onnxAttrFloat, f: 1.0},

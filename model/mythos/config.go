@@ -5,11 +5,11 @@
 //
 // Architecture (loose summary; see plan 0001 for the long version):
 //
-//   tokens → Embedding → Prelude (N standard blocks)
-//          → Recurrent loop: for t in 1..MaxLoopIters:
-//                h_{t+1} = lti(h_t, e) + Block(h_t, e)
-//          → Coda (N standard blocks)
-//          → final RMSNorm → LM head
+//	tokens → Embedding → Prelude (N standard blocks)
+//	       → Recurrent loop: for t in 1..MaxLoopIters:
+//	             h_{t+1} = lti(h_t, e) + Block(h_t, e)
+//	       → Coda (N standard blocks)
+//	       → final RMSNorm → LM head
 //
 // v1 = `mythos_tiny` (~5–10 M params). Bigger configs (mythos_1b,
 // mythos_8b, mythos_1t) are out of scope until distributed training,
@@ -35,10 +35,10 @@ type Config struct {
 	RopeBaseFreq float32
 
 	// Recurrent depth
-	PreludeLayers   int // standard blocks run once before the loop
-	CodaLayers      int // standard blocks run once after the loop
-	MaxLoopIters    int // recurrent block iterations (v1: fixed; ACT defers)
-	LTIDampInit     float32
+	PreludeLayers int // standard blocks run once before the loop
+	CodaLayers    int // standard blocks run once after the loop
+	MaxLoopIters  int // recurrent block iterations (v1: fixed; ACT defers)
+	LTIDampInit   float32
 
 	// Mixture of Experts
 	NumExperts         int

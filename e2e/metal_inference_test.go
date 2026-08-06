@@ -14,20 +14,20 @@ import (
 )
 
 type metalBenchResult struct {
-	Backend   string         `json:"backend"`
-	Prompt    string         `json:"prompt"`
-	Output    string         `json:"output"`
-	Tokens    int            `json:"tokens"`
-	Time      string         `json:"time"`
-	TimeMs    int64          `json:"time_ms"`
-	TokPerSec float64       `json:"tok_per_sec"`
+	Backend   string  `json:"backend"`
+	Prompt    string  `json:"prompt"`
+	Output    string  `json:"output"`
+	Tokens    int     `json:"tokens"`
+	Time      string  `json:"time"`
+	TimeMs    int64   `json:"time_ms"`
+	TokPerSec float64 `json:"tok_per_sec"`
 }
 
 type metalReport struct {
-	ModelName string              `json:"model_name"`
-	Params    int                 `json:"params"`
-	LoadTime  string              `json:"load_time"`
-	Results   []metalBenchResult  `json:"results"`
+	ModelName string             `json:"model_name"`
+	Params    int                `json:"params"`
+	LoadTime  string             `json:"load_time"`
+	Results   []metalBenchResult `json:"results"`
 }
 
 // TestMetalVsAccelerateInference benchmarks GPT-2 inference on Metal GPU vs Accelerate CPU.
@@ -142,8 +142,12 @@ func TestMetalVsAccelerateInference(t *testing.T) {
 			gpuN++
 		}
 	}
-	if cpuN > 0 { cpuAvg /= float64(cpuN) }
-	if gpuN > 0 { gpuAvg /= float64(gpuN) }
+	if cpuN > 0 {
+		cpuAvg /= float64(cpuN)
+	}
+	if gpuN > 0 {
+		gpuAvg /= float64(gpuN)
+	}
 	t.Logf("\nAverage: CPU=%.1f tok/s, GPU=%.1f tok/s", cpuAvg, gpuAvg)
 	if gpuAvg > cpuAvg {
 		t.Logf("Metal GPU is %.1fx faster", gpuAvg/cpuAvg)

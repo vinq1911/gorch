@@ -17,12 +17,12 @@ import (
 
 // datasetResult holds results for one dataset with multiple model configs.
 type datasetResult struct {
-	Name        string
-	Samples     int
-	Features    int
-	Classes     int
-	ClassNames  []string
-	Models      []modelResult
+	Name       string
+	Samples    int
+	Features   int
+	Classes    int
+	ClassNames []string
+	Models     []modelResult
 }
 
 type modelResult struct {

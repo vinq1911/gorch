@@ -58,8 +58,8 @@ func TestMoEPartitionsTokensAcrossExperts(t *testing.T) {
 	for i := range moe.Router.Weight.Data() {
 		moe.Router.Weight.Data()[i] = 0
 	}
-	moe.Router.Weight.Data()[0*4+0] = 10  // expert 0 fires on x[0]
-	moe.Router.Weight.Data()[1*4+1] = 10  // expert 1 fires on x[1]
+	moe.Router.Weight.Data()[0*4+0] = 10 // expert 0 fires on x[0]
+	moe.Router.Weight.Data()[1*4+1] = 10 // expert 1 fires on x[1]
 	for i := range moe.Router.Bias.Data() {
 		moe.Router.Bias.Data()[i] = 0
 	}

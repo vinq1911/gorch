@@ -53,9 +53,9 @@ func LoadMNIST(dir string, train bool) (*MNISTDataset, error) {
 	return &MNISTDataset{images: images, labels: labels}, nil
 }
 
-func (d *MNISTDataset) Len() int                         { return len(d.images) }
-func (d *MNISTDataset) InputShape() []int                 { return []int{784} }
-func (d *MNISTDataset) TargetShape() []int                { return []int{1} }
+func (d *MNISTDataset) Len() int           { return len(d.images) }
+func (d *MNISTDataset) InputShape() []int  { return []int{784} }
+func (d *MNISTDataset) TargetShape() []int { return []int{1} }
 func (d *MNISTDataset) Get(i int) ([]float32, []float32) {
 	return d.images[i], []float32{float32(d.labels[i])}
 }
@@ -71,8 +71,8 @@ func (d *MNISTDataset) As2D() *MNISTDataset2D {
 }
 
 func (d *MNISTDataset2D) Len() int                         { return d.inner.Len() }
-func (d *MNISTDataset2D) InputShape() []int                 { return []int{1, 28, 28} }
-func (d *MNISTDataset2D) TargetShape() []int                { return []int{1} }
+func (d *MNISTDataset2D) InputShape() []int                { return []int{1, 28, 28} }
+func (d *MNISTDataset2D) TargetShape() []int               { return []int{1} }
 func (d *MNISTDataset2D) Get(i int) ([]float32, []float32) { return d.inner.Get(i) }
 
 // ---------- IDX file format readers (shared by MNIST and Fashion-MNIST) ----------

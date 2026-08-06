@@ -153,7 +153,7 @@ type ReLUModule struct{}
 func NewReLU() *ReLUModule { return &ReLUModule{} }
 
 func (r *ReLUModule) Forward(x *g.Tensor) *g.Tensor { return g.ReLU(x) }
-func (r *ReLUModule) Parameters() []*g.Tensor        { return nil }
+func (r *ReLUModule) Parameters() []*g.Tensor       { return nil }
 
 // SigmoidModule wraps sigmoid as a Module.
 type SigmoidModule struct{}
@@ -161,7 +161,7 @@ type SigmoidModule struct{}
 func NewSigmoid() *SigmoidModule { return &SigmoidModule{} }
 
 func (s *SigmoidModule) Forward(x *g.Tensor) *g.Tensor { return g.Sigmoid(x) }
-func (s *SigmoidModule) Parameters() []*g.Tensor        { return nil }
+func (s *SigmoidModule) Parameters() []*g.Tensor       { return nil }
 
 // TanhModule wraps tanh as a Module.
 type TanhModule struct{}
@@ -169,7 +169,7 @@ type TanhModule struct{}
 func NewTanh() *TanhModule { return &TanhModule{} }
 
 func (t *TanhModule) Forward(x *g.Tensor) *g.Tensor { return g.Tanh(x) }
-func (t *TanhModule) Parameters() []*g.Tensor        { return nil }
+func (t *TanhModule) Parameters() []*g.Tensor       { return nil }
 
 // ---------- Conv2d ----------
 

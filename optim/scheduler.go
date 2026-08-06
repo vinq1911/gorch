@@ -45,13 +45,13 @@ func (s *StepLR) GetLR() float32 { return s.currentLR }
 
 // CosineAnnealingLR reduces the learning rate following a cosine curve.
 type CosineAnnealingLR struct {
-	optimizer Optimizer
-	baseLR    float32
-	minLR     float32
+	optimizer   Optimizer
+	baseLR      float32
+	minLR       float32
 	totalEpochs int
-	epoch     int
-	currentLR float32
-	setLR     func(float32)
+	epoch       int
+	currentLR   float32
+	setLR       func(float32)
 }
 
 // NewCosineAnnealingLR creates a cosine annealing scheduler.
@@ -82,13 +82,13 @@ func (c *CosineAnnealingLR) GetLR() float32 { return c.currentLR }
 
 // WarmupCosineScheduler combines linear warmup with cosine decay.
 type WarmupCosineScheduler struct {
-	baseLR       float32
-	minLR        float32
-	warmupSteps  int
-	totalSteps   int
-	step_        int
-	currentLR    float32
-	setLR        func(float32)
+	baseLR      float32
+	minLR       float32
+	warmupSteps int
+	totalSteps  int
+	step_       int
+	currentLR   float32
+	setLR       func(float32)
 }
 
 // NewWarmupCosineScheduler creates a warmup + cosine decay scheduler.

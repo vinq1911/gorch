@@ -33,12 +33,12 @@ import (
 // where the cache lifecycle is owned by the recurrent loop).
 type MLA struct {
 	// Q-side projections.
-	Wq         *Linear // dim → numHeads * headDim (nope + rope concatenated per head)
+	Wq *Linear // dim → numHeads * headDim (nope + rope concatenated per head)
 	// KV LoRA compression.
-	WkvDown    *Linear // dim → kvLoraRank + ropeHeadDim (latent + shared rope key)
-	WkvUp      *Linear // kvLoraRank → numHeads * (nopeHeadDim + valueHeadDim)
+	WkvDown *Linear // dim → kvLoraRank + ropeHeadDim (latent + shared rope key)
+	WkvUp   *Linear // kvLoraRank → numHeads * (nopeHeadDim + valueHeadDim)
 	// Output.
-	Wo         *Linear // numHeads * valueHeadDim → dim
+	Wo *Linear // numHeads * valueHeadDim → dim
 
 	NumHeads     int
 	NopeHeadDim  int
@@ -89,27 +89,27 @@ func NewMLA(dim, numHeads, nopeHeadDim, ropeHeadDim, valueHeadDim, kvLoraRank in
 // Inference-only — does not build the autograd graph. The math
 // follows DeepSeek-V2's MLA paper:
 //
-//	1. Q = Wq(x)  →  reshape (seq, numHeads, nopeDim+ropeDim)
-//	   Q_nope = Q[..., :nopeDim], Q_rope = Q[..., nopeDim:] then
-//	   apply RoPE to Q_rope.
+//  1. Q = Wq(x)  →  reshape (seq, numHeads, nopeDim+ropeDim)
+//     Q_nope = Q[..., :nopeDim], Q_rope = Q[..., nopeDim:] then
+//     apply RoPE to Q_rope.
 //
-//	2. KV down = WkvDown(x)  →  (seq, kvLoraRank + ropeDim)
-//	   c_kv  = KV_down[..., :kvLoraRank]   (latent KV)
-//	   k_rope = KV_down[..., kvLoraRank:]  (shared rope key)
-//	   apply RoPE to k_rope.
+//  2. KV down = WkvDown(x)  →  (seq, kvLoraRank + ropeDim)
+//     c_kv  = KV_down[..., :kvLoraRank]   (latent KV)
+//     k_rope = KV_down[..., kvLoraRank:]  (shared rope key)
+//     apply RoPE to k_rope.
 //
-//	3. KV up = WkvUp(c_kv)  →  (seq, numHeads * (nopeDim + valueDim))
-//	   reshape to (seq, numHeads, nopeDim + valueDim)
-//	   K_nope = KV_up[..., :nopeDim],  V = KV_up[..., nopeDim:]
+//  3. KV up = WkvUp(c_kv)  →  (seq, numHeads * (nopeDim + valueDim))
+//     reshape to (seq, numHeads, nopeDim + valueDim)
+//     K_nope = KV_up[..., :nopeDim],  V = KV_up[..., nopeDim:]
 //
-//	4. K_full per head h = concat(K_nope[h], k_rope_broadcast)
-//	   shape (seq, numHeads, nopeDim + ropeDim)
+//  4. K_full per head h = concat(K_nope[h], k_rope_broadcast)
+//     shape (seq, numHeads, nopeDim + ropeDim)
 //
-//	5. scores = Q · K_full^T / sqrt(nopeDim + ropeDim) per head
-//	   causal mask + softmax
+//  5. scores = Q · K_full^T / sqrt(nopeDim + ropeDim) per head
+//     causal mask + softmax
 //
-//	6. out = scores · V  →  (seq, numHeads, valueDim)
-//	   concat heads, project Wo.
+//  6. out = scores · V  →  (seq, numHeads, valueDim)
+//     concat heads, project Wo.
 func (m *MLA) Forward(x *g.Tensor, startPos int) *g.Tensor {
 	seqLen := x.Shape()[0]
 	H := m.NumHeads

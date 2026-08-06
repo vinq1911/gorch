@@ -17,8 +17,8 @@ import (
 // BPETokenizer implements byte-pair encoding tokenization.
 // Compatible with GPT-2/GPT-NeoX style vocab.json + merges.txt.
 type BPETokenizer struct {
-	Encoder    map[string]int // token string → ID
-	Decoder    map[int]string // ID → token string
+	Encoder    map[string]int    // token string → ID
+	Decoder    map[int]string    // ID → token string
 	BPERanks   map[[2]string]int // merge pair → priority rank
 	VocabSize  int
 	ByteEncode map[byte]rune // byte → unicode char mapping
@@ -68,9 +68,9 @@ func LoadTokenizer(vocabPath, mergesPath string) (*BPETokenizer, error) {
 	}
 
 	tok := &BPETokenizer{
-		Encoder:  encoder,
-		Decoder:  decoder,
-		BPERanks: bpeRanks,
+		Encoder:   encoder,
+		Decoder:   decoder,
+		BPERanks:  bpeRanks,
 		VocabSize: len(encoder),
 	}
 	tok.initByteEncoding()

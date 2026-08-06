@@ -262,12 +262,12 @@ func kthLargest(data []float32, k int) float32 {
 // KVCache stores precomputed key-value pairs for efficient autoregressive generation.
 // This avoids recomputing attention for all previous tokens.
 type KVCache struct {
-	Keys   [][][]float32 // [layer][head] → flat (seqSoFar * headDim)
-	Values [][][]float32 // [layer][head] → flat (seqSoFar * headDim)
-	Layers int
-	Heads  int
+	Keys    [][][]float32 // [layer][head] → flat (seqSoFar * headDim)
+	Values  [][][]float32 // [layer][head] → flat (seqSoFar * headDim)
+	Layers  int
+	Heads   int
 	HeadDim int
-	SeqLen int // number of tokens cached so far
+	SeqLen  int // number of tokens cached so far
 }
 
 // NewKVCache creates an empty KV cache for a model.

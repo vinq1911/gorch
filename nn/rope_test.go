@@ -128,8 +128,8 @@ func TestRoPEDifferentPositionsDiffer(t *testing.T) {
 
 func TestRoPEValidatesInput(t *testing.T) {
 	cases := []struct {
-		name      string
-		setup     func()
+		name  string
+		setup func()
 	}{
 		{"odd headDim", func() { NewRoPE(7, 16, 10000, RopeLlama) }},
 	}

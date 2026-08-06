@@ -36,7 +36,7 @@ func fillRand(s []float32, seed int) {
 		x ^= x << 5
 		// Map to [-1, 1) range; small-magnitude values keep softmax /
 		// log / exp inside their well-conditioned domain.
-		s[i] = float32(int32(x))/float32(1<<31) // [-1, 1)
+		s[i] = float32(int32(x)) / float32(1<<31) // [-1, 1)
 	}
 }
 

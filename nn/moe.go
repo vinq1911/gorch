@@ -26,12 +26,12 @@ import (
 // — that conflates expert parallelism (multi-device) with I/O
 // overlap (multi-queue, separate concern).
 type MoE struct {
-	Router  *Linear // dim → numExperts (logits)
-	Experts []*Expert
-	NumExperts int
+	Router             *Linear // dim → numExperts (logits)
+	Experts            []*Expert
+	NumExperts         int
 	NumExpertsPerToken int // K in top-K
-	Dim     int
-	ExpertDim int
+	Dim                int
+	ExpertDim          int
 }
 
 // Expert is one SwiGLU FFN: dim → expertDim (gate + value parallel
@@ -96,12 +96,12 @@ func NewMoE(dim, expertDim, numExperts, numExpertsPerToken int) *MoE {
 
 // Forward runs the MoE block:
 //
-//	1. logits = Router(x) — (M, numExperts)
-//	2. topK values + indices per token
-//	3. softmax over topK values → per-token routing weights summing to 1
-//	4. for each expert e: gather tokens routed to e, run e.Forward,
-//	   scatter outputs back to original positions, weight by routing
-//	5. sum across the K expert contributions per token
+//  1. logits = Router(x) — (M, numExperts)
+//  2. topK values + indices per token
+//  3. softmax over topK values → per-token routing weights summing to 1
+//  4. for each expert e: gather tokens routed to e, run e.Forward,
+//     scatter outputs back to original positions, weight by routing
+//  5. sum across the K expert contributions per token
 //
 // Autograd flows through:
 //   - g.Gather (autograd) for input collection per expert
