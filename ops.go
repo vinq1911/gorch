@@ -39,7 +39,9 @@ func InitMetal() (*GPU, error) {
 	// Pre-compile all element-wise kernels.
 	for _, name := range []string{"vec_add", "vec_sub", "vec_mul", "vec_div",
 		"vec_relu", "vec_sigmoid", "vec_tanh_act", "vec_scale", "vec_sum",
-		"vec_gelu", "vec_bias_add"} {
+		"vec_gelu", "vec_bias_add",
+		// Plan 0004 part A — non-MatMul backward kernels.
+		"rmsnorm_forward", "rmsnorm_dx"} {
 		pipe, err := dev.CompileKernel(metal.KernelSource, name)
 		if err != nil {
 			return nil, fmt.Errorf("gorch: compile %s: %w", name, err)
@@ -55,13 +57,38 @@ func (g *GPU) pipe(name string) *metal.Pipeline {
 	return g.pipelines[name]
 }
 
+// MetalGPU returns the global Metal GPU singleton, or nil if
+// InitMetal hasn't been called. Exposed so packages outside gorch
+// (e.g. nn) can dispatch their own custom kernels via this GPU's
+// queue, without each package wiring up its own Metal init path.
+func MetalGPU() *GPU { return gpu }
+
+// Pipe returns a pre-compiled pipeline by kernel name. Panics if
+// the kernel wasn't registered at InitMetal time. Used by package-
+// external dispatch helpers (e.g. RMSNormForwardMetal).
+func (g *GPU) Pipe(name string) *metal.Pipeline {
+	p, ok := g.pipelines[name]
+	if !ok {
+		panic("gorch: pipeline " + name + " not registered; add it to InitMetal's kernel list")
+	}
+	return p
+}
+
+// Queue returns the underlying Metal command queue. Same pattern as
+// Pipe — exposed so external dispatch helpers can submit work.
+func (g *GPU) MetalQueue() *metal.CommandQueue { return g.Queue }
+
 // ---------- Element-wise binary ops ----------
 
 // Add returns a + b element-wise.
 func Add(a, b *Tensor) *Tensor {
 	assertSameShape(a, b)
+	requireSameDtype(a, b, "Add")
+	if a.dtype == BFloat16 {
+		return downcastToBF16(Add(promoteToF32(a), promoteToF32(b)))
+	}
 	out := binaryOp(a, b, "vec_add", func(x, y float32) float32 { return x + y })
-	if a.requiresGrad || b.requiresGrad {
+	if GradEnabled() && (a.requiresGrad || b.requiresGrad) {
 		out.requiresGrad = true
 		out.gradFn = &GradFn{
 			name:   "Add",
@@ -77,8 +104,12 @@ func Add(a, b *Tensor) *Tensor {
 // Sub returns a - b element-wise.
 func Sub(a, b *Tensor) *Tensor {
 	assertSameShape(a, b)
+	requireSameDtype(a, b, "Sub")
+	if a.dtype == BFloat16 {
+		return downcastToBF16(Sub(promoteToF32(a), promoteToF32(b)))
+	}
 	out := binaryOp(a, b, "vec_sub", func(x, y float32) float32 { return x - y })
-	if a.requiresGrad || b.requiresGrad {
+	if GradEnabled() && (a.requiresGrad || b.requiresGrad) {
 		out.requiresGrad = true
 		out.gradFn = &GradFn{
 			name:   "Sub",
@@ -94,8 +125,12 @@ func Sub(a, b *Tensor) *Tensor {
 // Mul returns a * b element-wise.
 func Mul(a, b *Tensor) *Tensor {
 	assertSameShape(a, b)
+	requireSameDtype(a, b, "Mul")
+	if a.dtype == BFloat16 {
+		return downcastToBF16(Mul(promoteToF32(a), promoteToF32(b)))
+	}
 	out := binaryOp(a, b, "vec_mul", func(x, y float32) float32 { return x * y })
-	if a.requiresGrad || b.requiresGrad {
+	if GradEnabled() && (a.requiresGrad || b.requiresGrad) {
 		out.requiresGrad = true
 		out.gradFn = &GradFn{
 			name:   "Mul",
@@ -115,8 +150,12 @@ func Mul(a, b *Tensor) *Tensor {
 // Div returns a / b element-wise.
 func Div(a, b *Tensor) *Tensor {
 	assertSameShape(a, b)
+	requireSameDtype(a, b, "Div")
+	if a.dtype == BFloat16 {
+		return downcastToBF16(Div(promoteToF32(a), promoteToF32(b)))
+	}
 	out := binaryOp(a, b, "vec_div", func(x, y float32) float32 { return x / y })
-	if a.requiresGrad || b.requiresGrad {
+	if GradEnabled() && (a.requiresGrad || b.requiresGrad) {
 		out.requiresGrad = true
 		out.gradFn = &GradFn{
 			name:   "Div",
@@ -139,11 +178,14 @@ func Div(a, b *Tensor) *Tensor {
 
 // Neg returns -a element-wise.
 func Neg(a *Tensor) *Tensor {
+	if a.dtype == BFloat16 {
+		return downcastToBF16(Neg(promoteToF32(a)))
+	}
 	out := Zeros(a.shape...)
 	for i, v := range a.data {
 		out.data[i] = -v
 	}
-	if a.requiresGrad {
+	if GradEnabled() && (a.requiresGrad) {
 		out.requiresGrad = true
 		out.gradFn = &GradFn{
 			name:   "Neg",
@@ -158,13 +200,16 @@ func Neg(a *Tensor) *Tensor {
 
 // ReLU returns max(0, a) element-wise.
 func ReLU(a *Tensor) *Tensor {
+	if a.dtype == BFloat16 {
+		return downcastToBF16(ReLU(promoteToF32(a)))
+	}
 	out := unaryOp(a, "vec_relu", func(x float32) float32 {
 		if x > 0 {
 			return x
 		}
 		return 0
 	})
-	if a.requiresGrad {
+	if GradEnabled() && (a.requiresGrad) {
 		out.requiresGrad = true
 		out.gradFn = &GradFn{
 			name:   "ReLU",
@@ -185,10 +230,13 @@ func ReLU(a *Tensor) *Tensor {
 
 // Sigmoid returns 1/(1+exp(-a)) element-wise.
 func Sigmoid(a *Tensor) *Tensor {
+	if a.dtype == BFloat16 {
+		return downcastToBF16(Sigmoid(promoteToF32(a)))
+	}
 	out := unaryOp(a, "vec_sigmoid", func(x float32) float32 {
 		return float32(1.0 / (1.0 + math.Exp(float64(-x))))
 	})
-	if a.requiresGrad {
+	if GradEnabled() && (a.requiresGrad) {
 		out.requiresGrad = true
 		out.gradFn = &GradFn{
 			name:   "Sigmoid",
@@ -208,10 +256,13 @@ func Sigmoid(a *Tensor) *Tensor {
 
 // Tanh returns tanh(a) element-wise.
 func Tanh(a *Tensor) *Tensor {
+	if a.dtype == BFloat16 {
+		return downcastToBF16(Tanh(promoteToF32(a)))
+	}
 	out := unaryOp(a, "vec_tanh_act", func(x float32) float32 {
 		return float32(math.Tanh(float64(x)))
 	})
-	if a.requiresGrad {
+	if GradEnabled() && (a.requiresGrad) {
 		out.requiresGrad = true
 		out.gradFn = &GradFn{
 			name:   "Tanh",
@@ -233,14 +284,42 @@ func Tanh(a *Tensor) *Tensor {
 
 // GELU returns the Gaussian Error Linear Unit activation: x * Phi(x).
 // Uses the tanh approximation: 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+//
+// Forward path is dispatched: Metal kernel (vec_gelu) on GPU, vForce
+// vectorised tanh on CPU. The naive per-element math.Tanh loop was
+// the dominant cost in transformer FFN forward (≈60% of EncodeBatch
+// time on M5 before this).
 func GELU(a *Tensor) *Tensor {
-	out := Zeros(a.shape...)
-	for i, x := range a.data {
-		x3 := x * x * x
-		inner := float32(0.7978845608) * (x + 0.044715*x3) // sqrt(2/pi) ≈ 0.7978845608
-		out.data[i] = 0.5 * x * (1 + float32(math.Tanh(float64(inner))))
+	if a.dtype == BFloat16 {
+		return downcastToBF16(GELU(promoteToF32(a)))
 	}
-	if a.requiresGrad {
+	out := Zeros(a.shape...)
+
+	if a.buf != nil && gpu != nil {
+		// GPU: single dispatch of the precompiled vec_gelu kernel.
+		outBuf := gpu.Dev.NewBuffer(a.Size() * 4)
+		gpu.Queue.Dispatch1D(gpu.pipe("vec_gelu"), []*metal.Buffer{a.buf, outBuf}, a.Size())
+		out.data = outBuf.FloatSlice()
+		out.buf = outBuf
+	} else {
+		// CPU: compute inner = sqrt(2/pi) * (x + 0.044715*x^3) elementwise,
+		// then one vForce vector-tanh, then 0.5 * x * (1 + tanh(inner)).
+		// `inner` is a transient scratch buffer — pooled to drop
+		// allocations across calls.
+		n := len(a.data)
+		inner := AcquireFloat32(n)
+		for i, x := range a.data {
+			x3 := x * x * x
+			inner[i] = 0.7978845608 * (x + 0.044715*x3) // sqrt(2/pi)
+		}
+		accelerate.Tanh(inner, inner)
+		for i, x := range a.data {
+			out.data[i] = 0.5 * x * (1 + inner[i])
+		}
+		ReleaseFloat32(inner)
+	}
+
+	if GradEnabled() && (a.requiresGrad) {
 		out.requiresGrad = true
 		out.gradFn = &GradFn{
 			name:   "GELU",
@@ -266,9 +345,12 @@ func GELU(a *Tensor) *Tensor {
 
 // Exp returns e^a element-wise.
 func Exp(a *Tensor) *Tensor {
+	if a.dtype == BFloat16 {
+		return downcastToBF16(Exp(promoteToF32(a)))
+	}
 	out := Zeros(a.shape...)
 	accelerate.Exp(a.data, out.data)
-	if a.requiresGrad {
+	if GradEnabled() && (a.requiresGrad) {
 		out.requiresGrad = true
 		out.gradFn = &GradFn{
 			name:   "Exp",
@@ -288,9 +370,12 @@ func Exp(a *Tensor) *Tensor {
 
 // Log returns ln(a) element-wise.
 func Log(a *Tensor) *Tensor {
+	if a.dtype == BFloat16 {
+		return downcastToBF16(Log(promoteToF32(a)))
+	}
 	out := Zeros(a.shape...)
 	accelerate.Log(a.data, out.data)
-	if a.requiresGrad {
+	if GradEnabled() && (a.requiresGrad) {
 		out.requiresGrad = true
 		out.gradFn = &GradFn{
 			name:   "Log",
@@ -315,6 +400,9 @@ func Softmax(a *Tensor) *Tensor {
 	if a.Dim() != 2 {
 		panic("gorch: Softmax requires 2-D tensor (batch, classes)")
 	}
+	if a.dtype == BFloat16 {
+		return downcastToBF16(Softmax(promoteToF32(a)))
+	}
 	batch, classes := a.shape[0], a.shape[1]
 	out := Zeros(batch, classes)
 
@@ -336,7 +424,7 @@ func Softmax(a *Tensor) *Tensor {
 		}
 	}
 
-	if a.requiresGrad {
+	if GradEnabled() && (a.requiresGrad) {
 		out.requiresGrad = true
 		out.gradFn = &GradFn{
 			name:   "Softmax",
@@ -366,6 +454,9 @@ func LogSoftmax(a *Tensor) *Tensor {
 	if a.Dim() != 2 {
 		panic("gorch: LogSoftmax requires 2-D tensor (batch, classes)")
 	}
+	if a.dtype == BFloat16 {
+		return downcastToBF16(LogSoftmax(promoteToF32(a)))
+	}
 	batch, classes := a.shape[0], a.shape[1]
 	out := Zeros(batch, classes)
 
@@ -391,7 +482,7 @@ func LogSoftmax(a *Tensor) *Tensor {
 		}
 	}
 
-	if a.requiresGrad {
+	if GradEnabled() && (a.requiresGrad) {
 		out.requiresGrad = true
 		out.gradFn = &GradFn{
 			name:   "LogSoftmax",
@@ -418,9 +509,12 @@ func LogSoftmax(a *Tensor) *Tensor {
 
 // Sum returns the sum of all elements as a scalar tensor.
 func Sum(a *Tensor) *Tensor {
+	if a.dtype == BFloat16 {
+		return downcastToBF16(Sum(promoteToF32(a)))
+	}
 	s := accelerate.Sum(a.data)
 	out := NewTensor([]float32{s}, 1)
-	if a.requiresGrad {
+	if GradEnabled() && (a.requiresGrad) {
 		out.requiresGrad = true
 		out.gradFn = &GradFn{
 			name:   "Sum",
@@ -436,10 +530,13 @@ func Sum(a *Tensor) *Tensor {
 
 // Mean returns the mean of all elements as a scalar tensor.
 func Mean(a *Tensor) *Tensor {
+	if a.dtype == BFloat16 {
+		return downcastToBF16(Mean(promoteToF32(a)))
+	}
 	s := Sum(a)
 	n := float32(a.Size())
 	out := NewTensor([]float32{s.data[0] / n}, 1)
-	if a.requiresGrad {
+	if GradEnabled() && (a.requiresGrad) {
 		out.requiresGrad = true
 		out.gradFn = &GradFn{
 			name:   "Mean",
@@ -454,11 +551,36 @@ func Mean(a *Tensor) *Tensor {
 
 // ---------- MatMul ----------
 
+// MatMulMetalThreshold is the M*N*K product below which gorch uses
+// Accelerate sgemm even when both operands are on Metal. Empirically
+// (see doc/metal_crossover_results.json), MPS dispatch overhead on
+// Apple M-series is ~1ms; below ~1G FMAs the dispatch dominates and
+// CPU sgemm wins. Crossover lives between 768³ (GPU 0.45×) and
+// 1024³ (GPU 1.22×). Threshold set conservatively at 512M FMAs.
+//
+// This is a package-level variable so callers benchmarking large-
+// matmul GPU paths can lower it. Setting to 0 always uses GPU when
+// possible.
+var MatMulMetalThreshold = 512_000_000
+
+// shouldUseMetalMatMul returns true when M*N*K is large enough that
+// MPS dispatch is faster than Accelerate sgemm.
+func shouldUseMetalMatMul(M, N, K int) bool {
+	if gpu == nil {
+		return false
+	}
+	return int64(M)*int64(N)*int64(K) >= int64(MatMulMetalThreshold)
+}
+
 // MatMul computes matrix multiplication: a @ b.
 // a is (M, K), b is (K, N), result is (M, N).
 func MatMul(a, b *Tensor) *Tensor {
 	if a.Dim() != 2 || b.Dim() != 2 {
 		panic("gorch: MatMul requires 2-D tensors")
+	}
+	requireSameDtype(a, b, "MatMul")
+	if a.dtype == BFloat16 {
+		return downcastToBF16(MatMul(promoteToF32(a), promoteToF32(b)))
 	}
 	M, K := a.shape[0], a.shape[1]
 	K2, N := b.shape[0], b.shape[1]
@@ -468,32 +590,50 @@ func MatMul(a, b *Tensor) *Tensor {
 
 	out := Zeros(M, N)
 
-	if a.buf != nil && b.buf != nil && gpu != nil {
-		// GPU path: MPS matmul
+	if a.buf != nil && b.buf != nil && shouldUseMetalMatMul(M, N, K) {
+		// GPU path: MPS matmul. Only dispatched when M*N*K is large
+		// enough for compute to pay off the dispatch overhead.
 		outBuf := gpu.Dev.NewBuffer(M * N * 4)
 		gpu.Queue.MatMul(a.buf, b.buf, outBuf, M, N, K)
 		out.data = outBuf.FloatSlice()
 		out.buf = outBuf
 	} else {
-		// CPU path: Accelerate BLAS sgemm
+		// CPU path: Accelerate BLAS sgemm. Reads through unified-
+		// memory slices when operands are Metal-backed.
 		accelerate.Sgemm(M, N, K, 1.0, a.data, b.data, 0.0, out.data)
 	}
 
-	if a.requiresGrad || b.requiresGrad {
+	if GradEnabled() && (a.requiresGrad || b.requiresGrad) {
 		out.requiresGrad = true
 		out.gradFn = &GradFn{
 			name:   "MatMul",
 			inputs: []*Tensor{a, b},
 			backward: func(grad *Tensor) []*Tensor {
-				// dL/dA = grad @ B^T  (using BLAS transB)
-				// dL/dB = A^T @ grad  (using BLAS transA)
+				// dL/dA = grad @ B^T  (M, N) @ (N, K) -> (M, K)
+				// dL/dB = A^T @ grad  (K, M) @ (M, N) -> (K, N)
 				gM, gN := grad.shape[0], grad.shape[1]
-				bK := b.shape[0] // B is KxN, we want grad @ B^T = (gM, gN) @ (gN, bK) but bK=K, gN=N
-				dA := Zeros(gM, b.shape[0])
-				accelerate.SgemmTransB(gM, b.shape[0], gN, 1.0, grad.data, b.data, 0.0, dA.data)
+				bK := b.shape[0]
+
+				// GPU path: every operand on Metal AND the dW shape
+				// (gM*bK*gN ≈ M*N*K of the original forward) clears
+				// the threshold. Otherwise CPU.
+				if a.buf != nil && b.buf != nil && grad.buf != nil &&
+					shouldUseMetalMatMul(gM, bK, gN) {
+					dABuf := gpu.Dev.NewBuffer(gM * bK * 4)
+					gpu.Queue.MatMulTransB(grad.buf, b.buf, dABuf, gM, bK, gN)
+					dA := &Tensor{data: dABuf.FloatSlice(), shape: []int{gM, bK}, buf: dABuf}
+
+					dBBuf := gpu.Dev.NewBuffer(a.shape[1] * gN * 4)
+					gpu.Queue.MatMulTransA(a.buf, grad.buf, dBBuf, a.shape[1], gN, a.shape[0])
+					dB := &Tensor{data: dBBuf.FloatSlice(), shape: []int{a.shape[1], gN}, buf: dBBuf}
+					return []*Tensor{dA, dB}
+				}
+
+				// CPU path: Accelerate BLAS.
+				dA := Zeros(gM, bK)
+				accelerate.SgemmTransB(gM, bK, gN, 1.0, grad.data, b.data, 0.0, dA.data)
 
 				dB := Zeros(a.shape[1], gN)
-				_ = bK
 				accelerate.SgemmTransA(a.shape[1], gN, a.shape[0], 1.0, a.data, grad.data, 0.0, dB.data)
 
 				return []*Tensor{dA, dB}
@@ -509,6 +649,10 @@ func MatMulTransB(a, b *Tensor) *Tensor {
 	if a.Dim() != 2 || b.Dim() != 2 {
 		panic("gorch: MatMulTransB requires 2-D tensors")
 	}
+	requireSameDtype(a, b, "MatMulTransB")
+	if a.dtype == BFloat16 {
+		return downcastToBF16(MatMulTransB(promoteToF32(a), promoteToF32(b)))
+	}
 	M, K := a.shape[0], a.shape[1]
 	N, K2 := b.shape[0], b.shape[1]
 	if K != K2 {
@@ -517,14 +661,12 @@ func MatMulTransB(a, b *Tensor) *Tensor {
 
 	out := Zeros(M, N)
 
-	if a.buf != nil && b.buf != nil && gpu != nil {
-		// GPU path: MPS matmul with transB
+	if a.buf != nil && b.buf != nil && shouldUseMetalMatMul(M, N, K) {
 		outBuf := gpu.Dev.NewBuffer(M * N * 4)
 		gpu.Queue.MatMulTransB(a.buf, b.buf, outBuf, M, N, K)
 		out.data = outBuf.FloatSlice()
 		out.buf = outBuf
 	} else {
-		// CPU path: Accelerate BLAS
 		accelerate.SgemmTransB(M, N, K, 1.0, a.data, b.data, 0.0, out.data)
 	}
 
@@ -532,19 +674,56 @@ func MatMulTransB(a, b *Tensor) *Tensor {
 	return out
 }
 
+// MatMulTransA computes a^T @ b. a is (K, M), b is (K, N), result is (M, N).
+// No autograd — used inside backward functions where the inputs are
+// gradient tensors that should not extend the autograd graph.
+func MatMulTransA(a, b *Tensor) *Tensor {
+	if a.Dim() != 2 || b.Dim() != 2 {
+		panic("gorch: MatMulTransA requires 2-D tensors")
+	}
+	requireSameDtype(a, b, "MatMulTransA")
+	if a.dtype == BFloat16 {
+		return downcastToBF16(MatMulTransA(promoteToF32(a), promoteToF32(b)))
+	}
+	K, M := a.shape[0], a.shape[1]
+	K2, N := b.shape[0], b.shape[1]
+	if K != K2 {
+		panic(fmt.Sprintf("gorch: MatMulTransA shape mismatch: (%d,%d)^T @ (%d,%d)", K, M, K2, N))
+	}
+
+	out := Zeros(M, N)
+	if a.buf != nil && b.buf != nil && shouldUseMetalMatMul(M, N, K) {
+		outBuf := gpu.Dev.NewBuffer(M * N * 4)
+		gpu.Queue.MatMulTransA(a.buf, b.buf, outBuf, M, N, K)
+		out.data = outBuf.FloatSlice()
+		out.buf = outBuf
+	} else {
+		accelerate.SgemmTransA(M, N, K, 1.0, a.data, b.data, 0.0, out.data)
+	}
+	return out
+}
+
 // BatchedMatMul computes out[i] = a[i] @ b[i] for i in 0..batchSize-1.
 // a: (batchSize, M, K), b: (batchSize, K, N), out: (batchSize, M, N).
 // Dispatches to MPS batched matmul on GPU, Accelerate BLAS loop on CPU.
+//
+// Backward (CPU-loop, no batched-MPS-transA today):
+//
+//	dL/dA[i] = grad[i] @ B[i]^T  (per-batch SgemmTransB)
+//	dL/dB[i] = A[i]^T @ grad[i]  (per-batch SgemmTransA)
 func BatchedMatMul(a, b *Tensor, batchSize, M, N, K int) *Tensor {
+	requireSameDtype(a, b, "BatchedMatMul")
+	if a.dtype == BFloat16 {
+		return downcastToBF16(BatchedMatMul(promoteToF32(a), promoteToF32(b), batchSize, M, N, K))
+	}
 	out := Zeros(batchSize, M, N)
 
-	if a.buf != nil && b.buf != nil && gpu != nil {
+	if a.buf != nil && b.buf != nil && shouldUseMetalMatMul(batchSize*M, N, K) {
 		outBuf := gpu.Dev.NewBuffer(batchSize * M * N * 4)
 		gpu.Queue.BatchedMatMul(a.buf, b.buf, outBuf, M, N, K, batchSize)
 		out.data = outBuf.FloatSlice()
 		out.buf = outBuf
 	} else {
-		// CPU: loop over batch
 		for i := 0; i < batchSize; i++ {
 			aOff := i * M * K
 			bOff := i * K * N
@@ -552,15 +731,50 @@ func BatchedMatMul(a, b *Tensor, batchSize, M, N, K int) *Tensor {
 			accelerate.Sgemm(M, N, K, 1.0, a.data[aOff:aOff+M*K], b.data[bOff:bOff+K*N], 0.0, out.data[cOff:cOff+M*N])
 		}
 	}
+
+	if GradEnabled() && (a.requiresGrad || b.requiresGrad) {
+		out.requiresGrad = true
+		out.gradFn = &GradFn{
+			name:   "BatchedMatMul",
+			inputs: []*Tensor{a, b},
+			backward: func(grad *Tensor) []*Tensor {
+				dA := Zeros(batchSize, M, K)
+				dB := Zeros(batchSize, K, N)
+				for i := 0; i < batchSize; i++ {
+					aOff := i * M * K
+					bOff := i * K * N
+					cOff := i * M * N
+					// dA[i] = grad[i] @ B[i]^T
+					accelerate.SgemmTransB(M, K, N, 1.0,
+						grad.data[cOff:cOff+M*N], b.data[bOff:bOff+K*N],
+						0.0, dA.data[aOff:aOff+M*K])
+					// dB[i] = A[i]^T @ grad[i]
+					accelerate.SgemmTransA(K, N, M, 1.0,
+						a.data[aOff:aOff+M*K], grad.data[cOff:cOff+M*N],
+						0.0, dB.data[bOff:bOff+K*N])
+				}
+				return []*Tensor{dA, dB}
+			},
+		}
+	}
 	return out
 }
 
 // BatchedMatMulTransB computes out[i] = a[i] @ b[i]^T for i in 0..batchSize-1.
 // a: (batchSize, M, K), b: (batchSize, N, K), out: (batchSize, M, N).
+//
+// Backward (CPU-loop):
+//
+//	dL/dA[i] = grad[i] @ B[i]      (per-batch Sgemm)
+//	dL/dB[i] = grad[i]^T @ A[i]    (per-batch SgemmTransA)
 func BatchedMatMulTransB(a, b *Tensor, batchSize, M, N, K int) *Tensor {
+	requireSameDtype(a, b, "BatchedMatMulTransB")
+	if a.dtype == BFloat16 {
+		return downcastToBF16(BatchedMatMulTransB(promoteToF32(a), promoteToF32(b), batchSize, M, N, K))
+	}
 	out := Zeros(batchSize, M, N)
 
-	if a.buf != nil && b.buf != nil && gpu != nil {
+	if a.buf != nil && b.buf != nil && shouldUseMetalMatMul(batchSize*M, N, K) {
 		outBuf := gpu.Dev.NewBuffer(batchSize * M * N * 4)
 		gpu.Queue.BatchedMatMulTransB(a.buf, b.buf, outBuf, M, N, K, batchSize)
 		out.data = outBuf.FloatSlice()
@@ -571,6 +785,32 @@ func BatchedMatMulTransB(a, b *Tensor, batchSize, M, N, K int) *Tensor {
 			bOff := i * N * K
 			cOff := i * M * N
 			accelerate.SgemmTransB(M, N, K, 1.0, a.data[aOff:aOff+M*K], b.data[bOff:bOff+N*K], 0.0, out.data[cOff:cOff+M*N])
+		}
+	}
+
+	if GradEnabled() && (a.requiresGrad || b.requiresGrad) {
+		out.requiresGrad = true
+		out.gradFn = &GradFn{
+			name:   "BatchedMatMulTransB",
+			inputs: []*Tensor{a, b},
+			backward: func(grad *Tensor) []*Tensor {
+				dA := Zeros(batchSize, M, K)
+				dB := Zeros(batchSize, N, K)
+				for i := 0; i < batchSize; i++ {
+					aOff := i * M * K
+					bOff := i * N * K
+					cOff := i * M * N
+					// dA[i] = grad[i] @ B[i]   (no transpose)
+					accelerate.Sgemm(M, K, N, 1.0,
+						grad.data[cOff:cOff+M*N], b.data[bOff:bOff+N*K],
+						0.0, dA.data[aOff:aOff+M*K])
+					// dB[i] = grad[i]^T @ A[i] — shape (N, M) @ (M, K) = (N, K)
+					accelerate.SgemmTransA(N, K, M, 1.0,
+						grad.data[cOff:cOff+M*N], a.data[aOff:aOff+M*K],
+						0.0, dB.data[bOff:bOff+N*K])
+				}
+				return []*Tensor{dA, dB}
+			},
 		}
 	}
 	return out

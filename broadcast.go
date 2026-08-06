@@ -109,6 +109,10 @@ func reduceBroadcastGrad(gradData []float32, gradShape, origShape []int) []float
 // AddB returns a + b with broadcasting support.
 // Handles: scalar + tensor, vector + matrix, etc.
 func AddB(a, b *Tensor) *Tensor {
+	requireSameDtype(a, b, "AddB")
+	if a.dtype == BFloat16 {
+		return downcastToBF16(AddB(promoteToF32(a), promoteToF32(b)))
+	}
 	// Fast path: same shape
 	if sameShape(a.shape, b.shape) {
 		return Add(a, b)
@@ -126,7 +130,7 @@ func AddB(a, b *Tensor) *Tensor {
 	}
 	out := NewTensor(outData, outShape...)
 
-	if a.requiresGrad || b.requiresGrad {
+	if GradEnabled() && (a.requiresGrad || b.requiresGrad) {
 		out.requiresGrad = true
 		out.gradFn = &GradFn{
 			name:   "AddB",
@@ -143,6 +147,10 @@ func AddB(a, b *Tensor) *Tensor {
 
 // SubB returns a - b with broadcasting support.
 func SubB(a, b *Tensor) *Tensor {
+	requireSameDtype(a, b, "SubB")
+	if a.dtype == BFloat16 {
+		return downcastToBF16(SubB(promoteToF32(a), promoteToF32(b)))
+	}
 	if sameShape(a.shape, b.shape) {
 		return Sub(a, b)
 	}
@@ -158,7 +166,7 @@ func SubB(a, b *Tensor) *Tensor {
 	}
 	out := NewTensor(outData, outShape...)
 
-	if a.requiresGrad || b.requiresGrad {
+	if GradEnabled() && (a.requiresGrad || b.requiresGrad) {
 		out.requiresGrad = true
 		out.gradFn = &GradFn{
 			name: "SubB", inputs: []*Tensor{a, b},
@@ -178,6 +186,10 @@ func SubB(a, b *Tensor) *Tensor {
 
 // MulB returns a * b with broadcasting support.
 func MulB(a, b *Tensor) *Tensor {
+	requireSameDtype(a, b, "MulB")
+	if a.dtype == BFloat16 {
+		return downcastToBF16(MulB(promoteToF32(a), promoteToF32(b)))
+	}
 	if sameShape(a.shape, b.shape) {
 		return Mul(a, b)
 	}
@@ -193,7 +205,7 @@ func MulB(a, b *Tensor) *Tensor {
 	}
 	out := NewTensor(outData, outShape...)
 
-	if a.requiresGrad || b.requiresGrad {
+	if GradEnabled() && (a.requiresGrad || b.requiresGrad) {
 		out.requiresGrad = true
 		out.gradFn = &GradFn{
 			name: "MulB", inputs: []*Tensor{a, b},
@@ -216,6 +228,10 @@ func MulB(a, b *Tensor) *Tensor {
 
 // DivB returns a / b with broadcasting support.
 func DivB(a, b *Tensor) *Tensor {
+	requireSameDtype(a, b, "DivB")
+	if a.dtype == BFloat16 {
+		return downcastToBF16(DivB(promoteToF32(a), promoteToF32(b)))
+	}
 	if sameShape(a.shape, b.shape) {
 		return Div(a, b)
 	}
@@ -231,7 +247,7 @@ func DivB(a, b *Tensor) *Tensor {
 	}
 	out := NewTensor(outData, outShape...)
 
-	if a.requiresGrad || b.requiresGrad {
+	if GradEnabled() && (a.requiresGrad || b.requiresGrad) {
 		out.requiresGrad = true
 		out.gradFn = &GradFn{
 			name: "DivB", inputs: []*Tensor{a, b},

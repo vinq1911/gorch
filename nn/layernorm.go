@@ -42,11 +42,21 @@ func (ln *LayerNorm) Forward(x *g.Tensor) *g.Tensor {
 	wData := ln.Weight.Data()
 	bData := ln.Bias.Data()
 
-	outData := make([]float32, M*N)
+	// In NoGrad mode the backward closure is never built, so xNorm
+	// and invStd are pure waste — skip both. In autograd mode we
+	// have to keep them alive (the closure captures them), so they
+	// stay as ordinary allocations.
+	needsBackward := g.GradEnabled() && (x.RequiresGrad() || ln.Weight.RequiresGrad() || ln.Bias.RequiresGrad())
 
-	// Store normalized values for backward
-	xNorm := make([]float32, M*N)
-	invStd := make([]float32, M)
+	out := g.Zeros(M, N)
+	outData := out.Data()
+
+	var xNorm []float32
+	var invStd []float32
+	if needsBackward {
+		xNorm = make([]float32, M*N)
+		invStd = make([]float32, M)
+	}
 
 	for i := 0; i < M; i++ {
 		row := xData[i*N : (i+1)*N]
@@ -67,18 +77,20 @@ func (ln *LayerNorm) Forward(x *g.Tensor) *g.Tensor {
 		variance /= float64(N)
 
 		inv := float32(1.0 / math.Sqrt(variance+float64(ln.Eps)))
-		invStd[i] = inv
+		if needsBackward {
+			invStd[i] = inv
+		}
 
 		for j := 0; j < N; j++ {
 			normalized := (row[j] - float32(mean)) * inv
-			xNorm[i*N+j] = normalized
+			if needsBackward {
+				xNorm[i*N+j] = normalized
+			}
 			outData[i*N+j] = normalized*wData[j] + bData[j]
 		}
 	}
 
-	out := g.NewTensor(outData, M, N)
-
-	if x.RequiresGrad() || ln.Weight.RequiresGrad() || ln.Bias.RequiresGrad() {
+	if needsBackward {
 		out.SetRequiresGrad(true)
 		out.SetGradFn("LayerNorm", []*g.Tensor{x, ln.Weight, ln.Bias}, func(grad *g.Tensor) []*g.Tensor {
 			gData := grad.Data()

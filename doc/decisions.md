@@ -116,3 +116,96 @@ NumPy-compatible broadcasting via separate `AddB`/`SubB`/`MulB`/`DivB` functions
 Generation supports: greedy (argmax), temperature scaling, top-K filtering, and top-P nucleus sampling. KV cache struct exists for future incremental decoding but is not yet integrated into the GPT forward pass (full sequence recomputation per token).
 
 **Current throughput:** ~40 tok/s on GPT-2 small (124M params) without KV cache. With KV cache, expect 3-5x improvement for long sequences.
+
+## ADR-009: GPU autograd is matmul-first, not all-or-nothing
+
+**Date:** 2026-04-29
+**Status:** Accepted
+
+Backward passes are wired to dispatch to MPS only for MatMul (and Linear, which composes MatMul). Other ops (LayerNorm, Softmax, GELU, etc.) keep their CPU backwards. Gradients flowing through a chain therefore land on Metal whenever the surrounding ops are MatMul-shaped, and on CPU otherwise.
+
+**Rationale:** MatMul is the dominant cost in transformer training (typically >80% of FLOPs) and the math maps cleanly onto two transposed MPS calls (`MatMulTransA` and `MatMulTransB`, both already exposed for forward use). The remaining ops require either custom Metal kernels or significant per-op work, and shipping them piecemeal would clutter the codebase faster than it helps. Apple Silicon's unified memory makes the mixed-device chain cheap — Metal-backed slices are still float32 slices that CPU loops can iterate.
+
+**What works today:** Weights on `ToMetal(dev)`, run forward + Backward, dW/db match CPU within fp32 noise, training converges. Verified by `TestLinearBackwardMatchesCPUOnGPU` and `TestTrainTinyMLPOnGPU`.
+
+**What's deferred:** Custom Metal kernels for LayerNorm/Softmax/GELU backward, which would close the remaining gap for transformer training throughput.
+
+## ADR-009-update: measured wall-clock on Apple M5 — GPU autograd is currently a regression for transformer-shaped workloads
+
+**Date:** 2026-04-29
+**Status:** Findings
+
+Empirical Linear training-step benchmarks (single Linear layer, forward + Sum loss + Backward, full step) on Apple M5:
+
+| Shape | CPU (Accelerate) | Metal (MPS) | Ratio |
+| ------------------ | ---------------- | ------------- | ------- |
+| (64, 768, 768)     | 0.50 ms          | 2.27 ms       | 4.6× SLOWER on GPU |
+| (256, 2048, 2048)  | 5.48 ms          | 26.8 ms       | 4.9× SLOWER on GPU |
+
+These shapes bracket what GPT-2 small ((seq, 768, 768) for QKV/Wo, FFN expansion to 3072) and bigger transformer architectures use. **At every shape gorch is likely to encounter in a transformer, the matmul-only Metal backward path loses to Accelerate.**
+
+Likely cause: the loss in these benches is `g.Sum`, which produces a CPU-resident grad. MatMul backward checks every operand's residency at backward time and falls back to CPU when grad is on CPU — but the operand weights are still Metal-allocated, so the CPU sgemm reads/writes through unified-memory slices. That works numerically but costs L2/L3 coherence traffic over a pure-CPU baseline.
+
+This ADR-009 update therefore deprecates the recommendation to call `gpt.ToMetal()` for training. Inference-on-Metal still wins (forward MatMul without the cross-device grad flow). For training, stay on CPU until either:
+1. The whole loss path lands on Metal (so grads stay on GPU), OR
+2. Custom Metal backward kernels exist for the activation ops.
+
+Both are bigger structural changes than the matmul-first slice.
+
+## ADR-009-fix: matmul size-threshold for Metal dispatch
+
+**Date:** 2026-04-29
+**Status:** Accepted
+
+The regression in ADR-009-update wasn't about autograd specifically — it was about Metal dispatching at all for shapes too small to amortise MPS launch overhead. The existing `doc/metal_crossover_results.json` shows the actual crossover: 768³ matmul GPU is 0.45× CPU; 1024³ is 1.22× CPU; the inflection lives between 768³ and 1024³ on M-series.
+
+`MatMulMetalThreshold` is a package-level int (default 512_000_000 FMAs) that all matmul dispatch sites consult. Below it, the CPU Accelerate path runs even when both operands are on Metal — Accelerate sgemm reads through unified-memory slices fine, no actual transfer cost. Above it, MPS dispatches as before.
+
+This applies to `MatMul`, `MatMulTransA`, `MatMulTransB`, `BatchedMatMul`, `BatchedMatMulTransB` for both forward and backward.
+
+**Wall-clock impact, Apple M5, single-Linear training step (forward + Sum + Backward):**
+
+| Shape | pre-threshold Metal | post-threshold Metal | CPU |
+| ------------------ | ------------------- | -------------------- | --- |
+| (64, 768, 768)     | 2.27 ms             | **0.32 ms**          | 0.35 ms |
+
+At GPT-2 small dims with weights on Metal, the train step is now **at parity with pure CPU** rather than 4.6× slower. `gpt.ToMetal()` is no longer actively harmful at small shapes; it falls back to CPU Accelerate transparently. At shapes above the threshold (≥1G FMAs, e.g., 2048×2048×256+ batched workloads) MPS dispatches as before.
+
+Tests that exercise the GPU code path (`TestGPUMatMulBackwardMatchesCPU`, `TestMatMulTransAPublicOp`) lower the threshold to 0 via `setMatMulMetalThresholdForTest` so they keep verifying numerical equivalence.
+
+**What this fixes vs. doesn't:**
+- ✓ `gpt.ToMetal()` no longer causes a 4.6× training regression at GPT-2 small dims
+- ✓ Forward inference at small shapes is at parity with CPU (no penalty for ToMetal)
+- ✗ Above the threshold, large-shape training (2048+) still has the cross-device grad-coherence cost — addressing it needs the full Metal loss path or custom backward kernels (still ADR-009 deferred work)
+
+## ADR-010: NoGrad gating + transient scratch pooling
+
+**Date:** 2026-04-29
+**Status:** Accepted
+
+`g.NoGrad` now actually does something. Until this change, `NoGrad` only manipulated a depth counter; no op anywhere checked `GradEnabled()`. Every op built a full autograd graph regardless. PR #15 wires `GradEnabled()` into all 31 direct field-setter sites in `ops.go` / `attention_ops.go` / `broadcast.go` / `conv.go` / `pool.go` / `loss.go`, plus into `Tensor.SetGradFn` / `SetRequiresGrad`. Inside `NoGrad`, no graph is built and activations are GC-eligible immediately after their consuming op.
+
+`AcquireFloat32` / `ReleaseFloat32` is a sync.Pool of float32 slices for *within-op transient scratch* — buffers that don't escape the op (GELU's `inner`, LayerNorm's `xNorm` and `invStd`). The pool is goroutine-safe; lifetime is bounded by the op call.
+
+Allocation pooling for *escaping* tensors (Linear.Forward output, attention reshape outputs) needs explicit Tensor.Release semantics — separate change tied to ADR-004 and not done yet.
+
+**Wall-clock impact, GPT-2 small, seq=64 (batched encode 16 at the bottom):**
+
+| Bench | original main | post-NoGrad+pool |
+| ------------------------ | ------------- | ---------------- |
+| `Encode`                 | 55.7 ms       | 25.3 ms (2.2×)   |
+| `EncodeBatch16`          | 652 ms        | 274 ms (2.4×)    |
+
+## ADR-011: KV cache delivers as advertised — measured
+
+**Date:** 2026-04-29
+**Status:** Findings
+
+Tiny GPT (vocab=256, dim=64, 4 heads, 4 layers, prompt=8, generate 64 tokens) on Apple M5:
+
+| Path | ns/op |
+| ------------------------- | --------- |
+| `BenchmarkGenerateUncached` | 35.5 ms   |
+| `BenchmarkGenerateCached`   |  4.4 ms   |
+
+**8.1× speedup at 72 tokens generated** — and the gap widens with sequence length because uncached is O(N²) per token and cached is O(N). Validates ADR-008's "expect 3-5× improvement for long sequences" claim with a concrete number on a small model. Real-world GPT-2-small numbers should be similar or better.

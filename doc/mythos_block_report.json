@@ -1,0 +1,32 @@
+{
+  "hardware": "Apple M5",
+  "seq_len": 64,
+  "block_config": "mythos_tiny: dim=128, q-heads=4, kv-heads=2, experts=2/4, expert-dim=256",
+  "timings": [
+    {
+      "op": "RMSNorm.Forward",
+      "mean_ms": 0.016966666666666665,
+      "iters": 30
+    },
+    {
+      "op": "GQA.Forward (with RoPE)",
+      "mean_ms": 0.1965,
+      "iters": 30
+    },
+    {
+      "op": "MoE.Forward (4 experts, top-2)",
+      "mean_ms": 0.28556666666666664,
+      "iters": 30
+    },
+    {
+      "op": "Full block (Norm+GQA+Add+Norm+MoE+Add)",
+      "mean_ms": 0.47346666666666665,
+      "iters": 30
+    },
+    {
+      "op": "GPT-2 small Forward (reference)",
+      "mean_ms": 31.729066666666665,
+      "iters": 30
+    }
+  ]
+}

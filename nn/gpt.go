@@ -20,6 +20,11 @@ type GPT struct {
 	NumHeads   int
 	MaxSeq     int
 	VocabSize  int
+	// TiedLMHead reports whether LMHead.Weight aliases TokenEmbed.Weight.
+	// When true, Parameters() returns the shared tensor only once and
+	// gradient updates from both the embedding lookup and the output
+	// projection accumulate into the same buffer (HF GPT-2 behaviour).
+	TiedLMHead bool
 }
 
 // NewGPT creates a GPT model with the given hyperparameters.
@@ -43,10 +48,11 @@ func NewGPT(vocabSize, dim, numHeads, numLayers, maxSeq int) *GPT {
 	}
 }
 
-// Forward runs the GPT model.
-// tokenIDs: flat list of token IDs for a single sequence.
-// Returns: (seqLen, vocabSize) logits.
-func (gpt *GPT) Forward(tokenIDs []int) *g.Tensor {
+// Encode runs the GPT model up to (but not including) the language-model
+// head and returns the (seqLen, dim) hidden states after the final layer
+// norm. Useful for embeddings, retrieval, classification heads, and any
+// downstream task that does not need next-token logits.
+func (gpt *GPT) Encode(tokenIDs []int) *g.Tensor {
 	seqLen := len(tokenIDs)
 	if seqLen > gpt.MaxSeq {
 		panic("gorch: sequence length exceeds MaxSeq")
@@ -71,15 +77,139 @@ func (gpt *GPT) Forward(tokenIDs []int) *g.Tensor {
 	}
 
 	// Final layer norm
-	x = gpt.FinalNorm.Forward(x)
-
-	// Language model head: (seq, dim) → (seq, vocab)
-	logits := gpt.LMHead.Forward(x)
-
-	return logits
+	return gpt.FinalNorm.Forward(x)
 }
 
-// Parameters returns all learnable parameters.
+// Forward runs the GPT model.
+// tokenIDs: flat list of token IDs for a single sequence.
+// Returns: (seqLen, vocabSize) logits.
+func (gpt *GPT) Forward(tokenIDs []int) *g.Tensor {
+	hidden := gpt.Encode(tokenIDs)
+	// Language model head: (seq, dim) → (seq, vocab)
+	return gpt.LMHead.Forward(hidden)
+}
+
+// ForwardCached runs the GPT model on `newTokenIDs` against a KV
+// cache. The first call should pass the full prompt to populate the
+// cache (a prefill); subsequent calls pass one new token each. The
+// position embedding offset is taken from cache.Len() before this
+// call, so callers do not need to track it.
+//
+// Returns logits of shape (len(newTokenIDs), vocabSize). On
+// incremental calls (1 new token) only the new row is materialised.
+func (gpt *GPT) ForwardCached(newTokenIDs []int, cache *KVCache) *g.Tensor {
+	posOffset := cache.Len()
+	newSeq := len(newTokenIDs)
+	if posOffset+newSeq > gpt.MaxSeq {
+		panic("gorch: cached sequence length exceeds MaxSeq")
+	}
+
+	tokEmb := gpt.TokenEmbed.Forward(newTokenIDs)
+
+	posIDs := make([]int, newSeq)
+	for i := range posIDs {
+		posIDs[i] = posOffset + i
+	}
+	posEmb := gpt.PosEmbed.Forward(posIDs)
+
+	x := g.Add(tokEmb, posEmb)
+	for layerIdx, block := range gpt.Blocks {
+		x = block.ForwardCached(x, cache, layerIdx, posOffset)
+	}
+	x = gpt.FinalNorm.Forward(x)
+	return gpt.LMHead.Forward(x)
+}
+
+// TieLMHeadToEmbedding aliases the language-model head's weight to
+// the token-embedding weight. Both modules then share the same
+// underlying buffer — what HuggingFace GPT-2 does as
+// `lm_head.weight = wte.weight`. Gradient updates to the LM head
+// from the cross-entropy loss and updates to the embedding from
+// the lookup path both accumulate into the shared tensor.
+//
+// Parameters() de-duplicates the alias so the optimizer sees one
+// parameter slot, not two.
+//
+// Idempotent — calling it twice is a no-op.
+func (gpt *GPT) TieLMHeadToEmbedding() {
+	if gpt.TiedLMHead {
+		return
+	}
+	if gpt.LMHead.Weight.Size() != gpt.TokenEmbed.Weight.Size() {
+		panic("gorch/nn: cannot tie LMHead to embedding — sizes differ")
+	}
+	gpt.LMHead.Weight = gpt.TokenEmbed.Weight
+	gpt.TiedLMHead = true
+}
+
+// EncodeBatch runs the GPT encoder on a batch of variable-length
+// sequences in a single forward. Sequences shorter than the batch's
+// max length are padded with the model's pad token (default 0); a
+// length mask hides padded positions in the attention softmax so
+// they don't contaminate real positions.
+//
+// Returns a (B, S, dim) hidden-state tensor where S is the longest
+// sequence in idsList. Inference-only — the activation graph is not
+// built. See issue #9.
+//
+// Use Output for slice b, position i:
+//
+//	row := h.Data()[(b*S+i)*dim : (b*S+i+1)*dim]
+func (gpt *GPT) EncodeBatch(idsList [][]int) *g.Tensor {
+	return gpt.EncodeBatchPad(idsList, 0)
+}
+
+// EncodeBatchPad is EncodeBatch with an explicit pad token id.
+func (gpt *GPT) EncodeBatchPad(idsList [][]int, padToken int) *g.Tensor {
+	batch := len(idsList)
+	if batch == 0 {
+		panic("gorch/nn: EncodeBatch requires at least one sequence")
+	}
+
+	// Find max length and validate.
+	maxLen := 0
+	lengths := make([]int, batch)
+	for i, ids := range idsList {
+		if len(ids) > gpt.MaxSeq {
+			panic("gorch/nn: sequence length exceeds MaxSeq")
+		}
+		lengths[i] = len(ids)
+		if len(ids) > maxLen {
+			maxLen = len(ids)
+		}
+	}
+	if maxLen == 0 {
+		panic("gorch/nn: EncodeBatch needs at least one non-empty sequence")
+	}
+
+	// Pad and flatten.
+	flatTokens := make([]int, batch*maxLen)
+	flatPos := make([]int, batch*maxLen)
+	for b, ids := range idsList {
+		for i := 0; i < maxLen; i++ {
+			if i < len(ids) {
+				flatTokens[b*maxLen+i] = ids[i]
+			} else {
+				flatTokens[b*maxLen+i] = padToken
+			}
+			flatPos[b*maxLen+i] = i
+		}
+	}
+
+	tokEmb := gpt.TokenEmbed.Forward(flatTokens) // (B*S, D)
+	posEmb := gpt.PosEmbed.Forward(flatPos)      // (B*S, D)
+	x := g.Add(tokEmb, posEmb)
+
+	for _, block := range gpt.Blocks {
+		x = block.ForwardBatched(x, batch, maxLen, lengths)
+	}
+	x = gpt.FinalNorm.Forward(x)
+	// Reshape to (B, S, D) view.
+	return x.Reshape(batch, maxLen, gpt.Dim)
+}
+
+// Parameters returns all learnable parameters. When TiedLMHead is
+// true, the shared embedding/LM-head weight appears once.
 func (gpt *GPT) Parameters() []*g.Tensor {
 	var params []*g.Tensor
 	params = append(params, gpt.TokenEmbed.Parameters()...)
@@ -88,7 +218,13 @@ func (gpt *GPT) Parameters() []*g.Tensor {
 		params = append(params, block.Parameters()...)
 	}
 	params = append(params, gpt.FinalNorm.Parameters()...)
-	params = append(params, gpt.LMHead.Parameters()...)
+	if gpt.TiedLMHead {
+		// LMHead.Weight aliases TokenEmbed.Weight, already in the
+		// list. Append only the bias.
+		params = append(params, gpt.LMHead.Bias)
+	} else {
+		params = append(params, gpt.LMHead.Parameters()...)
+	}
 	return params
 }
 

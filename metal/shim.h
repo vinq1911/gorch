@@ -39,6 +39,19 @@ void metal_dispatch_1d(MTLCommandQueueRef queue,
                        MTLBufferRef* bufs, uint32_t bufCount,
                        uint32_t threadCount);
 
+// Dispatch a 1-D compute kernel as a fixed grid of threadgroups, each
+// of a fixed size. Used by reduction kernels (RMSNorm, Softmax, …) that
+// need per-threadgroup shared memory and barriers — those depend on
+// knowing exactly how many lanes participate.
+//
+// groupCount:     number of threadgroups to launch
+// groupThreads:   threads per threadgroup (≤ pipeline's max)
+void metal_dispatch_threadgroups_1d(MTLCommandQueueRef queue,
+                                    MTLComputePipelineRef pipeline,
+                                    MTLBufferRef* bufs, uint32_t bufCount,
+                                    uint32_t groupCount,
+                                    uint32_t groupThreads);
+
 // MPS matrix multiply: C = A @ B.
 // A is MxK, B is KxN, C is MxN. All row-major float32.
 void metal_mps_matmul(MTLCommandQueueRef queue,

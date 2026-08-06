@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"sort"
@@ -35,36 +36,47 @@ type SafetensorsFile struct {
 //   - Remaining: raw tensor data
 //
 // Supports F32, F16 (converted to F32), and BF16 (converted to F32).
+//
+// Streams tensor data: only the JSON header and one tensor's raw bytes
+// are alive at any time, plus the running set of decoded F32 tensors.
+// For a 622 MB file this drops peak transient RSS from ~1.24 GB
+// (raw bytes + decoded floats both alive) to roughly the size of the
+// largest single tensor + decoded total. See issue #10.
 func LoadSafetensors(path string) (*SafetensorsFile, error) {
-	data, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
-		return nil, fmt.Errorf("read safetensors: %w", err)
+		return nil, fmt.Errorf("open safetensors: %w", err)
 	}
+	defer f.Close()
 
-	if len(data) < 8 {
-		return nil, fmt.Errorf("safetensors file too small")
+	// Header length (8 bytes LE).
+	var lenBuf [8]byte
+	if _, err := io.ReadFull(f, lenBuf[:]); err != nil {
+		return nil, fmt.Errorf("read header length: %w", err)
 	}
+	headerLen := binary.LittleEndian.Uint64(lenBuf[:])
 
-	// Parse header length
-	headerLen := binary.LittleEndian.Uint64(data[:8])
-	if 8+headerLen > uint64(len(data)) {
-		return nil, fmt.Errorf("header length %d exceeds file size %d", headerLen, len(data))
+	// Read just the JSON header.
+	headerJSON := make([]byte, headerLen)
+	if _, err := io.ReadFull(f, headerJSON); err != nil {
+		return nil, fmt.Errorf("read header: %w", err)
 	}
-
-	// Parse JSON header
-	headerJSON := data[8 : 8+headerLen]
 	var rawHeader map[string]json.RawMessage
 	if err := json.Unmarshal(headerJSON, &rawHeader); err != nil {
 		return nil, fmt.Errorf("parse safetensors header: %w", err)
 	}
 
-	dataStart := 8 + int(headerLen)
+	const dataStart = 8
+	headerEnd := dataStart + int64(headerLen)
 	result := &SafetensorsFile{
 		Tensors: make(map[string]*g.Tensor),
 	}
 
+	// Reuse the read buffer across tensors to keep allocations bounded.
+	// Grows monotonically to the size of the largest tensor seen.
+	var byteBuf []byte
+
 	for name, raw := range rawHeader {
-		// Skip metadata key
 		if name == "__metadata__" {
 			continue
 		}
@@ -73,23 +85,30 @@ func LoadSafetensors(path string) (*SafetensorsFile, error) {
 		if err := json.Unmarshal(raw, &hdr); err != nil {
 			return nil, fmt.Errorf("parse tensor %q header: %w", name, err)
 		}
+		size := hdr.Offsets[1] - hdr.Offsets[0]
+		if cap(byteBuf) < size {
+			byteBuf = make([]byte, size)
+		} else {
+			byteBuf = byteBuf[:size]
+		}
 
-		tensorData := data[dataStart+hdr.Offsets[0] : dataStart+hdr.Offsets[1]]
+		if _, err := f.ReadAt(byteBuf, headerEnd+int64(hdr.Offsets[0])); err != nil {
+			return nil, fmt.Errorf("read tensor %q: %w", name, err)
+		}
 
 		var floats []float32
 		switch hdr.DType {
 		case "F32":
-			floats = decodeF32(tensorData)
+			floats = decodeF32(byteBuf)
 		case "F16":
-			floats = decodeF16(tensorData)
+			floats = decodeF16(byteBuf)
 		case "BF16":
-			floats = decodeBF16(tensorData)
+			floats = decodeBF16(byteBuf)
 		default:
 			return nil, fmt.Errorf("unsupported dtype %q for tensor %q", hdr.DType, name)
 		}
 
-		tensor := g.NewTensor(floats, hdr.Shape...)
-		result.Tensors[name] = tensor
+		result.Tensors[name] = g.NewTensor(floats, hdr.Shape...)
 		result.Names = append(result.Names, name)
 	}
 

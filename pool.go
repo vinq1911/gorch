@@ -47,7 +47,7 @@ func MaxPool2dForward(input *Tensor, kernelSize, stride int) *Tensor {
 
 	out := &Tensor{data: outData, shape: []int{batch, C, outH, outW}}
 
-	if input.requiresGrad {
+	if GradEnabled() && (input.requiresGrad) {
 		out.requiresGrad = true
 		out.gradFn = &GradFn{
 			name:   "MaxPool2d",
@@ -79,7 +79,7 @@ func FlattenForward(input *Tensor) *Tensor {
 	}
 	copy(out.data, input.data)
 
-	if input.requiresGrad {
+	if GradEnabled() && (input.requiresGrad) {
 		out.requiresGrad = true
 		out.gradFn = &GradFn{
 			name:   "Flatten",

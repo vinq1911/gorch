@@ -239,6 +239,43 @@ sf, err := model.LoadSafetensors("pretrained.safetensors")
 
 Supports F32, F16, and BF16 (auto-converted to F32).
 
+## Fine-tuning a pretrained model
+
+`LoadGPT2` returns a model whose every parameter has `requires_grad=true`,
+so fine-tuning is the same loop as training from scratch — only the
+starting weights differ. Use `model.CausalLMLoss` for the standard
+next-token shift:
+
+```go
+gpt, _ := model.LoadGPT2(cacheDir, model.GPT2Small())
+tok, _ := model.LoadTokenizer(cacheDir+"/vocab.json", cacheDir+"/merges.txt")
+opt := optim.NewAdam(gpt.Parameters(), 1e-5) // small lr — don't blow up pretrained weights
+
+tokens := tok.Encode("Gorch is a deep learning framework written in Go.")
+for step := 0; step < 50; step++ {
+    opt.ZeroGrad()
+    loss := model.CausalLMLoss(gpt, tokens) // shifts inputs/targets internally
+    loss.Backward()
+    opt.Step()
+    if step%10 == 0 {
+        fmt.Printf("step %d  loss=%.4f\n", step, loss.Data()[0])
+    }
+}
+
+// Save the fine-tuned model
+model.SaveModelWeights("./gpt2-finetuned.safetensors", gpt.Parameters(), names)
+```
+
+Notes:
+- gorch does not currently *tie* the LM head to the embedding (PyTorch
+  does). After loading, `LMHead.Weight` is a separate copy of `wte.weight`;
+  fine-tuning will let them diverge, which is fine for the loss but
+  doubles the trainable parameter count of the head.
+- Use a much smaller learning rate (`1e-5` to `5e-5`) than from-scratch
+  training — pretrained weights are already in a good spot.
+- For multi-sentence training, average losses across sequences yourself
+  in the outer loop (gorch processes one sequence at a time).
+
 ## Tokenizer
 
 ### BPE tokenizer (GPT-2 compatible)

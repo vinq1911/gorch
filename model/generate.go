@@ -16,6 +16,7 @@ type GenerateConfig struct {
 	TopK         int     // 0 = disabled, >0 = sample from top-K
 	TopP         float32 // 0 = disabled, >0 = nucleus sampling threshold
 	StopToken    int     // -1 = disabled, otherwise stop at this token
+	UseKVCache   bool    // true = incremental decoding via KV cache
 }
 
 // DefaultGenerateConfig returns sensible defaults for text generation.
@@ -49,6 +50,10 @@ func GenerateText(model *nn.GPT, tok *BPETokenizer, prompt string, cfg GenerateC
 
 // GenerateWithConfig generates tokens with temperature, top-k, and top-p sampling.
 func GenerateWithConfig(model *nn.GPT, tokenIDs []int, cfg GenerateConfig) []int {
+	if cfg.UseKVCache {
+		return generateCached(model, tokenIDs, cfg)
+	}
+
 	result := make([]int, len(tokenIDs))
 	copy(result, tokenIDs)
 
@@ -81,6 +86,47 @@ func GenerateWithConfig(model *nn.GPT, tokenIDs []int, cfg GenerateConfig) []int
 		result = append(result, nextToken)
 	}
 
+	return result
+}
+
+// generateCached uses the KV cache: prefill the prompt in one forward
+// pass, then feed one new token per step.
+func generateCached(model *nn.GPT, tokenIDs []int, cfg GenerateConfig) []int {
+	cache := nn.NewKVCache(model.NumLayers, model.Dim)
+
+	result := make([]int, len(tokenIDs))
+	copy(result, tokenIDs)
+
+	// Prefill: full prompt in one forward pass.
+	if len(result) > model.MaxSeq {
+		result = result[len(result)-model.MaxSeq:]
+	}
+	logits := model.ForwardCached(result, cache)
+	lastLogits := logits.Data()[(len(result)-1)*model.VocabSize : len(result)*model.VocabSize]
+
+	for i := 0; i < cfg.MaxNewTokens; i++ {
+		var nextToken int
+		if cfg.Temperature == 0 {
+			nextToken = argmax(lastLogits)
+		} else {
+			nextToken = sample(lastLogits, cfg.Temperature, cfg.TopK, cfg.TopP)
+		}
+		if cfg.StopToken >= 0 && nextToken == cfg.StopToken {
+			break
+		}
+		result = append(result, nextToken)
+
+		// Stop at MaxSeq — no eviction strategy here, the un-cached
+		// path's truncation behaviour is incompatible with KV cache
+		// state and would need cache rotation we don't support yet.
+		if cache.Len() >= model.MaxSeq {
+			break
+		}
+
+		// Incremental step: one new token, cache grows by one.
+		stepLogits := model.ForwardCached([]int{nextToken}, cache)
+		lastLogits = stepLogits.Data()[:model.VocabSize]
+	}
 	return result
 }
 

@@ -14,6 +14,9 @@ func MaskFill(a *Tensor, mask []bool, val float32) *Tensor {
 	if len(mask) != a.Size() {
 		panic("gorch: MaskFill mask length mismatch")
 	}
+	if a.dtype == BFloat16 {
+		return downcastToBF16(MaskFill(promoteToF32(a), mask, val))
+	}
 	out := Zeros(a.shape...)
 	copy(out.data, a.data)
 	for i, m := range mask {
@@ -21,7 +24,7 @@ func MaskFill(a *Tensor, mask []bool, val float32) *Tensor {
 			out.data[i] = val
 		}
 	}
-	if a.requiresGrad {
+	if GradEnabled() && (a.requiresGrad) {
 		out.requiresGrad = true
 		out.gradFn = &GradFn{
 			name:   "MaskFill",
@@ -60,6 +63,9 @@ func EmbeddingLookup(weight *Tensor, ids []int) *Tensor {
 	if weight.Dim() != 2 {
 		panic("gorch: EmbeddingLookup requires 2-D weight (vocab, dim)")
 	}
+	if weight.dtype == BFloat16 {
+		return downcastToBF16(EmbeddingLookup(promoteToF32(weight), ids))
+	}
 	dim := weight.shape[1]
 	n := len(ids)
 	out := Zeros(n, dim)
@@ -68,7 +74,7 @@ func EmbeddingLookup(weight *Tensor, ids []int) *Tensor {
 		copy(out.data[i*dim:(i+1)*dim], weight.data[id*dim:(id+1)*dim])
 	}
 
-	if weight.requiresGrad {
+	if GradEnabled() && (weight.requiresGrad) {
 		out.requiresGrad = true
 		out.gradFn = &GradFn{
 			name:   "EmbeddingLookup",
@@ -90,12 +96,16 @@ func EmbeddingLookup(weight *Tensor, ids []int) *Tensor {
 // ScaledMatMul computes (a @ b) / sqrt(scale).
 // a: (M, K), b: (K, N). Returns: (M, N).
 func ScaledMatMul(a, b *Tensor, scale float32) *Tensor {
+	requireSameDtype(a, b, "ScaledMatMul")
+	if a.dtype == BFloat16 {
+		return downcastToBF16(ScaledMatMul(promoteToF32(a), promoteToF32(b), scale))
+	}
 	out := MatMul(a, b)
 	invScale := 1.0 / float32(math.Sqrt(float64(scale)))
 	result := Zeros(out.shape...)
 	accelerate.VScale(out.data, invScale, result.data)
 
-	if out.requiresGrad {
+	if GradEnabled() && (out.requiresGrad) {
 		result.requiresGrad = true
 		result.gradFn = &GradFn{
 			name:   "ScaledMatMul",

@@ -140,3 +140,70 @@ func TestTrainSGD(t *testing.T) {
 	}
 	fmt.Printf("  Regression (y=2x+1) final loss: %.6f\n", finalLoss)
 }
+
+func TestMultiHeadAttention_Causal_DefaultsTrue(t *testing.T) {
+	mha := NewMultiHeadAttention(8, 2)
+	if !mha.Causal {
+		t.Fatal("default-constructed MultiHeadAttention should have Causal=true")
+	}
+}
+
+func TestMultiHeadAttention_Bi_HasCausalFalse(t *testing.T) {
+	mha := NewMultiHeadAttentionBi(8, 2)
+	if mha.Causal {
+		t.Fatal("NewMultiHeadAttentionBi should have Causal=false")
+	}
+}
+
+func TestMultiHeadAttention_Bi_DiffersFromCausal(t *testing.T) {
+	// On the same input and the same random Q/K/V projections,
+	// causal and bidirectional attention must produce different
+	// outputs whenever seq > 1 — bidirectional sees future tokens,
+	// causal does not.
+	const dim = 8
+	const heads = 2
+	const seq = 4
+
+	mhaC := NewMultiHeadAttention(dim, heads)
+	mhaB := NewMultiHeadAttentionBi(dim, heads)
+
+	// Force identical weights so output difference comes purely from masking.
+	for _, pair := range []struct {
+		c, b *Linear
+	}{
+		{mhaC.Wq, mhaB.Wq},
+		{mhaC.Wk, mhaB.Wk},
+		{mhaC.Wv, mhaB.Wv},
+		{mhaC.Wo, mhaB.Wo},
+	} {
+		copy(pair.b.Weight.Data(), pair.c.Weight.Data())
+		copy(pair.b.Bias.Data(), pair.c.Bias.Data())
+	}
+
+	xData := make([]float32, seq*dim)
+	for i := range xData {
+		xData[i] = float32(i+1) * 0.1
+	}
+	xC := g.NewTensor(xData, seq, dim)
+	xB := g.NewTensor(append([]float32(nil), xData...), seq, dim)
+
+	outC := mhaC.Forward(xC, seq).Data()
+	outB := mhaB.Forward(xB, seq).Data()
+	if len(outC) != len(outB) {
+		t.Fatalf("output shape mismatch: causal=%d bi=%d", len(outC), len(outB))
+	}
+
+	var maxDiff float32
+	for i := range outC {
+		d := outC[i] - outB[i]
+		if d < 0 {
+			d = -d
+		}
+		if d > maxDiff {
+			maxDiff = d
+		}
+	}
+	if maxDiff < 1e-4 {
+		t.Errorf("causal and bidirectional outputs are identical (max diff %v); mask is not having an effect", maxDiff)
+	}
+}

@@ -10,6 +10,12 @@ import (
 
 // MultiHeadAttention implements multi-head self-attention.
 // Uses batched matmul to process all heads in one GPU dispatch.
+//
+// The Causal field selects between causal (decoder, GPT-style) and
+// bidirectional (encoder, BERT-style) self-attention. It defaults to
+// true via NewMultiHeadAttention so that pre-existing GPT-style code
+// keeps the same behaviour. Set Causal=false on the constructed module
+// before the first Forward to make it bidirectional.
 type MultiHeadAttention struct {
 	Wq       *Linear
 	Wk       *Linear
@@ -18,9 +24,12 @@ type MultiHeadAttention struct {
 	NumHeads int
 	HeadDim  int
 	Dim      int
+	Causal   bool
 }
 
-// NewMultiHeadAttention creates a multi-head attention module.
+// NewMultiHeadAttention creates a multi-head attention module with the
+// causal-mask default (decoder/GPT-style). Use NewMultiHeadAttentionBi
+// for an encoder-style bidirectional layer.
 func NewMultiHeadAttention(dim, numHeads int) *MultiHeadAttention {
 	if dim%numHeads != 0 {
 		panic("gorch: dim must be divisible by numHeads")
@@ -34,7 +43,17 @@ func NewMultiHeadAttention(dim, numHeads int) *MultiHeadAttention {
 		NumHeads: numHeads,
 		HeadDim:  headDim,
 		Dim:      dim,
+		Causal:   true,
 	}
+}
+
+// NewMultiHeadAttentionBi creates a multi-head attention module
+// configured for bidirectional (BERT-style) self-attention. No causal
+// mask is applied; every position can attend to every other position.
+func NewMultiHeadAttentionBi(dim, numHeads int) *MultiHeadAttention {
+	mha := NewMultiHeadAttention(dim, numHeads)
+	mha.Causal = false
+	return mha
 }
 
 // Forward computes multi-head self-attention.
@@ -67,18 +86,29 @@ func (mha *MultiHeadAttention) Forward(x *g.Tensor, seqLen int) *g.Tensor {
 		// Batched Q @ K^T → (numHeads, seq, seq)
 		scores := g.BatchedMatMulTransB(qHeads, kHeads, numHeads, seqLen, seqLen, headDim)
 
-		// Scale, mask, softmax (in-place on unified memory)
-		invScale := float32(1.0 / float64(headDim))
+		// Scale by 1/sqrt(headDim) — the standard scaled-dot-product
+		// attention scale (Vaswani et al. 2017). The previous version
+		// of this path divided by headDim instead of sqrt(headDim);
+		// that bug made the per-head loop path (which uses
+		// g.ScaledMatMul correctly with sqrt) and the batched path
+		// disagree, and softened the attention distribution by a
+		// factor of sqrt(headDim) on inference.
+		invScale := float32(1.0 / math.Sqrt(float64(headDim)))
 		scoresData := scores.Data()
 		for i := range scoresData {
 			scoresData[i] *= invScale
 		}
-		mask := g.CausalMask(seqLen)
+		var mask []bool
+		if mha.Causal {
+			mask = g.CausalMask(seqLen)
+		}
 		for h := 0; h < numHeads; h++ {
 			offset := h * seqLen * seqLen
-			for i, m := range mask {
-				if m {
-					scoresData[offset+i] = -1e9
+			if mask != nil {
+				for i, m := range mask {
+					if m {
+						scoresData[offset+i] = -1e9
+					}
 				}
 			}
 			softmaxInPlace(scoresData[offset:offset+seqLen*seqLen], seqLen)
@@ -98,8 +128,10 @@ func (mha *MultiHeadAttention) Forward(x *g.Tensor, seqLen int) *g.Tensor {
 
 			kT := g.Transpose2D(kh)
 			scores := g.ScaledMatMul(qh, kT, float32(headDim))
-			mask := g.CausalMask(seqLen)
-			scores = g.MaskFill(scores, mask, -1e9)
+			if mha.Causal {
+				mask := g.CausalMask(seqLen)
+				scores = g.MaskFill(scores, mask, -1e9)
+			}
 			attnWeights := g.Softmax(scores)
 			headOutputs[h] = g.MatMul(attnWeights, vh)
 		}
@@ -259,6 +291,112 @@ func softmaxInPlace(data []float32, cols int) {
 
 func exp64(x float64) float64 {
 	return math.Exp(x)
+}
+
+// ForwardCached computes self-attention for `x` against a KV cache.
+// x is the new tokens (1 row for incremental decoding, len(prompt) on
+// prefill). The cache slot at layerIdx is updated with the new K/V.
+// posOffset is the absolute position of the first new token before
+// this call (i.e., cache.Len() prior to appending).
+//
+// Causal masking uses absolute positions: a query at absolute position
+// p may attend to keys at absolute positions 0..p inclusive. For
+// incremental decoding (1 new token), no rows of the mask are active.
+//
+// This path is inference-only — it does not record an autograd tape.
+func (mha *MultiHeadAttention) ForwardCached(x *g.Tensor, cache *KVCache, layerIdx, posOffset int) *g.Tensor {
+	numHeads := mha.NumHeads
+	headDim := mha.HeadDim
+	dim := mha.Dim
+	newSeq := x.Shape()[0]
+
+	// Project new Q/K/V — same as the standard forward.
+	q := mha.Wq.Forward(x)
+	k := mha.Wk.Forward(x)
+	v := mha.Wv.Forward(x)
+
+	// Move off Metal — cached compute happens on CPU. On Apple Silicon
+	// this is a no-op on the data (unified memory), it just clears the
+	// buf pointer so we get a normal CPU slice for the loops below.
+	if k.IsOnMetal() {
+		k.ToCPU()
+	}
+	if v.IsOnMetal() {
+		v.ToCPU()
+	}
+	if q.IsOnMetal() {
+		q.ToCPU()
+	}
+
+	// Append the new K/V to the cache. After this, the cache holds
+	// totalSeq = posOffset + newSeq tokens.
+	cache.Append(layerIdx, k.Data(), v.Data())
+	totalSeq := cache.Len()
+	cachedK := cache.Keys[layerIdx]   // flat (totalSeq, dim)
+	cachedV := cache.Values[layerIdx] // flat (totalSeq, dim)
+
+	qData := q.Data()
+	out := g.Zeros(newSeq, dim)
+	outData := out.Data()
+
+	invScale := float32(1.0 / sqrtFloat32(float32(headDim)))
+
+	// Per-head loop — no batched matmul because totalSeq ≠ newSeq.
+	// For incremental decoding newSeq=1 so this is one matmul per
+	// head per token, dominated by the (1, headDim) @ (headDim, totalSeq)
+	// score and (1, totalSeq) @ (totalSeq, headDim) attended sum.
+	scores := make([]float32, newSeq*totalSeq)
+	for h := 0; h < numHeads; h++ {
+		headOff := h * headDim
+		// scores[i, j] = q[i, h, :] · k[j, h, :] * invScale
+		for i := 0; i < newSeq; i++ {
+			qRow := qData[i*dim+headOff : i*dim+headOff+headDim]
+			for j := 0; j < totalSeq; j++ {
+				kRow := cachedK[j*dim+headOff : j*dim+headOff+headDim]
+				var sum float32
+				for d := 0; d < headDim; d++ {
+					sum += qRow[d] * kRow[d]
+				}
+				scores[i*totalSeq+j] = sum * invScale
+			}
+		}
+
+		// Causal mask in absolute coordinates and softmax per row.
+		if mha.Causal {
+			for i := 0; i < newSeq; i++ {
+				absPos := posOffset + i
+				row := scores[i*totalSeq : (i+1)*totalSeq]
+				for j := absPos + 1; j < totalSeq; j++ {
+					row[j] = -1e9
+				}
+			}
+		}
+		softmaxInPlace(scores, totalSeq)
+
+		// out[i, h, :] = sum_j scores[i, j] * v[j, h, :]
+		for i := 0; i < newSeq; i++ {
+			outRow := outData[i*dim+headOff : i*dim+headOff+headDim]
+			scoreRow := scores[i*totalSeq : (i+1)*totalSeq]
+			for j := 0; j < totalSeq; j++ {
+				if scoreRow[j] == 0 {
+					continue
+				}
+				vRow := cachedV[j*dim+headOff : j*dim+headOff+headDim]
+				w := scoreRow[j]
+				for d := 0; d < headDim; d++ {
+					outRow[d] += w * vRow[d]
+				}
+			}
+		}
+	}
+
+	return mha.Wo.Forward(out)
+}
+
+func sqrtFloat32(x float32) float32 {
+	// Avoid pulling math just for this — Newton-Raphson style.
+	// Use math.Sqrt via the existing import in this file is cleaner.
+	return float32(math.Sqrt(float64(x)))
 }
 
 func (mha *MultiHeadAttention) Parameters() []*g.Tensor {

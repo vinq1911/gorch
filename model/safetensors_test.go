@@ -3,6 +3,7 @@
 package model
 
 import (
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
@@ -106,6 +107,47 @@ func TestSaveLoadModelWeights(t *testing.T) {
 	for i, want := range []float32{1, 2, 3, 4} {
 		if !approx(newParams[0].Data()[i], want) {
 			t.Fatalf("weight[%d] = %f, want %f", i, newParams[0].Data()[i], want)
+		}
+	}
+}
+
+func TestStreamingLoadOrderIndependent(t *testing.T) {
+	// Build a file with several differently-sized tensors, save, load,
+	// verify every value survives and the read order via map iteration
+	// (random in Go) doesn't desync our buffer reuse.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "many.safetensors")
+
+	tensors := map[string]*g.Tensor{}
+	for i, size := range []int{1, 100, 5, 1024, 17} {
+		data := make([]float32, size)
+		for j := range data {
+			data[j] = float32(i*1000 + j)
+		}
+		tensors[fmt.Sprintf("t%d", i)] = g.NewTensor(data, size)
+	}
+	if err := SaveSafetensors(path, tensors); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	loaded, err := LoadSafetensors(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(loaded.Tensors) != len(tensors) {
+		t.Fatalf("loaded %d tensors, want %d", len(loaded.Tensors), len(tensors))
+	}
+	for name, want := range tensors {
+		got := loaded.Tensors[name]
+		if got == nil {
+			t.Fatalf("missing %q after load", name)
+		}
+		if got.Size() != want.Size() {
+			t.Fatalf("size mismatch for %q: got %d want %d", name, got.Size(), want.Size())
+		}
+		for i := range want.Data() {
+			if got.Data()[i] != want.Data()[i] {
+				t.Fatalf("%s[%d] = %g, want %g", name, i, got.Data()[i], want.Data()[i])
+			}
 		}
 	}
 }

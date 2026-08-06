@@ -59,6 +59,15 @@ func (b *Buffer) FloatSlice() []float32 {
 	return unsafe.Slice((*float32)(ptr), n)
 }
 
+// Uint32Slice returns the buffer's contents as a Go []uint32 slice.
+// Used to fill small uniform buffers (dims, counts) for kernels that
+// expect `device const uint*` arguments.
+func (b *Buffer) Uint32Slice() []uint32 {
+	ptr := C.metal_buffer_contents(b.ptr)
+	n := int(C.metal_buffer_length(b.ptr)) / 4
+	return unsafe.Slice((*uint32)(ptr), n)
+}
+
 // Len returns the buffer size in bytes.
 func (b *Buffer) Len() int {
 	return int(C.metal_buffer_length(b.ptr))
@@ -98,6 +107,21 @@ func (q *CommandQueue) Dispatch1D(pipe *Pipeline, bufs []*Buffer, threadCount in
 	C.metal_dispatch_1d(q.ptr, pipe.ptr,
 		&cbufs[0], C.uint32_t(len(cbufs)),
 		C.uint32_t(threadCount))
+}
+
+// Dispatch1DThreadgroups launches groupCount threadgroups of exactly
+// groupThreads lanes each. Use for kernels that depend on a known
+// threadgroup size — typically reduction kernels with shared memory
+// (RMSNorm, Softmax, …). For simple element-wise kernels prefer
+// Dispatch1D, which lets Metal pick the threadgroup shape.
+func (q *CommandQueue) Dispatch1DThreadgroups(pipe *Pipeline, bufs []*Buffer, groupCount, groupThreads int) {
+	cbufs := make([]C.MTLBufferRef, len(bufs))
+	for i, b := range bufs {
+		cbufs[i] = b.ptr
+	}
+	C.metal_dispatch_threadgroups_1d(q.ptr, pipe.ptr,
+		&cbufs[0], C.uint32_t(len(cbufs)),
+		C.uint32_t(groupCount), C.uint32_t(groupThreads))
 }
 
 // MatMul computes C = A @ B using MPS (Metal Performance Shaders).
