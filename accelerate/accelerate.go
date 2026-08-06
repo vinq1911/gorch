@@ -103,6 +103,17 @@ func Exp(A, out []float32) {
 	C.acc_vexp(ptr(A), ptr(out), C.int(len(A)))
 }
 
+// ELU computes out = A > 0 ? A : exp(A)-1 element-wise (alpha = 1).
+func ELU(A, out []float32) {
+	C.acc_velu(ptr(A), ptr(out), C.int(len(A)))
+}
+
+// GELUErf computes out = 0.5*A*(1+erf(A/sqrt(2))) element-wise — the
+// exact (approximate='none') GELU.
+func GELUErf(A, out []float32) {
+	C.acc_vgelu_erf(ptr(A), ptr(out), C.int(len(A)))
+}
+
 // Log computes out = log(A) element-wise.
 func Log(A, out []float32) {
 	C.acc_vlog(ptr(A), ptr(out), C.int(len(A)))

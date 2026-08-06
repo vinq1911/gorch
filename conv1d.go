@@ -27,6 +27,22 @@ const (
 func im2col1d(input []float32, C, L, k, stride, dilation int, col []float32) {
 	kEff := (k-1)*dilation + 1
 	outL := (L-kEff)/stride + 1
+	if stride == 1 {
+		// Each (channel, tap) row of col is a contiguous slice of the
+		// input — one memmove instead of outL scalar copies. The
+		// stride-1 convs are the largest im2col volumes in the Mimi
+		// SEANet encoder (k3/k1 resnet convs at 24 kHz lengths).
+		colIdx := 0
+		for c := 0; c < C; c++ {
+			base := c * L
+			for kx := 0; kx < k; kx++ {
+				off := base + kx*dilation
+				copy(col[colIdx:colIdx+outL], input[off:off+outL])
+				colIdx += outL
+			}
+		}
+		return
+	}
 	colIdx := 0
 	for c := 0; c < C; c++ {
 		base := c * L
@@ -135,12 +151,18 @@ func Conv1dForward(input, weight, bias *Tensor, stride, dilation, padLeft, padRi
 	K := inC * k
 	N := outL
 
+	// Scratch buffers come from the shared pool: the SEANet resnet
+	// convs run im2col over ~184 MB at 24 kHz input lengths, and a
+	// fresh allocation per call dominated page-fault time (madvise)
+	// in the Mimi encode profile.
 	needPad := padLeft > 0 || padRight > 0
 	var padBuf []float32
 	if needPad {
-		padBuf = make([]float32, inC*Lp)
+		padBuf = AcquireFloat32(inC * Lp)
+		defer ReleaseFloat32(padBuf)
 	}
-	colBuf := make([]float32, K*N)
+	colBuf := AcquireFloat32(K * N)
+	defer ReleaseFloat32(colBuf)
 
 	for b := 0; b < batch; b++ {
 		inputSample := input.data[b*inC*L : (b+1)*inC*L]

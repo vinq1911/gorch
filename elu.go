@@ -2,7 +2,11 @@
 
 package gorch
 
-import "math"
+import (
+	"math"
+
+	"github.com/vinq1911/gorch/accelerate"
+)
 
 // ELU returns the Exponential Linear Unit activation with alpha=1:
 //
@@ -16,14 +20,14 @@ func ELU(a *Tensor) *Tensor {
 	if a.dtype == BFloat16 {
 		return downcastToBF16(ELU(promoteToF32(a)))
 	}
+	// Vectorized via the accelerate shim's deterministic element-wise
+	// expf (see acc_velu). Scalar math.Exp with a data-dependent
+	// branch per element was the top hotspot of the Mimi SEANet
+	// encoder (~37% of Encode); vForce's vvexpf was rejected because
+	// its rounding depends on the call's array length, which broke
+	// bit-exact streaming == offline parity.
 	out := Zeros(a.shape...)
-	for i, x := range a.data {
-		if x > 0 {
-			out.data[i] = x
-		} else {
-			out.data[i] = float32(math.Exp(float64(x))) - 1
-		}
-	}
+	accelerate.ELU(a.data, out.data)
 
 	if GradEnabled() && a.requiresGrad {
 		out.requiresGrad = true
@@ -64,11 +68,11 @@ func GELUErf(a *Tensor) *Tensor {
 	if a.dtype == BFloat16 {
 		return downcastToBF16(GELUErf(promoteToF32(a)))
 	}
+	// Forward via the C shim's float32 erff loop (~2x the throughput
+	// of scalar float64 math.Erf); the backward pass below keeps the
+	// float64 formulation.
 	out := Zeros(a.shape...)
-	for i, x := range a.data {
-		phi := 0.5 * (1 + math.Erf(float64(x)*invSqrt2))
-		out.data[i] = x * float32(phi)
-	}
+	accelerate.GELUErf(a.data, out.data)
 
 	if GradEnabled() && a.requiresGrad {
 		out.requiresGrad = true
