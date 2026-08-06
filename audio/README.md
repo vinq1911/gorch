@@ -64,14 +64,19 @@ Classifier inference: **~2 µs per clip** (265k-param MLP, Accelerate BLAS).
 
 | Stage | Latency |
 |---|---|
-| Mimi encode, batch 10 s clip | 334 ms (30× realtime) |
-| Mimi encode, streaming 80 ms chunk | ~43 ms/chunk (p95 55 ms) |
+| Mimi encode, batch 10 s clip | 334 ms (Python baseline) |
+| Mimi encode, streaming 80 ms chunk | **8.8 ms/chunk (native Go)** — was ~43 ms in Python |
 | gorch MLP head, per window | tens of µs |
 
-A live pipeline (mic → Mimi streaming encode → pooled window → gorch
-head) has an end-to-end decision latency of roughly **frame (80 ms) +
-encode (~45 ms) + head (~0 ms) ≈ 130 ms** — comfortably real-time, on
-CPU alone, leaving the GPU/ANE free.
+The streaming figure is the native Go encoder (`audio/mimi`, plan
+0006 Phase 5): `Encoder.NewStream().Push` with SEANet conv caches and
+a 250-frame windowed KV cache, steady-state mean via
+`BenchmarkMimiStreamChunk`. Streamed output matches the offline
+windowed encoder to ~1e-6 max abs. A live pipeline (mic → streaming
+encode → pooled window → gorch head) now has an end-to-end decision
+latency of roughly **frame (80 ms) + encode (~9 ms) + head (~0 ms) ≈
+90 ms** — comfortably real-time, on CPU alone, leaving the GPU/ANE
+free.
 
 ## What this enables
 

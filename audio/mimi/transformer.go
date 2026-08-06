@@ -155,3 +155,174 @@ func (l *Layer) Forward(x *g.Tensor, rope *nn.RoPE, window int) *g.Tensor {
 	m = l.Fc2.Forward(m)
 	return g.Add(x, g.MulB(m, l.MlpScale))
 }
+
+// WindowKV is the per-layer streaming K/V cache (plan §4.3): a sliding
+// buffer of the last <=window K/V rows per head with their absolute
+// positions. RoPE is applied BEFORE caching (rotate-then-cache, the
+// same order as HF and as the offline path's absolute positions), so
+// eviction is the only maintenance needed.
+//
+// Retention: after appending S new rows, the next chunk's oldest query
+// (position p) may still see key p-window+1, so Append keeps up to
+// window-1 past rows before adding the new ones. During attention the
+// buffer therefore holds at most window-1+S rows and the strict window
+// is enforced by the position mask in ForwardCached — unlike HF
+// streaming, which keeps 249 past keys but skips the mask (251
+// effective keys), this matches EncodeWindowed exactly.
+type WindowKV struct {
+	numHeads int
+	headDim  int
+	window   int
+
+	count     int   // rows currently held (per head)
+	positions []int // absolute positions of the held rows
+
+	// (numHeads, count, headDim) tensors holding the cached rows,
+	// mutated in place once the steady-state count is reached (the
+	// shape only changes while the cache is still filling), so the
+	// per-chunk path allocates nothing (plan risk 9).
+	kT, vT *g.Tensor
+}
+
+// NewWindowKV creates an empty cache for numHeads heads of headDim with
+// the given sliding window (>0).
+func NewWindowKV(numHeads, headDim, window int) *WindowKV {
+	if window <= 0 {
+		panic(fmt.Sprintf("mimi: WindowKV requires window > 0, got %d", window))
+	}
+	return &WindowKV{numHeads: numHeads, headDim: headDim, window: window}
+}
+
+// Len returns the number of K/V rows currently held (per head).
+func (c *WindowKV) Len() int { return c.count }
+
+// Reset empties the cache for session reuse.
+func (c *WindowKV) Reset() {
+	c.count = 0
+	c.positions = c.positions[:0]
+}
+
+// Append adds S freshly RoPE-rotated K/V rows (shape (numHeads, S,
+// headDim)) at absolute positions startPos..startPos+S-1, first
+// evicting all but the newest window-1 past rows.
+func (c *WindowKV) Append(kNew, vNew *g.Tensor, startPos int) {
+	shape := kNew.Shape()
+	if len(shape) != 3 || shape[0] != c.numHeads || shape[2] != c.headDim {
+		panic(fmt.Sprintf("mimi: WindowKV.Append got shape %v, want (%d, S, %d)", shape, c.numHeads, c.headDim))
+	}
+	S := shape[1]
+	keep := c.count
+	if maxPast := c.window - 1; keep > maxPast {
+		keep = maxPast
+	}
+	drop := c.count - keep
+	newCount := keep + S
+	rd := c.headDim // row length
+
+	if c.kT == nil || c.count != newCount {
+		// Cache still filling (or chunk size changed): move to freshly
+		// shaped tensors. Happens only until steady state, then never
+		// again for the session.
+		nk, nv := g.Zeros(c.numHeads, newCount, rd), g.Zeros(c.numHeads, newCount, rd)
+		if keep > 0 {
+			ok, ov := c.kT.Data(), c.vT.Data()
+			nkd, nvd := nk.Data(), nv.Data()
+			for h := 0; h < c.numHeads; h++ {
+				dst := h * newCount * rd
+				src := (h*c.count + drop) * rd
+				copy(nkd[dst:dst+keep*rd], ok[src:src+keep*rd])
+				copy(nvd[dst:dst+keep*rd], ov[src:src+keep*rd])
+			}
+		}
+		c.kT, c.vT = nk, nv
+	} else if drop > 0 {
+		// Steady state: shift each head block left by drop rows in
+		// place (allocation-free).
+		kd, vd := c.kT.Data(), c.vT.Data()
+		for h := 0; h < c.numHeads; h++ {
+			base := h * newCount * rd
+			copy(kd[base:base+keep*rd], kd[base+drop*rd:base+c.count*rd])
+			copy(vd[base:base+keep*rd], vd[base+drop*rd:base+c.count*rd])
+		}
+	}
+
+	kd, vd := c.kT.Data(), c.vT.Data()
+	nkd, nvd := kNew.Data(), vNew.Data()
+	for h := 0; h < c.numHeads; h++ {
+		dst := h*newCount*rd + keep*rd
+		copy(kd[dst:dst+S*rd], nkd[h*S*rd:(h+1)*S*rd])
+		copy(vd[dst:dst+S*rd], nvd[h*S*rd:(h+1)*S*rd])
+	}
+
+	c.positions = append(c.positions[:0], c.positions[drop:c.count]...)
+	for i := 0; i < S; i++ {
+		c.positions = append(c.positions, startPos+i)
+	}
+	c.count = newCount
+}
+
+// ForwardCached is the streaming counterpart of Forward: it processes
+// x of shape (S, dim) — S new tokens at absolute positions
+// startPos..startPos+S-1 — attending over cache (this layer's
+// WindowKV) plus the new tokens, under the same strict sliding-window
+// causal rule as Forward with window = cache.window: key position j is
+// visible to query position i iff j <= i and i-j < window. The offline
+// Forward stays untouched; concatenating ForwardCached outputs over
+// chunks reproduces Forward(x, rope, window) on the full sequence.
+func (l *Layer) ForwardCached(x *g.Tensor, rope *nn.RoPE, cache *WindowKV, startPos int) *g.Tensor {
+	S := x.Shape()[0]
+	nH, hD := l.numHeads, l.headDim
+	dim := nH * hD
+
+	// --- Attention sublayer ---
+	h := l.Norm1.Forward(x)
+	q := l.Wq.Forward(h)
+	k := l.Wk.Forward(h)
+	v := l.Wv.Forward(h)
+
+	qH := g.Permute(q.Reshape(S, nH, hD), []int{1, 0, 2})
+	kH := g.Permute(k.Reshape(S, nH, hD), []int{1, 0, 2})
+	vH := g.Permute(v.Reshape(S, nH, hD), []int{1, 0, 2})
+
+	// RoPE at absolute positions, then cache (rotate-then-cache).
+	qH = rope.Apply(qH, startPos)
+	kH = rope.Apply(kH, startPos)
+	cache.Append(kH, vH, startPos)
+
+	count := cache.Len()
+	kAll, vAll := cache.kT, cache.vT
+
+	// Scores (nH, S, count), scaled by 1/√headDim (same op sequence as
+	// Forward for bit-parity).
+	scores := g.BatchedMatMulTransB(qH, kAll, nH, S, count, hD)
+	invScale := float32(1.0 / math.Sqrt(float64(hD)))
+	scaled := g.Mul(scores, g.Full(invScale, scores.Shape()...))
+
+	// Position-based causal + sliding-window mask, tiled over heads.
+	base := make([]bool, S*count)
+	for i := 0; i < S; i++ {
+		qPos := startPos + i
+		row := base[i*count : (i+1)*count]
+		for j, kPos := range cache.positions {
+			row[j] = kPos > qPos || qPos-kPos >= cache.window
+		}
+	}
+	full := make([]bool, nH*S*count)
+	for hIdx := 0; hIdx < nH; hIdx++ {
+		copy(full[hIdx*S*count:(hIdx+1)*S*count], base)
+	}
+	masked := g.MaskFill(scaled.Reshape(nH*S, count), full, -1e9)
+
+	probs := g.Softmax(masked).Reshape(nH, S, count)
+
+	attn := g.BatchedMatMul(probs, vAll, nH, S, hD, count)
+	concat := g.Permute(attn, []int{1, 0, 2}).Reshape(S, dim)
+	x = g.Add(x, g.MulB(l.Wo.Forward(concat), l.AttnScale))
+
+	// --- MLP sublayer ---
+	m := l.Norm2.Forward(x)
+	m = l.Fc1.Forward(m)
+	m = g.GELUErf(m)
+	m = l.Fc2.Forward(m)
+	return g.Add(x, g.MulB(m, l.MlpScale))
+}

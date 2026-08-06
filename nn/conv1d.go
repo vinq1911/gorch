@@ -90,11 +90,12 @@ func (c *CausalConv1d) Parameters() []*g.Tensor {
 // call.
 type Conv1dStream struct {
 	ctx    []float32 // (inC, padTotal) left context, row-major
+	ext    []float32 // reused (inC, padTotal+chunkL) scratch (plan risk 9)
 	primed bool
 }
 
 // Reset clears the stream state so the next ForwardStream call reseeds
-// the left context.
+// the left context. The scratch buffer is kept for reuse.
 func (s *Conv1dStream) Reset() {
 	s.ctx = nil
 	s.primed = false
@@ -145,9 +146,13 @@ func (c *CausalConv1d) ForwardStream(x *g.Tensor, st *Conv1dStream) *g.Tensor {
 		st.primed = true
 	}
 
-	// Extended input: (1, inC, padTotal+chunkL) = ctx ++ chunk.
+	// Extended input: (1, inC, padTotal+chunkL) = ctx ++ chunk. The
+	// scratch buffer persists across chunks to avoid per-chunk churn.
 	extL := padTotal + chunkL
-	extData := make([]float32, inC*extL)
+	if cap(st.ext) < inC*extL {
+		st.ext = make([]float32, inC*extL)
+	}
+	extData := st.ext[:inC*extL]
 	xData := x.Data()
 	for ch := 0; ch < inC; ch++ {
 		copy(extData[ch*extL:], st.ctx[ch*padTotal:(ch+1)*padTotal])
