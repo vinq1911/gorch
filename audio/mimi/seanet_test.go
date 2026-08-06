@@ -261,7 +261,10 @@ func TestSEANetGoldenLong(t *testing.T)  { goldenSEANet(t, "long_pcm", "long_sea
 // chunks through ForwardStream and requires the concatenated output to
 // match the offline Forward within 1e-5 absolute (expected ~exact:
 // same conv summation order, chunks stride-aligned so extra padding
-// never fires).
+// never fires). Uses requireClose's recompute-once discipline: under
+// concurrent CPU load Accelerate's threaded GEMM can split reductions
+// differently between the two passes, producing transient ~1e-4-scale
+// blips that vanish on recompute.
 func TestSEANetStreamingMatchesOffline(t *testing.T) {
 	s, err := LoadSEANet(checkpointPath(t))
 	if err != nil {
@@ -276,36 +279,33 @@ func TestSEANetStreamingMatchesOffline(t *testing.T) {
 	}
 	nChunks := len(pcm) / chunkLen
 
-	var offline *g.Tensor
-	g.NoGrad(func() {
-		offline = s.Forward(g.NewTensor(pcm, 1, 1, len(pcm)))
-	})
-	C := offline.Shape()[1]
-	T := offline.Shape()[2]
+	requireClose(t, "seanet streaming vs offline", 1e-5, func() (got, ref []float32) {
+		var offline *g.Tensor
+		g.NoGrad(func() {
+			offline = s.Forward(g.NewTensor(pcm, 1, 1, len(pcm)))
+		})
+		C := offline.Shape()[1]
+		T := offline.Shape()[2]
 
-	streamed := make([]float32, C*T)
-	states := s.NewStreamStates()
-	framesPerChunk := T / nChunks
-	g.NoGrad(func() {
-		for c := 0; c < nChunks; c++ {
-			chunk := g.NewTensor(pcm[c*chunkLen:(c+1)*chunkLen], 1, 1, chunkLen)
-			out := s.ForwardStream(chunk, states)
-			if !shapeEq(out.Shape(), []int{1, C, framesPerChunk}) {
-				t.Fatalf("chunk %d: output shape %v, want [1 %d %d]", c, out.Shape(), C, framesPerChunk)
-			}
-			for ch := 0; ch < C; ch++ {
-				for f := 0; f < framesPerChunk; f++ {
-					streamed[ch*T+c*framesPerChunk+f] = out.Data()[ch*framesPerChunk+f]
+		streamed := make([]float32, C*T)
+		states := s.NewStreamStates()
+		framesPerChunk := T / nChunks
+		g.NoGrad(func() {
+			for c := 0; c < nChunks; c++ {
+				chunk := g.NewTensor(pcm[c*chunkLen:(c+1)*chunkLen], 1, 1, chunkLen)
+				out := s.ForwardStream(chunk, states)
+				if !shapeEq(out.Shape(), []int{1, C, framesPerChunk}) {
+					t.Fatalf("chunk %d: output shape %v, want [1 %d %d]", c, out.Shape(), C, framesPerChunk)
+				}
+				for ch := 0; ch < C; ch++ {
+					for f := 0; f < framesPerChunk; f++ {
+						streamed[ch*T+c*framesPerChunk+f] = out.Data()[ch*framesPerChunk+f]
+					}
 				}
 			}
-		}
+		})
+		return streamed, offline.Data()
 	})
-
-	diff := maxAbsErr(streamed, offline.Data())
-	t.Logf("streaming vs offline: max abs diff %.3g", diff)
-	if diff > 1e-5 {
-		t.Fatalf("streaming vs offline max abs diff %.3g > 1e-5", diff)
-	}
 }
 
 // BenchmarkSEANetChirp measures the offline SEANet forward on a 2 s
