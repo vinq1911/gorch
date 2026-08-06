@@ -8,18 +8,23 @@ directory holds the working proof of concept.
 ## Architecture
 
 ```
-mic / wav (24 kHz mono)
+mic / wav (any rate; audio.ReadWAV + audio.Resample → 24 kHz mono)
    │
    ▼
-Mimi encoder (frozen, 39M params, Python/PyTorch today)
+Mimi encoder (frozen, 39M params, native Go: audio/mimi)
    │   512-dim continuous latent @ 12.5 Hz
    │   (or 16×2048-way discrete codes for token models)
    ▼
-pooling (mean+std over time → 1024-dim per window)
+pooling (mean+std over time, g.MeanAxis/g.VarAxis → 1024-dim per window)
    │
    ▼
 gorch classifier (trained + run natively in Go)
 ```
+
+**The pipeline is now fully native** (plan `doc/plans/0006-mimi-native-encoder.md`):
+WAV read, resampling, Mimi encoding, and pooling all run in Go with zero
+Python. Python is only needed to regenerate the golden fixtures and the
+reference feature file (`export_mimi_fixtures.py`, `export_fsdd_mimi.py`).
 
 Mimi is the right front-end for this because it is **causal and
 streaming by design** (it powers Moshi's full-duplex dialogue): 80 ms
@@ -43,7 +48,18 @@ emotion) — both of which our probes confirm are linearly recoverable.
   - **speaker-independent digit head**: trained on 5 voices, tested on
     a fully held-out 6th voice
 
-Reproduce:
+- `../e2e/mimi_native_fsdd_test.go` — the same three heads, but with
+  the embeddings computed **entirely in Go** (ReadWAV → Resample 8k→24k
+  → `mimi.Encode` → mean+std pool), plus per-element feature parity vs
+  the Python-exported reference.
+
+Reproduce (fully native — no Python):
+
+```bash
+FSDD_DIR=/path/to/fsdd/recordings go test -tags e2e ./e2e/ -run TestMimiNativeFSDD -v
+```
+
+or with Python-exported features:
 
 ```bash
 python audio/export_fsdd_mimi.py /path/to/fsdd/recordings audio/fsdd_mimi.safetensors
@@ -52,20 +68,29 @@ go test -tags e2e ./e2e/ -run TestMimiFSDD -v
 
 Results on Apple M4, CPU only (full report: `../doc/mimi-audio-report.md`):
 
-| Head | Test accuracy | Train time |
+| Head | Python features | Native Go features |
 |---|---|---|
-| Digit (standard split) | **100.0%** (300/300) | 2.0 s |
-| Speaker | **100.0%** (300/300) | 1.9 s |
-| Digit, unseen speaker | **97.0%** (485/500) | 2.1 s |
+| Digit (standard split) | **100.0%** (300/300) | **100.0%** (300/300) |
+| Speaker | **100.0%** (300/300) | **100.0%** (300/300) |
+| Digit, unseen speaker | **97.0%** (485/500) | **96.4%** (482/500) |
 
 Classifier inference: **~2 µs per clip** (265k-param MLP, Accelerate BLAS).
+
+Native feature parity (TestMimiNativeFSDD, all 3000 clips × 1024 dims):
+Go-vs-Python pooled features agree to a **max abs diff of 8.2e-5** on an
+idle machine (gate `|Δ| ≤ 1e-3 + 2e-3·|ref|`; the residual is scipy's
+float32 resampler fast path vs Go's float64-exact polyphase, amplified
+through the encoder). Native extraction of the whole dataset (read +
+resample + encode + pool, ~22 min of audio): **52.9 s, 17.6 ms/clip,
+~25× realtime**.
 
 ## Measured performance (M4, CPU)
 
 | Stage | Latency |
 |---|---|
-| Mimi encode, batch 10 s clip | 334 ms (30× realtime) |
-| Mimi encode, streaming 80 ms chunk | ~43 ms/chunk (p95 55 ms) |
+| Mimi encode (native Go), batch 10 s clip | 283 ms (35× realtime) |
+| Mimi encode (Python baseline), batch 10 s clip | 334 ms (30× realtime) |
+| Mimi encode (Python), streaming 80 ms chunk | ~43 ms/chunk (p95 55 ms) — native streaming is plan 0006 P5 |
 | gorch MLP head, per window | tens of µs |
 
 A live pipeline (mic → Mimi streaming encode → pooled window → gorch
@@ -90,19 +115,13 @@ CPU alone, leaving the GPU/ANE free.
 
 ## Division of labor, and gaps to close in gorch
 
-Mimi stays a frozen extractor outside gorch for now. Porting its
-encoder into gorch would need Conv1d (+ causal/dilated variants),
-weight norm, ELU, audio I/O, and RVQ — a multi-week effort tracked as
-future work. The classifier side works today; the sharp edges hit
-during this PoC, in priority order:
+The gaps identified during the PoC are now closed (plan 0006): Conv1d
+(causal, dilated, replicate pad), ELU/exact GELU, axis-wise
+Mean/Var/Max, WAV reader and polyphase resampler, and the full Mimi
+encoder (`audio/mimi`) all run natively. Remaining future work:
 
-1. **axis-wise Mean/Max** — pooling over time had to be done in the
-   exporter; a `Mean(axis)` op would let gorch consume raw (T, 512)
-   latents and learn attention pooling.
-2. **Conv1d** — cheap to add on the existing im2col+BLAS machinery;
-   unlocks small temporal CNNs over the 12.5 Hz frame sequence and is
-   the first prerequisite for a native Mimi port.
-3. **WAV reader + resampler** in `data/` — removes Python from the
-   *inference* path entirely once an exported/ported encoder exists.
-4. Sequence classification over variable-length clips needs padding /
+1. **RVQ quantizer** (plan 0006 P7, optional) — only needed for
+   discrete Mimi tokens (token-LM work); the classifier pipeline uses
+   the continuous pre-quantizer latent.
+2. Sequence classification over variable-length clips needs padding /
    masked pooling in `DataLoader`.

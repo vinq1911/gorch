@@ -92,3 +92,25 @@ Gaps hit during the PoC, in priority order:
 Porting the full Mimi encoder into gorch (Conv1d + weight norm + ELU +
 RVQ + streaming conv state) is estimated at multi-week effort and is
 not needed for any of the applications above.
+
+## 5. Native Go encoder (plan 0006 outcome)
+
+The port happened anyway (`doc/plans/0006-mimi-native-encoder.md`):
+gaps 1–3 above are closed and the whole feature pipeline — WAV read,
+polyphase resample, Mimi encode, mean+std pool — now runs natively in
+Go (`audio/`, `audio/mimi`), Python needed only to regenerate golden
+fixtures. Measured on the same M4, CPU only
+(`e2e/mimi_native_fsdd_test.go`, `BenchmarkMimiEncode10s`):
+
+| Metric | Value |
+|---|---|
+| Offline encode, 10 s clip | **283 ms** (35× realtime; Python baseline 334 ms) |
+| FSDD end-to-end extraction (3000 clips, ~22 min audio) | 52.9 s total, **17.6 ms/clip**, ~25× realtime |
+| Go-vs-Python pooled-feature parity (3000 × 1024 dims) | max abs diff **8.2e-5** idle (≤5.4e-4 under heavy CPU load), gate `|Δ| ≤ 1e-3 + 2e-3·|ref|` |
+| Digit head | **100.0%** (300/300) |
+| Speaker head | **100.0%** (300/300) |
+| Digit, unseen speaker | **96.4%** (482/500) — Python-feature run: 97.0% |
+
+The classifier results of §2 reproduce with zero Python in the loop,
+which was the acceptance gate for the native port. Streaming (80 ms
+chunks with conv/KV caches, targeting <10 ms/chunk) is plan 0006 P5.
