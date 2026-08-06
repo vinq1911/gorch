@@ -7,12 +7,13 @@ import (
 )
 
 // TransformerBlock implements a single pre-norm transformer block:
-//   x = x + Attn(LayerNorm(x))
-//   x = x + FFN(LayerNorm(x))
+//
+//	x = x + Attn(LayerNorm(x))
+//	x = x + FFN(LayerNorm(x))
 type TransformerBlock struct {
 	Attn  *MultiHeadAttention
-	FFN1  *Linear    // dim → 4*dim
-	FFN2  *Linear    // 4*dim → dim
+	FFN1  *Linear // dim → 4*dim
+	FFN2  *Linear // 4*dim → dim
 	Norm1 *LayerNorm
 	Norm2 *LayerNorm
 }

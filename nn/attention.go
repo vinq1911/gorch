@@ -181,7 +181,10 @@ func concatHeadsLoop(heads []*g.Tensor, seq, numHeads, headDim int) *g.Tensor {
 	}
 	anyGrad := false
 	for _, h := range heads {
-		if h.RequiresGrad() { anyGrad = true; break }
+		if h.RequiresGrad() {
+			anyGrad = true
+			break
+		}
 	}
 	if anyGrad {
 		out.SetRequiresGrad(true)

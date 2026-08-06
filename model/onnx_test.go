@@ -116,7 +116,7 @@ func TestExportLinearAndReimportInitializers(t *testing.T) {
 func TestExportCNNRoundTripsInitializers(t *testing.T) {
 	// Tiny CNN: Conv2d → ReLU → MaxPool → Flatten → Linear.
 	conv := nn.NewConv2d(1, 4, 3, 1, 1) // (1,8,8) -> (4,8,8)
-	pool := nn.NewMaxPool2d(2, 2)        // -> (4,4,4)
+	pool := nn.NewMaxPool2d(2, 2)       // -> (4,4,4)
 	lin := nn.NewLinear(4*4*4, 10)
 	seq := nn.NewSequential(conv, nn.NewReLU(), pool, nn.NewFlatten(), lin)
 

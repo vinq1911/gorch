@@ -17,19 +17,20 @@ import (
 
 // mythos_tiny config from doc/plans/0001-openmythos-port.md.
 const (
-	mtDim         = 128
-	mtNumQHeads   = 4
-	mtNumKVHeads  = 2
-	mtHeadDim     = mtDim / mtNumQHeads
-	mtNumExperts  = 4
-	mtTopK        = 2
-	mtExpertDim   = 256
-	mtMaxSeq      = 512
+	mtDim        = 128
+	mtNumQHeads  = 4
+	mtNumKVHeads = 2
+	mtHeadDim    = mtDim / mtNumQHeads
+	mtNumExperts = 4
+	mtTopK       = 2
+	mtExpertDim  = 256
+	mtMaxSeq     = 512
 )
 
 // mythosBlock is one transformer block in the mythos_tiny shape:
-//   x = x + GQA(RMSNorm(x))
-//   x = x + MoE(RMSNorm(x))
+//
+//	x = x + GQA(RMSNorm(x))
+//	x = x + MoE(RMSNorm(x))
 type mythosBlock struct {
 	Norm1 *nn.RMSNorm
 	Attn  *nn.GQA
@@ -187,7 +188,7 @@ func TestMythosBlockReport(t *testing.T) {
 	const iters = 30
 
 	type opTiming struct {
-		Op    string  `json:"op"`
+		Op     string  `json:"op"`
 		MeanMS float64 `json:"mean_ms"`
 		Iters  int     `json:"iters"`
 	}
@@ -232,7 +233,7 @@ func TestMythosBlockReport(t *testing.T) {
 	}{
 		Hardware: "Apple M5",
 		SeqLen:   seqLen,
-		Block:    fmt.Sprintf("mythos_tiny: dim=%d, q-heads=%d, kv-heads=%d, experts=%d/%d, expert-dim=%d",
+		Block: fmt.Sprintf("mythos_tiny: dim=%d, q-heads=%d, kv-heads=%d, experts=%d/%d, expert-dim=%d",
 			mtDim, mtNumQHeads, mtNumKVHeads, mtTopK, mtNumExperts, mtExpertDim),
 		Timings: timings,
 	}

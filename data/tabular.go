@@ -20,10 +20,10 @@ type TabularDataset struct {
 	inputDim   int
 }
 
-func (d *TabularDataset) Len() int                         { return len(d.features) }
-func (d *TabularDataset) InputShape() []int                 { return []int{d.inputDim} }
-func (d *TabularDataset) TargetShape() []int                { return []int{1} }
-func (d *TabularDataset) NumClasses() int                   { return d.numClasses }
+func (d *TabularDataset) Len() int           { return len(d.features) }
+func (d *TabularDataset) InputShape() []int  { return []int{d.inputDim} }
+func (d *TabularDataset) TargetShape() []int { return []int{1} }
+func (d *TabularDataset) NumClasses() int    { return d.numClasses }
 func (d *TabularDataset) Get(i int) ([]float32, []float32) {
 	return d.features[i], []float32{float32(d.labels[i])}
 }

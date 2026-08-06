@@ -109,8 +109,8 @@ func TestEncodeBatchVariableLengthMatchesPerSequence(t *testing.T) {
 // real positions.
 func TestEncodeBatchPadDoesNotLeak(t *testing.T) {
 	gpt := NewGPT(32, 16, 2, 2, 16)
-	short := []int{1, 2, 3}                 // len 3
-	long := []int{1, 2, 3, 17, 18, 19}      // same prefix, then in-vocab noise
+	short := []int{1, 2, 3}            // len 3
+	long := []int{1, 2, 3, 17, 18, 19} // same prefix, then in-vocab noise
 
 	// Real-positions of the short sequence in a length-6 batch.
 	gotShort := gpt.EncodeBatch([][]int{short, long}).Data()

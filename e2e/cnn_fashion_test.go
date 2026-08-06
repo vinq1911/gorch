@@ -41,14 +41,14 @@ func TestCNNFashionMNIST(t *testing.T) {
 	// Flatten: (batch, 32*7*7) = (batch, 1568)
 	// Linear: (batch, 10)
 	model := nn.NewSequential(
-		nn.NewConv2d(1, 16, 3, 1, 1),  // (1,28,28) -> (16,28,28)
+		nn.NewConv2d(1, 16, 3, 1, 1), // (1,28,28) -> (16,28,28)
 		nn.NewReLU(),
-		nn.NewMaxPool2d(2, 2),          // -> (16,14,14)
-		nn.NewConv2d(16, 32, 3, 1, 1),  // -> (32,14,14)
+		nn.NewMaxPool2d(2, 2),         // -> (16,14,14)
+		nn.NewConv2d(16, 32, 3, 1, 1), // -> (32,14,14)
 		nn.NewReLU(),
-		nn.NewMaxPool2d(2, 2),          // -> (32,7,7)
-		nn.NewFlatten(),                // -> (1568)
-		nn.NewLinear(1568, 10),         // -> (10)
+		nn.NewMaxPool2d(2, 2),  // -> (32,7,7)
+		nn.NewFlatten(),        // -> (1568)
+		nn.NewLinear(1568, 10), // -> (10)
 	)
 
 	paramCount := 0

@@ -65,10 +65,10 @@ func TestFinetunePretrainedGPT2(t *testing.T) {
 // Empirical numbers from a successful run on M5 (GPT-2 small,
 // Adam lr=5e-4, 60 steps):
 //
-//   step  0 loss: 4.9
-//   step 10 loss: 5.4e-3
-//   step 30 loss: 4.4e-5
-//   step 60 loss: 7.6e-6
+//	step  0 loss: 4.9
+//	step 10 loss: 5.4e-3
+//	step 30 loss: 4.4e-5
+//	step 60 loss: 7.6e-6
 //
 // Runtime: ~2 minutes on M5 (60 steps × ~350 ms each + setup).
 func TestFinetuneShortCorpusConverges(t *testing.T) {
@@ -177,4 +177,3 @@ func argmax(row []float32) int {
 	}
 	return maxIdx
 }
-

@@ -17,9 +17,9 @@ import (
 
 // SafetensorsHeader represents the metadata for one tensor in a safetensors file.
 type SafetensorsHeader struct {
-	DType   string  `json:"dtype"`
-	Shape   []int   `json:"shape"`
-	Offsets [2]int  `json:"data_offsets"`
+	DType   string `json:"dtype"`
+	Shape   []int  `json:"shape"`
+	Offsets [2]int `json:"data_offsets"`
 }
 
 // SafetensorsFile represents a loaded safetensors file.

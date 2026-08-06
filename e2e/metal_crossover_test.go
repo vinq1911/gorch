@@ -18,18 +18,18 @@ import (
 )
 
 type matmulResult struct {
-	Size       int     `json:"size"`
-	Label      string  `json:"label"`
-	CPUTimeUs  float64 `json:"cpu_time_us"`
-	GPUTimeUs  float64 `json:"gpu_time_us"`
-	Speedup    float64 `json:"speedup"`
-	CPUGFLOPS  float64 `json:"cpu_gflops"`
-	GPUGFLOPS  float64 `json:"gpu_gflops"`
+	Size      int     `json:"size"`
+	Label     string  `json:"label"`
+	CPUTimeUs float64 `json:"cpu_time_us"`
+	GPUTimeUs float64 `json:"gpu_time_us"`
+	Speedup   float64 `json:"speedup"`
+	CPUGFLOPS float64 `json:"cpu_gflops"`
+	GPUGFLOPS float64 `json:"gpu_gflops"`
 }
 
 type crossoverReport struct {
-	Hardware      string            `json:"hardware"`
-	MatmulResults []matmulResult    `json:"matmul_results"`
+	Hardware           string              `json:"hardware"`
+	MatmulResults      []matmulResult      `json:"matmul_results"`
 	TransformerResults []transformerResult `json:"transformer_results"`
 }
 
@@ -71,7 +71,10 @@ func TestMetalCrossover(t *testing.T) {
 		a := make([]float32, n*n)
 		b := make([]float32, n*n)
 		c := make([]float32, n*n)
-		for i := range a { a[i] = 0.01; b[i] = 0.01 }
+		for i := range a {
+			a[i] = 0.01
+			b[i] = 0.01
+		}
 
 		for i := 0; i < warmup; i++ {
 			accelerate.Sgemm(n, n, n, 1.0, a, b, 0.0, c)
@@ -89,7 +92,10 @@ func TestMetalCrossover(t *testing.T) {
 		bufC := dev.NewBuffer(n * n * 4)
 		aSlice := bufA.FloatSlice()
 		bSlice := bufB.FloatSlice()
-		for i := range aSlice { aSlice[i] = 0.01; bSlice[i] = 0.01 }
+		for i := range aSlice {
+			aSlice[i] = 0.01
+			bSlice[i] = 0.01
+		}
 
 		for i := 0; i < warmup; i++ {
 			queue.MatMul(bufA, bufB, bufC, n, n, n)
@@ -113,7 +119,9 @@ func TestMetalCrossover(t *testing.T) {
 			CPUGFLOPS: cpuGFlops, GPUGFLOPS: gpuGFlops,
 		})
 
-		bufA.Release(); bufB.Release(); bufC.Release()
+		bufA.Release()
+		bufB.Release()
+		bufC.Release()
 	}
 
 	// ================================================================
@@ -129,7 +137,7 @@ func TestMetalCrossover(t *testing.T) {
 
 	configs := []struct {
 		dim, heads, layers, seq int
-		name string
+		name                    string
 	}{
 		{768, 12, 2, 32, "GPT-2 Small dim (768, 2L, seq=32)"},
 		{1024, 16, 2, 32, "GPT-2 Medium dim (1024, 2L, seq=32)"},
@@ -145,7 +153,9 @@ func TestMetalCrossover(t *testing.T) {
 		// Build model
 		mdl := nn.NewGPT(1000, cfg.dim, cfg.heads, cfg.layers, 256)
 		tokens := make([]int, cfg.seq)
-		for i := range tokens { tokens[i] = i % 1000 }
+		for i := range tokens {
+			tokens[i] = i % 1000
+		}
 
 		// CPU timing
 		cpuStart := time.Now()

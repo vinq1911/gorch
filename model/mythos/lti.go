@@ -33,7 +33,7 @@ import (
 // Per-channel damping signals: damp[i] ∈ (0, 1), with init = sigmoid(-1) ≈ 0.27,
 // then h_{t+1} = damp ⊙ h_t + (1 - damp) ⊙ Block(h_t).
 type LTIInjection struct {
-	Dim      int
+	Dim       int
 	DampLogit *g.Tensor // raw logits, shape (1, dim); pass through sigmoid for damp ∈ (0,1)
 }
 

@@ -14,10 +14,10 @@ import (
 )
 
 type fragmindResult struct {
-	ModelName      string             `json:"model_name"`
-	Params         int                `json:"params"`
-	NumLayers      int                `json:"num_layers"`
-	Experiments    []fragExperiment   `json:"experiments"`
+	ModelName   string           `json:"model_name"`
+	Params      int              `json:"params"`
+	NumLayers   int              `json:"num_layers"`
+	Experiments []fragExperiment `json:"experiments"`
 }
 
 type fragExperiment struct {
@@ -198,9 +198,9 @@ func TestFragmindPipeline(t *testing.T) {
 			LayerSplit: "6+6", Transport: "TCP (localhost)",
 			Prompt: prompt, Output: text,
 			TotalTime: dur.Round(time.Millisecond).String(), TotalTimeMs: dur.Milliseconds(),
-			TokPerSec: tps,
+			TokPerSec:   tps,
 			NetworkTime: totalNetworkTime.Round(time.Millisecond).String(),
-			Verified: true,
+			Verified:    true,
 		})
 	}
 

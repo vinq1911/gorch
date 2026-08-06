@@ -58,8 +58,8 @@ const (
 // only — actual ops on BF16 tensors arrive in subsequent PRs.
 type Tensor struct {
 	dtype  DType
-	data   []float32     // F32 path: CPU or unified-memory slice
-	data16 []uint16      // BF16 path: bf16-as-uint16 storage
+	data   []float32 // F32 path: CPU or unified-memory slice
+	data16 []uint16  // BF16 path: bf16-as-uint16 storage
 	shape  []int
 	buf    *metal.Buffer // non-nil when on Metal device
 

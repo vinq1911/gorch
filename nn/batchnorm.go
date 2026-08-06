@@ -12,14 +12,14 @@ import (
 // During training, normalizes using batch mean/variance and updates running stats.
 // During evaluation, uses running mean/variance.
 type BatchNorm1d struct {
-	Weight     *g.Tensor // gamma (features,)
-	Bias       *g.Tensor // beta (features,)
-	RunMean    []float32 // running mean (not a grad tensor)
-	RunVar     []float32 // running variance
-	Momentum   float32
-	Eps        float32
-	Features   int
-	Training   bool
+	Weight   *g.Tensor // gamma (features,)
+	Bias     *g.Tensor // beta (features,)
+	RunMean  []float32 // running mean (not a grad tensor)
+	RunVar   []float32 // running variance
+	Momentum float32
+	Eps      float32
+	Features int
+	Training bool
 }
 
 // NewBatchNorm1d creates a BatchNorm1d layer.

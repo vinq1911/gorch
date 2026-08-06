@@ -20,10 +20,10 @@ import (
 // nets need — no protoc, no reflection, no third-party deps.
 
 const (
-	wireVarint    = 0
-	wireFixed64   = 1
-	wireLenDelim  = 2
-	wireFixed32   = 5
+	wireVarint   = 0
+	wireFixed64  = 1
+	wireLenDelim = 2
+	wireFixed32  = 5
 )
 
 // pbBuf is an append-only protobuf encoder.

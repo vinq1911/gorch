@@ -224,6 +224,7 @@ func Multinomial(probs *Tensor, rng *rand.Rand) []int {
 //	                                consecutive times.
 //
 // For example, with 4 query heads and 2 KV heads, n=2 maps:
+//
 //	kv[0] → q[0], q[1]
 //	kv[1] → q[2], q[3]
 //
@@ -298,4 +299,3 @@ func RepeatInterleave(src *Tensor, n int) *Tensor {
 	}
 	return out
 }
-

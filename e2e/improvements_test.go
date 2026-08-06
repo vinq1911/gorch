@@ -133,15 +133,19 @@ func TestImprovements(t *testing.T) {
 		var finalLoss float32
 		for epoch := 0; epoch < 10; epoch++ {
 			loader.Reset()
-			var el float32; b := 0
+			var el float32
+			b := 0
 			for {
 				inp, tgt := loader.Next()
-				if inp == nil { break }
+				if inp == nil {
+					break
+				}
 				opt.ZeroGrad()
 				loss := g.CrossEntropyLoss(mdl.Forward(inp), tgt)
 				loss.Backward()
 				opt.Step()
-				el += loss.Data()[0]; b++
+				el += loss.Data()[0]
+				b++
 			}
 			finalLoss = el / float32(b)
 			sched.Step()
@@ -149,7 +153,10 @@ func TestImprovements(t *testing.T) {
 		trainTime := time.Since(start)
 
 		// Eval mode
-		bn1.Eval(); bn2.Eval(); d1.Eval(); d2.Eval()
+		bn1.Eval()
+		bn2.Eval()
+		d1.Eval()
+		d2.Eval()
 		acc := evalAccuracy(mdl, testSet, 10)
 		t.Logf("  Full+Cosine: %.2f%%, %v", acc, trainTime.Round(time.Millisecond))
 
@@ -172,7 +179,9 @@ func TestImprovements(t *testing.T) {
 	for _, r := range results {
 		delta := r.Accuracy - baseAcc
 		sign := "+"
-		if delta < 0 { sign = "" }
+		if delta < 0 {
+			sign = ""
+		}
 		t.Logf("%-30s %9.2f%% %10s %9s%.1f%%", r.Name, r.Accuracy, r.TrainTime, sign, delta)
 	}
 }
@@ -185,15 +194,19 @@ func trainAndMeasure(t *testing.T, name, desc string, mdl *nn.Sequential, trainS
 	var finalLoss float32
 	for epoch := 0; epoch < epochs; epoch++ {
 		loader.Reset()
-		var el float32; b := 0
+		var el float32
+		b := 0
 		for {
 			inp, tgt := loader.Next()
-			if inp == nil { break }
+			if inp == nil {
+				break
+			}
 			opt.ZeroGrad()
 			loss := g.CrossEntropyLoss(mdl.Forward(inp), tgt)
 			loss.Backward()
 			opt.Step()
-			el += loss.Data()[0]; b++
+			el += loss.Data()[0]
+			b++
 		}
 		finalLoss = el / float32(b)
 	}
@@ -218,16 +231,25 @@ func evalAccuracy(mdl *nn.Sequential, testSet data.Dataset, numClasses int) floa
 	correct, total := 0, 0
 	for {
 		inp, tgt := loader.Next()
-		if inp == nil { break }
+		if inp == nil {
+			break
+		}
 		logits := mdl.Forward(inp)
-		preds := logits.Data(); tgts := tgt.Data()
+		preds := logits.Data()
+		tgts := tgt.Data()
 		batch := inp.Shape()[0]
 		for i := 0; i < batch; i++ {
-			maxIdx := 0; maxVal := preds[i*numClasses]
+			maxIdx := 0
+			maxVal := preds[i*numClasses]
 			for j := 1; j < numClasses; j++ {
-				if preds[i*numClasses+j] > maxVal { maxVal = preds[i*numClasses+j]; maxIdx = j }
+				if preds[i*numClasses+j] > maxVal {
+					maxVal = preds[i*numClasses+j]
+					maxIdx = j
+				}
 			}
-			if maxIdx == int(tgts[i]) { correct++ }
+			if maxIdx == int(tgts[i]) {
+				correct++
+			}
 			total++
 		}
 	}
@@ -236,5 +258,6 @@ func evalAccuracy(mdl *nn.Sequential, testSet data.Dataset, numClasses int) floa
 
 // geluModule wraps GELU as a Module.
 type geluModule struct{}
+
 func (gm *geluModule) Forward(x *g.Tensor) *g.Tensor { return g.GELU(x) }
-func (gm *geluModule) Parameters() []*g.Tensor        { return nil }
+func (gm *geluModule) Parameters() []*g.Tensor       { return nil }

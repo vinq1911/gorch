@@ -47,7 +47,7 @@ func BenchmarkEncodeBatchNoGrad(b *testing.B) {
 	for j := range batch {
 		seq := make([]int, 64)
 		for i := range seq {
-			seq[i] = ((j+1)*i*13) % 50257
+			seq[i] = ((j + 1) * i * 13) % 50257
 		}
 		batch[j] = seq
 	}

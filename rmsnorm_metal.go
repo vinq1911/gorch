@@ -80,8 +80,8 @@ func RMSNormForwardMetal(x, weight *Tensor, eps float32) (y, invRMS *Tensor) {
 	gpu.Queue.Dispatch1DThreadgroups(
 		gpu.Pipe("rmsnorm_forward"),
 		[]*metal.Buffer{x.buf, weight.buf, dimsBuf, epsBuf, yBuf, invBuf},
-		M,                       // one threadgroup per row
-		rmsnormThreadgroupSize,  // 256 lanes
+		M,                      // one threadgroup per row
+		rmsnormThreadgroupSize, // 256 lanes
 	)
 	dimsBuf.Release()
 	epsBuf.Release()

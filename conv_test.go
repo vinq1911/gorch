@@ -244,10 +244,10 @@ func TestCNNPipeline(t *testing.T) {
 	b := Zeros(4)
 	b.SetRequiresGrad(true)
 
-	conv := Conv2dForward(input, w, b, 1, 1)   // (1,4,8,8)
-	act := ReLU(conv)                            // (1,4,8,8)
-	pooled := MaxPool2dForward(act, 2, 2)        // (1,4,4,4)
-	flat := FlattenForward(pooled)               // (1,64)
+	conv := Conv2dForward(input, w, b, 1, 1) // (1,4,8,8)
+	act := ReLU(conv)                        // (1,4,8,8)
+	pooled := MaxPool2dForward(act, 2, 2)    // (1,4,4,4)
+	flat := FlattenForward(pooled)           // (1,64)
 
 	if flat.shape[0] != 1 || flat.shape[1] != 64 {
 		t.Fatalf("flat shape = %v, want [1,64]", flat.shape)
