@@ -20,12 +20,12 @@ const (
 // Layer is one op in a TinyModel. Fields are used only when they apply
 // to the kind.
 type Layer struct {
-	Kind           LayerKind
-	InDim, OutDim  int
-	W              []int8  // row-major [OutDim][InDim]; Linear only
-	B              []int32 // OutDim; Linear only
-	M              int32   // Q0.31 requant multiplier; LinearI8 only
-	S              uint8   // right-shift; LinearI8 only
+	Kind          LayerKind
+	InDim, OutDim int
+	W             []int8  // row-major [OutDim][InDim]; Linear only
+	B             []int32 // OutDim; Linear only
+	M             int32   // Q0.31 requant multiplier; LinearI8 only
+	S             uint8   // right-shift; LinearI8 only
 }
 
 // TinyModel is a tiny int8 MLP ready to export. It is deliberately a
@@ -82,6 +82,7 @@ func (m *TinyModel) Infer(x []int8) (class uint8, logits []int32) {
 //   - GM1_INPUT_DIM, GM1_NUM_CLASSES, GM1_MAX_DIM
 //   - For each Linear layer: W{i}, B{i} (PROGMEM), and for LinearI8 the
 //     M{i}/S{i} constants.
+//
 // The firmware that consumes this header declares its own topology (which
 // ops run in what order) and simply references these tables.
 func (m *TinyModel) EmitCHeader(w io.Writer, guard string) error {

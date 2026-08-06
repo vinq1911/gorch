@@ -20,8 +20,8 @@ type FloatModel struct {
 
 	// Feature normalization: the deployed int8 model receives
 	// round((x - FeatMean) / FeatStd / InputScale) as its int8 input.
-	FeatMean  []float32
-	FeatStd   []float32
+	FeatMean   []float32
+	FeatStd    []float32
 	InputScale float32
 }
 
@@ -376,7 +376,9 @@ func quantizeBiasI32(B []float32, accScale float64) []int32 {
 
 // quantizeMultiplier expresses a real-valued scale M (typically in (0, 1))
 // as a Q0.31 multiplier plus a right-shift so that
-//     saturate((acc * M + 2^(S-1)) >> S)
+//
+//	saturate((acc * M + 2^(S-1)) >> S)
+//
 // approximates acc * realScale. Matches gm1_requant in gm1_avr.h.
 func quantizeMultiplier(realScale float64) (int32, uint8) {
 	if realScale <= 0 {
