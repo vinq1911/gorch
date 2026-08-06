@@ -125,8 +125,10 @@ The gaps identified during the PoC are now closed (plan 0006): Conv1d
 Mean/Var/Max, WAV reader and polyphase resampler, and the full Mimi
 encoder (`audio/mimi`) all run natively. Remaining future work:
 
-1. **RVQ quantizer** (plan 0006 P7, optional) — only needed for
-   discrete Mimi tokens (token-LM work); the classifier pipeline uses
-   the continuous pre-quantizer latent.
+1. ~~RVQ quantizer~~ (plan 0006 P7) — **done**: discrete Mimi tokens
+   are available natively via `mimi.Quantizer` (`Encode`: latent → RVQ
+   codes, exact match vs HF `model.encode`; `Decode`: codes → quantized
+   latent for token-LM/decoder work). The classifier pipeline still
+   uses the continuous pre-quantizer latent.
 2. Sequence classification over variable-length clips needs padding /
    masked pooling in `DataLoader`.

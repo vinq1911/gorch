@@ -1,10 +1,12 @@
 # Plan 0006: native Mimi encoder inference in gorch
 
-**Status:** P0–P6 complete — offline encoder golden-verified,
+**Status:** P0–P7 complete — offline encoder golden-verified,
 WAV/resample native, streaming at 8.8 ms/80 ms chunk
-(`audio/mimi/stream.go`), and the E2E FSDD acceptance gate
-(`e2e/mimi_native_fsdd_test.go`) passes with zero Python. P7
-(quantizer) optional, not started.
+(`audio/mimi/stream.go`), the E2E FSDD acceptance gate
+(`e2e/mimi_native_fsdd_test.go`) passes with zero Python, and the RVQ
+quantizer (`audio/mimi/quantizer.go`) produces discrete Mimi tokens
+matching HF's `model.encode(...).audio_codes` exactly (all 32 and 8
+codebooks, golden-verified end to end).
 **Branch:** `claude/audio-classifier-mimi-gorch-82b2f9` (planning notes;
 implementation lands on dedicated feature branches per phase).
 **Last updated:** 2026-08-06

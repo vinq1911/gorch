@@ -14,6 +14,16 @@ validated stage by stage:
                          MimiConv1dPaddingCache + sliding KV     (512, T12.5)
     {sig}_pooled       mean+std pool of latent.T, unbiased=False (1024,)
 
+Phase 7 (RVQ quantizer) additions — int codes stored as float32
+int-values (safetensors via this writer is f32-only):
+
+    {sig}_codes        model.encode(x).audio_codes, all 32
+                       quantizers (offline path)                 (32, T12.5)
+    {sig}_codes8       same with num_quantizers=8 (Moshi's       (8, T12.5)
+                       operating point)
+    {sig}_quantized    model.quantizer.decode of the 8-codebook
+                       codes: the decoder-side quantized latent  (512, T12.5)
+
 Signals: "chirp" (2 s seeded chirp+noise) and "long" (12 s, 300 frames
 at 25 Hz > sliding window 250, exercising the window).
 
@@ -196,6 +206,22 @@ def main() -> None:
             tensors[f"{name}_{stage}"] = val.contiguous()
         tensors[f"{name}_stream_latent"] = stream_latent(model, pcm).contiguous()
         tensors[f"{name}_pooled"] = pool(stages["latent"].T)
+
+        # Phase 7: discrete RVQ codes + quantized latent. model.encode's
+        # default (non-streaming) path is exactly the offline stages
+        # above followed by quantizer.encode.
+        with torch.no_grad():
+            x = torch.from_numpy(pcm)[None, None, :]
+            codes32 = model.encode(x, return_dict=True).audio_codes  # (1, 32, T)
+            codes8 = model.encode(x, num_quantizers=8, return_dict=True).audio_codes
+            quantized = model.quantizer.decode(codes8)  # (1, 512, T)
+        assert torch.equal(codes8, codes32[:, :8]), "RVQ prefix property violated"
+        tensors[f"{name}_codes"] = codes32[0].to(torch.float32)
+        tensors[f"{name}_codes8"] = codes8[0].to(torch.float32)
+        tensors[f"{name}_quantized"] = quantized[0]
+        print(f"{name}: codes {tuple(codes32[0].shape)} "
+              f"codes8 {tuple(codes8[0].shape)} "
+              f"quantized {tuple(quantized[0].shape)}")
 
         off_vs_stream = (
             (tensors[f"{name}_latent"] - tensors[f"{name}_stream_latent"])

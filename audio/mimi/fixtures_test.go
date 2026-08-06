@@ -27,6 +27,9 @@ func TestFixturesLoadable(t *testing.T) {
 		"chirp_latent":        {512, 25},
 		"chirp_stream_latent": {512, 25},
 		"chirp_pooled":        {1024},
+		"chirp_codes":         {32, 25},
+		"chirp_codes8":        {8, 25},
+		"chirp_quantized":     {512, 25},
 
 		"long_pcm":             {288000},
 		"long_seanet":          {512, 300},
@@ -37,6 +40,9 @@ func TestFixturesLoadable(t *testing.T) {
 		"long_pooled":          {1024},
 		"long_transformer_win": {300, 512},
 		"long_latent_win":      {512, 150},
+		"long_codes":           {32, 150},
+		"long_codes8":          {8, 150},
+		"long_quantized":       {512, 150},
 	}
 
 	if len(sf.Tensors) != len(want) {
