@@ -132,3 +132,91 @@ func TestMono(t *testing.T) {
 		t.Error("Mono aliases the Samples buffer; want a copy")
 	}
 }
+
+// TestWriteWAVRoundTrip: Write→Read of in-range samples must come back
+// within one 16-bit quantization step (1/32768).
+func TestWriteWAVRoundTrip(t *testing.T) {
+	samples := make([]float32, 1000)
+	for i := range samples {
+		// Deterministic pseudo-signal spanning most of [-1, 1).
+		samples[i] = float32(math.Sin(float64(i)*0.37)) * 0.95
+	}
+	samples = append(samples, 0, 0.5, -0.5, -1.0, 32767.0/32768)
+
+	path := t.TempDir() + "/roundtrip.wav"
+	if err := WriteWAV(path, 24000, samples); err != nil {
+		t.Fatalf("WriteWAV: %v", err)
+	}
+	w, err := ReadWAV(path)
+	if err != nil {
+		t.Fatalf("ReadWAV: %v", err)
+	}
+	if w.SampleRate != 24000 {
+		t.Errorf("SampleRate = %d, want 24000", w.SampleRate)
+	}
+	if w.Channels != 1 {
+		t.Errorf("Channels = %d, want 1", w.Channels)
+	}
+	if len(w.Samples) != len(samples) {
+		t.Fatalf("len(Samples) = %d, want %d", len(w.Samples), len(samples))
+	}
+	for i := range samples {
+		d := math.Abs(float64(w.Samples[i]) - float64(samples[i]))
+		if d >= 1.0/32768 {
+			t.Errorf("sample %d: wrote %v, read %v (diff %g >= 1/32768)", i, samples[i], w.Samples[i], d)
+		}
+	}
+}
+
+// TestWriteWAVClipping pins the exact float→int16 conversion:
+// clip(x*32768, -32768, 32767) then truncate toward zero, matching
+// numpy's `np.clip(wav*32768, -32768, 32767).astype(np.int16)` in
+// roundtrip_decode.py. ReadWAV divides by 32768, so each read-back
+// value must equal expectedInt16/32768 exactly.
+func TestWriteWAVClipping(t *testing.T) {
+	cases := []struct {
+		in   float32
+		want int16
+	}{
+		{1.5, 32767},   // clipped high
+		{-2.0, -32768}, // clipped low
+		{1.0, 32767},   // 32768 clips to 32767
+		{-1.0, -32768},
+		{0.5, 16384},
+		{100.7 / 32768, 100},   // truncates toward zero, not round
+		{-100.7 / 32768, -100}, // toward zero for negatives too (astype semantics)
+		{0, 0},
+	}
+	samples := make([]float32, len(cases))
+	for i, c := range cases {
+		samples[i] = c.in
+	}
+	path := t.TempDir() + "/clip.wav"
+	if err := WriteWAV(path, 8000, samples); err != nil {
+		t.Fatalf("WriteWAV: %v", err)
+	}
+	w, err := ReadWAV(path)
+	if err != nil {
+		t.Fatalf("ReadWAV: %v", err)
+	}
+	if len(w.Samples) != len(cases) {
+		t.Fatalf("len(Samples) = %d, want %d", len(w.Samples), len(cases))
+	}
+	for i, c := range cases {
+		want := float32(c.want) / 32768
+		if w.Samples[i] != want {
+			t.Errorf("sample %d (in=%v): read %v, want %v (int16 %d)", i, c.in, w.Samples[i], want, c.want)
+		}
+	}
+}
+
+// TestWriteWAVErrors: invalid sample rates must be rejected.
+func TestWriteWAVErrors(t *testing.T) {
+	path := t.TempDir() + "/bad.wav"
+	if err := WriteWAV(path, 0, []float32{0}); err == nil {
+		t.Error("WriteWAV with sampleRate 0 should fail")
+	}
+	if err := WriteWAV(path, -1, []float32{0}); err == nil {
+		t.Error("WriteWAV with negative sampleRate should fail")
+	}
+}

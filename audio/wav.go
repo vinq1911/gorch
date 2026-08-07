@@ -198,6 +198,48 @@ func parseFmt(b []byte) (*wavFormat, error) {
 	return f, nil
 }
 
+// WriteWAV writes mono float32 samples to path as a 16-bit PCM WAV.
+// Float-to-int16 conversion clips exactly like
+// audio/realworld/roundtrip_decode.py's
+// `np.clip(wav * 32768, -32768, 32767).astype(np.int16)`: scale by
+// 32768, clamp to [-32768, 32767], truncate toward zero (numpy astype
+// semantics, which Go's float-to-int conversion matches) — so whisper
+// hears bit-identical audio from the Go and Python decode paths.
+func WriteWAV(path string, sampleRate int, samples []float32) error {
+	if sampleRate <= 0 {
+		return fmt.Errorf("WriteWAV: invalid sample rate %d", sampleRate)
+	}
+	dataSize := 2 * len(samples)
+	buf := make([]byte, 44+dataSize)
+
+	copy(buf[0:4], "RIFF")
+	binary.LittleEndian.PutUint32(buf[4:8], uint32(36+dataSize))
+	copy(buf[8:12], "WAVE")
+
+	copy(buf[12:16], "fmt ")
+	binary.LittleEndian.PutUint32(buf[16:20], 16) // fmt chunk size
+	binary.LittleEndian.PutUint16(buf[20:22], 1)  // PCM
+	binary.LittleEndian.PutUint16(buf[22:24], 1)  // mono
+	binary.LittleEndian.PutUint32(buf[24:28], uint32(sampleRate))
+	binary.LittleEndian.PutUint32(buf[28:32], uint32(sampleRate*2)) // byte rate
+	binary.LittleEndian.PutUint16(buf[32:34], 2)                    // block align
+	binary.LittleEndian.PutUint16(buf[34:36], 16)                   // bits per sample
+
+	copy(buf[36:40], "data")
+	binary.LittleEndian.PutUint32(buf[40:44], uint32(dataSize))
+
+	for i, x := range samples {
+		v := x * 32768
+		if v > 32767 {
+			v = 32767
+		} else if v < -32768 {
+			v = -32768
+		}
+		binary.LittleEndian.PutUint16(buf[44+2*i:], uint16(int16(v)))
+	}
+	return os.WriteFile(path, buf, 0o644)
+}
+
 func decodeSamples(raw []byte, f *wavFormat) ([]float32, error) {
 	switch f.formatTag {
 	case 1: // integer PCM
