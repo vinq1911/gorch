@@ -137,7 +137,10 @@ encoder (`audio/mimi`) all run natively. Remaining future work:
 1. ~~RVQ quantizer~~ (plan 0006 P7) — **done**: discrete Mimi tokens
    are available natively via `mimi.Quantizer` (`Encode`: latent → RVQ
    codes, exact match vs HF `model.encode`; `Decode`: codes → quantized
-   latent for token-LM/decoder work). The classifier pipeline still
-   uses the continuous pre-quantizer latent.
+   latent). The classifier pipeline still uses the continuous
+   pre-quantizer latent. The full tokens→audio decoder is also native
+   (plan 0007, `mimi.Decoder` + `DecodeStream`): the 30 real-world
+   token sets decode in Go to waveforms whisper re-transcribes 30/30
+   (`audio/realworld/`), at ~120 dB SNR vs the HF reference decoder.
 2. Sequence classification over variable-length clips needs padding /
    masked pooling in `DataLoader`.

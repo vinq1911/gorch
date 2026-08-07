@@ -3,11 +3,13 @@
 package e2e
 
 import (
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	g "github.com/vinq1911/gorch"
 	"github.com/vinq1911/gorch/audio"
@@ -120,14 +122,18 @@ func intsToF32(xs []int) []float32 {
 
 // TestMimiRealWorldTokenProduction proves speech PRODUCTION in the
 // token domain: gorch encodes each real-world clip into discrete Mimi
-// tokens (8 codebooks — Moshi's speech-generation currency), and the
-// committed evidence chain shows those exact tokens decode back to
-// intelligible audio: audio/realworld/roundtrip_decode.py fed the
-// committed tokens through the reference Mimi decoder and
-// faster-whisper re-transcribed the reconstructions
-// (audio/testdata/realworld/roundtrip_transcripts.tsv). This test
+// tokens (8 codebooks — Moshi's speech-generation currency). This test
 // re-derives the tokens from scratch and requires an exact match with
-// the committed tokens, plus a passing intelligibility verdict count.
+// the committed tokens. The primary intelligibility evidence for those
+// tokens is now fully NATIVE (plan 0007 D4): the Go decoder turns the
+// committed tokens back into audio and faster-whisper re-transcribes
+// the reconstructions — asserted by TestMimiRealWorldNativeRoundtrip
+// via audio/testdata/realworld/native_roundtrip_transcripts.tsv. The
+// Python reference decode (audio/realworld/roundtrip_decode.py →
+// roundtrip_transcripts.tsv) stays committed as an INDEPENDENT
+// cross-check that the same tokens are intelligible through a decoder
+// implementation gorch shares no code with; this test still reads it
+// as that secondary check.
 func TestMimiRealWorldTokenProduction(t *testing.T) {
 	clips := realworldClips(t)
 	mimiPath := envDefault("MIMI_MODEL", defaultMimiCheckpoint)
@@ -192,29 +198,196 @@ func TestMimiRealWorldTokenProduction(t *testing.T) {
 	}
 	t.Logf("token production: %d clips × %d codebooks — exact match with committed tokens", len(clips), numQuantizers)
 
-	// 2. The committed round-trip evidence for those tokens.
-	verdicts, err := os.ReadFile(filepath.Join(realworldDir, "roundtrip_transcripts.tsv"))
-	if err != nil {
-		t.Fatalf("round-trip evidence missing: %v — run audio/realworld/roundtrip_decode.py", err)
+	// 2. The committed Python-reference round-trip evidence — the
+	//    independent cross-check (the native evidence lives in
+	//    TestMimiRealWorldNativeRoundtrip).
+	total, okCount := readVerdicts(t, "roundtrip_transcripts.tsv", nil)
+	if total != len(clips) {
+		t.Fatalf("round-trip evidence covers %d clips, want %d", total, len(clips))
 	}
-	total, okCount := 0, 0
+	frac := float64(okCount) / float64(total) * 100
+	t.Logf("reference-decoder cross-check: %d/%d clips (%.0f%%) re-transcribed correctly after decode", okCount, total, frac)
+	if frac < 80.0 {
+		t.Fatalf("round-trip intelligibility %.0f%% below 80%% gate", frac)
+	}
+}
+
+// readVerdicts parses a committed verdict TSV (verdict.py output:
+// "<clip>\t<transcript>\t<OK|MISS>", comment lines start with #) and
+// returns (total, ok) counts. When covered is non-nil, every data
+// line's clip name is recorded into it.
+func readVerdicts(t *testing.T, name string, covered map[string]bool) (total, okCount int) {
+	verdicts, err := os.ReadFile(filepath.Join(realworldDir, name))
+	if err != nil {
+		t.Fatalf("round-trip evidence %s missing: %v", name, err)
+	}
 	for _, line := range strings.Split(strings.TrimSpace(string(verdicts)), "\n") {
 		if strings.HasPrefix(line, "#") || line == "" {
 			continue
 		}
 		total++
+		if covered != nil {
+			covered[strings.SplitN(line, "\t", 2)[0]] = true
+		}
 		if strings.HasSuffix(line, "\tOK") {
 			okCount++
 		}
 	}
-	if total != len(clips) {
-		t.Fatalf("round-trip evidence covers %d clips, want %d", total, len(clips))
+	return total, okCount
+}
+
+// TestMimiRealWorldNativeRoundtrip closes the production loop entirely
+// in Go (plan 0007 §7): the committed 30-clip Mimi tokens — proven
+// byte-exact reproductions of gorch's encoder output by
+// TestMimiRealWorldTokenProduction — are decoded back to 24 kHz audio
+// by the NATIVE decoder (mimi.LoadFull → Decoder.Decode; tokens→audio
+// with zero Python). The committed evidence chain then shows the
+// native reconstructions are intelligible speech:
+//
+//  1. GORCH_MIMI_WRITE_DECODED=1 writes the 30 native reconstructions
+//     to audio/testdata/realworld/native_roundtrip/.
+//  2. faster-whisper transcribes them and verdict.py grades the
+//     transcripts (homophone-aware) into the committed
+//     native_roundtrip_transcripts.tsv.
+//  3. The normal run re-decodes every clip natively, asserts the exact
+//     1920·T length property, asserts the committed verdicts cover all
+//     30 clips with ≥80% OK (expected 30/30), and — for the 3 clips
+//     with committed HF reference decodes (rw_*_dec_wav in
+//     audio/testdata/mimi_decoder_fixtures.safetensors) — asserts the
+//     native waveform matches the reference at ≥40 dB SNR, tying the
+//     audio whisper heard to the golden-verified decoder output.
+func TestMimiRealWorldNativeRoundtrip(t *testing.T) {
+	clips := realworldClips(t)
+	mimiPath := envDefault("MIMI_MODEL", defaultMimiCheckpoint)
+	if _, err := os.Stat(mimiPath); err != nil {
+		t.Skipf("Mimi checkpoint not found at %s", mimiPath)
+	}
+	golden, err := model.LoadSafetensors(filepath.Join(realworldDir, "tokens.safetensors"))
+	if err != nil {
+		t.Skipf("committed tokens missing (%v) — run TestMimiRealWorldTokenProduction with GORCH_MIMI_WRITE_TOKENS=1 first", err)
+	}
+	_, q, dec, err := mimi.LoadFull(mimiPath)
+	if err != nil {
+		t.Fatalf("load Mimi: %v", err)
+	}
+
+	// Decode every committed clip natively: tokens → 24 kHz waveform.
+	names := append([]string(nil), golden.Names...)
+	sort.Strings(names)
+	if len(names) != len(clips) {
+		t.Fatalf("committed tokens cover %d clips, want %d", len(names), len(clips))
+	}
+	wavs := map[string][]float32{}
+	start := time.Now()
+	for _, name := range names {
+		codes := tokenCodes(t, golden, name)
+		wav := dec.Decode(q, codes)
+		if want := 1920 * len(codes[0]); len(wav) != want {
+			t.Fatalf("%s: native decode produced %d samples, want 1920·T = %d", name, len(wav), want)
+		}
+		wavs[name] = wav
+	}
+	decodeTime := time.Since(start)
+	t.Logf("native decode: %d clips in %v (%.1f ms/clip)",
+		len(names), decodeTime.Round(time.Millisecond), float64(decodeTime.Milliseconds())/float64(len(names)))
+
+	nativeDir := filepath.Join(realworldDir, "native_roundtrip")
+	if os.Getenv("GORCH_MIMI_WRITE_DECODED") == "1" {
+		if err := os.MkdirAll(nativeDir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", nativeDir, err)
+		}
+		for _, name := range names {
+			if err := audio.WriteWAV(filepath.Join(nativeDir, name+".wav"), 24000, wavs[name]); err != nil {
+				t.Fatalf("write %s: %v", name, err)
+			}
+		}
+		t.Skipf("native reconstructions written to %s — transcribe with "+
+			"audio/realworld/transcribe_check.py, grade with verdict.py into "+
+			"audio/testdata/realworld/native_roundtrip_transcripts.tsv, commit, then re-run", nativeDir)
+	}
+
+	// 1. The committed whisper verdicts for the NATIVE reconstructions
+	//    must cover exactly the committed clips at ≥80% OK.
+	covered := map[string]bool{}
+	total, okCount := readVerdicts(t, "native_roundtrip_transcripts.tsv", covered)
+	if total != len(names) || len(covered) != len(names) {
+		t.Fatalf("native round-trip evidence covers %d clips (%d unique), want %d", total, len(covered), len(names))
+	}
+	for _, name := range names {
+		if !covered[name] {
+			t.Fatalf("native round-trip evidence missing clip %s", name)
+		}
 	}
 	frac := float64(okCount) / float64(total) * 100
-	t.Logf("token round-trip intelligibility: %d/%d clips (%.0f%%) re-transcribed correctly after decode", okCount, total, frac)
+	t.Logf("native round-trip intelligibility: %d/%d clips (%.0f%%) re-transcribed correctly after native decode", okCount, total, frac)
 	if frac < 80.0 {
-		t.Fatalf("round-trip intelligibility %.0f%% below 80%% gate", frac)
+		t.Fatalf("native round-trip intelligibility %.0f%% below 80%% gate", frac)
 	}
+
+	// 2. Anchor the native reconstructions to the golden-verified HF
+	//    reference decodes for the 3 representative clips.
+	fixtures, err := model.LoadSafetensors("../audio/testdata/mimi_decoder_fixtures.safetensors")
+	if err != nil {
+		t.Fatalf("load decoder fixtures: %v", err)
+	}
+	for _, clip := range []string{"zero_alloy", "five_echo", "nine_shimmer"} {
+		ref, ok := fixtures.Tensors["rw_"+clip+"_dec_wav"]
+		if !ok {
+			t.Fatalf("decoder fixtures missing rw_%s_dec_wav", clip)
+		}
+		snr := snrDB(wavs[clip], ref.Data())
+		t.Logf("%s: native vs HF reference decode SNR %.1f dB", clip, snr)
+		if snr < 40 {
+			t.Fatalf("%s: SNR %.1f dB below 40 dB gate", clip, snr)
+		}
+	}
+}
+
+// tokenCodes converts a committed (numQuantizers, T) token tensor into
+// the [][]int layout Quantizer/Decoder consume, checking integrality.
+func tokenCodes(t *testing.T, sf *model.SafetensorsFile, name string) [][]int {
+	tt, ok := sf.Tensors[name]
+	if !ok {
+		t.Fatalf("tokens missing entry %s", name)
+	}
+	shape := tt.Shape()
+	if len(shape) != 2 {
+		t.Fatalf("%s: token shape %v, want 2-D", name, shape)
+	}
+	K, T := shape[0], shape[1]
+	data := tt.Data()
+	codes := make([][]int, K)
+	for k := 0; k < K; k++ {
+		codes[k] = make([]int, T)
+		for i := 0; i < T; i++ {
+			v := data[k*T+i]
+			c := int(v)
+			if float32(c) != v || c < 0 || c >= 2048 {
+				t.Fatalf("%s[%d][%d] = %v is not a valid Mimi code", name, k, i, v)
+			}
+			codes[k][i] = c
+		}
+	}
+	return codes
+}
+
+// snrDB computes 10·log10(Σref² / Σ(got−ref)²) over the common prefix
+// of the two waveforms (trimmed to min length, plan 0007 risk 6).
+func snrDB(got, ref []float32) float64 {
+	n := len(got)
+	if len(ref) < n {
+		n = len(ref)
+	}
+	var sig, noise float64
+	for i := 0; i < n; i++ {
+		d := float64(got[i]) - float64(ref[i])
+		sig += float64(ref[i]) * float64(ref[i])
+		noise += d * d
+	}
+	if noise == 0 {
+		return math.Inf(1)
+	}
+	return 10 * math.Log10(sig/noise)
 }
 
 func shapesEqual(a, b []int) bool {

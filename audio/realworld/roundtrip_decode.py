@@ -1,4 +1,12 @@
-"""Round-trip evidence for gorch-produced Mimi tokens (production test).
+"""INDEPENDENT CROSS-CHECK decode of gorch-produced Mimi tokens.
+
+The production tokens→audio path is native Go (audio/mimi Decoder,
+plan 0007) — see TestMimiRealWorldNativeRoundtrip and
+audio/testdata/realworld/native_roundtrip_transcripts.tsv for the
+primary round-trip evidence. This script is retained only as the
+independent cross-check: it decodes the same committed tokens with the
+REFERENCE (transformers) Mimi decoder, an implementation gorch shares
+no code with, producing the evidence behind roundtrip_transcripts.tsv.
 
 Reads audio/testdata/realworld/tokens.safetensors — 8-codebook Mimi
 codes produced NATIVELY BY GO (e2e/mimi_realworld_test.go with

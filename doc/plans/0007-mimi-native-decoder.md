@@ -1,7 +1,12 @@
 # Plan 0007: native Mimi decoder inference in gorch
 
-**Status:** D0 complete (decoder fixtures + key manifest + ConvT
-layout cases + Python baselines, 2026-08-07); D1–D4 not started.
+**Status:** COMPLETE — D0–D4 all done (2026-08-07). Native decoder
+ships in `audio/mimi` (offline ~120 dB SNR vs HF, streaming
+9.5 ms/chunk); the real-world round-trip evidence is regenerated with
+the NATIVE decoder (30/30 whisper-verified,
+`audio/testdata/realworld/native_roundtrip_transcripts.tsv`, native
+WAVs committed) and `roundtrip_decode.py` is demoted to
+cross-check-only.
 **Predecessor:** `doc/plans/0006-mimi-native-encoder.md` (P0–P7 complete: encoder, streaming, RVQ quantizer all golden-verified). This plan is the second half of that project: it removes the last Python step in the production path — `audio/realworld/roundtrip_decode.py`, the reference Mimi decoder used only to prove Go-produced tokens decode to intelligible speech.
 **Goal:** run the Mimi (kyutai/mimi) audio-codec DECODER natively in Go — frozen-weight inference only — so speech tokens produced in Go can be turned into audible 24 kHz waveforms in Go. Targets: offline waveform parity vs the transformers reference (gates in §5.3), streaming 80 ms of audio out per token, <10 ms/chunk on M4 CPU (encoder streaming achieved 8.8 ms), the real-world round-trip evidence (30/30 whisper-verified reconstructions) regenerated with the NATIVE decoder, and `roundtrip_decode.py` demoted to cross-check-only.
 **Last updated:** 2026-08-07

@@ -113,4 +113,19 @@ fixtures. Measured on the same M4, CPU only
 
 The classifier results of §2 reproduce with zero Python in the loop,
 which was the acceptance gate for the native port. Streaming (80 ms
-chunks with conv/KV caches, targeting <10 ms/chunk) is plan 0006 P5.
+chunks with conv/KV caches, targeting <10 ms/chunk) is plan 0006 P5,
+since delivered at 8.8 ms/chunk.
+
+One implication above no longer holds: this report framed Mimi in
+gorch as ingestion-only — a frozen feature extractor, not a voice
+generator. The decoder port (plan 0007) closed that half too:
+**tokens → audio now runs natively in Go** (`audio/mimi` Decoder,
+~120 dB SNR vs the HF reference; 286 ms per 10 s clip offline,
+9.5 ms per 80 ms token streaming), proven end to end on the
+real-world clips — all 30 committed token sets decode natively to
+waveforms whisper re-transcribes as the correct digit
+(`audio/testdata/realworld/native_roundtrip_transcripts.tsv`). With
+encode at 8.8 ms and decode at 9.5 ms per 80 ms frame, a full-duplex
+loop costs ≈18 ms of CPU compute per frame (~4× real-time headroom) —
+the audio front- and back-end a Moshi-style speech LM needs are both
+in place natively.
