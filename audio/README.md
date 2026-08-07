@@ -91,17 +91,26 @@ resample + encode + pool, ~22 min of audio): **52.9 s, 17.6 ms/clip,
 | Mimi encode (native Go), batch 10 s clip | 283 ms (35× realtime) |
 | Mimi encode (Python baseline), batch 10 s clip | 334 ms (30× realtime) |
 | Mimi encode (native Go), streaming 80 ms chunk | **8.8 ms/chunk** — was ~43 ms in Python |
+| Mimi decode (native Go), batch 10 s clip | 286 ms (35× realtime) |
+| Mimi decode (native Go), streaming 80 ms chunk | **9.5 ms/chunk** — was 33.95 ms in Python (KV-cache incremental) |
 | gorch MLP head, per window | tens of µs |
 
-The streaming figure is the native Go encoder (`audio/mimi`, plan
-0006 Phase 5): `Encoder.NewStream().Push` with SEANet conv caches and
-a 250-frame windowed KV cache, steady-state mean via
+The encode streaming figure is the native Go encoder (`audio/mimi`,
+plan 0006 Phase 5): `Encoder.NewStream().Push` with SEANet conv caches
+and a 250-frame windowed KV cache, steady-state mean via
 `BenchmarkMimiStreamChunk`. Streamed output matches the offline
-windowed encoder to ~1e-6 max abs. A live pipeline (mic → streaming
-encode → pooled window → gorch head) now has an end-to-end decision
-latency of roughly **frame (80 ms) + encode (~9 ms) + head (~0 ms) ≈
-90 ms** — comfortably real-time, on CPU alone, leaving the GPU/ANE
-free.
+windowed encoder to ~1e-6 max abs. The decode streaming figure is the
+native Go decoder (plan 0007 Phase D3): `Decoder.NewStream(q).Push` —
+one 8-level token column in, 1920 samples (80 ms) out — with
+overlap-add ConvTranspose tails, conv left contexts and a windowed KV
+cache, steady-state mean via `BenchmarkMimiDecodeStreamChunk`;
+streamed output matches the offline windowed decoder to ~2e-6 max abs
+(chirp) and the HF reference at ~118 dB SNR. A live pipeline (mic →
+streaming encode → pooled window → gorch head) has an end-to-end
+decision latency of roughly **frame (80 ms) + encode (~9 ms) + head
+(~0 ms) ≈ 90 ms**, and full-duplex voice (encode 8.8 ms + decode
+9.5 ms per 80 ms frame ≈ 18 ms of compute per frame) keeps ~4×
+real-time headroom — on CPU alone, leaving the GPU/ANE free.
 
 ## What this enables
 
