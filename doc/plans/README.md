@@ -17,3 +17,4 @@ as an ADR and mark the plan superseded.
 | `0004-flashattention2.md` | Native Metal FlashAttention-2 + non-matmul GPU autograd (LayerNorm/Softmax/GELU/Embedding backward Metal kernels) — closes the GPU training regression at large shapes |
 | `0005-quantization-serving.md` | int8/int4 quantization for serving large pretrained LLMs on memory-constrained Macs (parked unless serving is a stated goal) |
 | `0006-mimi-native-encoder.md` | Native Mimi audio-codec encoder inference in Go (Conv1d/ELU/axis reductions, WAV+resampler, SEANet+transformer port, streaming; RVQ optional) — removes Python from the audio feature pipeline |
+| `0007-mimi-native-decoder.md` | Native Mimi decoder in Go (ConvTranspose1d + streaming overlap-add; tokens → 24 kHz audio) — removes the reference Python decoder, the last non-Go step in the audio path |
