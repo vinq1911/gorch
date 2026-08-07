@@ -104,7 +104,15 @@ func TestStreamMatchesOfflineLong(t *testing.T) {
 	sf := loadFixtures(t)
 	pcm := fixture(t, sf, "long_pcm").Data()
 
-	requireClose(t, "long stream vs EncodeWindowed", 1e-5, func() ([]float32, []float32) {
+	// Tolerance 1e-4, not the chirp test's 1e-5: under concurrent CPU
+	// load Accelerate's threaded GEMM legitimately reorders reductions
+	// differently between the chunked and full-sequence paths, and on
+	// this 150-chunk run the drift survives requireClose's recompute
+	// (observed 3.3e-4 transient, 4.5e-5 post-recompute under parallel
+	// package execution; bit-near-exact when idle). Real streaming
+	// state bugs produce >=1e-2 errors, so 1e-4 keeps full
+	// discriminative power without load-dependent flakes.
+	requireClose(t, "long stream vs EncodeWindowed", 1e-4, func() ([]float32, []float32) {
 		return streamAll(t, e, pcm), e.EncodeWindowed(pcm).Data()
 	})
 }
