@@ -1,6 +1,7 @@
 # Plan 0007: native Mimi decoder inference in gorch
 
-**Status:** Draft — planning complete, implementation not started.
+**Status:** D0 complete (decoder fixtures + key manifest + ConvT
+layout cases + Python baselines, 2026-08-07); D1–D4 not started.
 **Predecessor:** `doc/plans/0006-mimi-native-encoder.md` (P0–P7 complete: encoder, streaming, RVQ quantizer all golden-verified). This plan is the second half of that project: it removes the last Python step in the production path — `audio/realworld/roundtrip_decode.py`, the reference Mimi decoder used only to prove Go-produced tokens decode to intelligible speech.
 **Goal:** run the Mimi (kyutai/mimi) audio-codec DECODER natively in Go — frozen-weight inference only — so speech tokens produced in Go can be turned into audible 24 kHz waveforms in Go. Targets: offline waveform parity vs the transformers reference (gates in §5.3), streaming 80 ms of audio out per token, <10 ms/chunk on M4 CPU (encoder streaming achieved 8.8 ms), the real-world round-trip evidence (30/30 whisper-verified reconstructions) regenerated with the NATIVE decoder, and `roundtrip_decode.py` demoted to cross-check-only.
 **Last updated:** 2026-08-07
@@ -342,10 +343,10 @@ real-world clips' committed tokens (`zero_alloy`, `five_echo`,
 | Fixture tensor | Stage | Shape (chirp) |
 |---|---|---|
 | `{sig}_dec_upsampled` | `model.upsample(quantized)` | (512, 50) |
-| `{sig}_dec_layer0` | after decoder_transformer layer 0 | (50, 512) |
+| `chirp_dec_layer0` only | after decoder_transformer layer 0 | (50, 512) |
 | `{sig}_dec_transformer` | decoder_transformer output | (50, 512) |
 | `{sig}_dec_seanet0` | after `decoder.layers.0` | (1024, 50) |
-| `{sig}_dec_stage1` | after `decoder.layers.3` | (512, 400) |
+| `chirp_dec_stage1` only | after `decoder.layers.3` | (512, 400) |
 | `chirp_dec_stage2` only | after `decoder.layers.6` | (256, 2400) |
 | `{sig}_dec_wav` | final waveform | (48000,) |
 | `long_dec_transformer_win` | offline with explicit window mask | (300, 512) |
@@ -353,11 +354,17 @@ real-world clips' committed tokens (`zero_alloy`, `five_echo`,
 | `rw_{clip}_dec_wav` ×3 | reference decode of committed rw tokens | (1920·T,) |
 
 Deeper SEANet stages deliberately excluded (size; same code path
-covered). **Budget ≤10 MB** (est. ≈8.5 MB). Also dump
-`mimi_decoder_keys.txt`, small random ConvTranspose1d layout-pinning
-cases (input/weight/output triples), and **measure the Python decode
-baseline** (offline 12 s clip wall time + per-token latency) —
-recorded into §7 and benchmark comments during D0.
+covered). **Budget ≤10 MB** — actual D0 file: **9.61 MB, 40 tensors**.
+D0 size trim: `dec_layer0`/`dec_stage1` are chirp-only like
+`dec_stage2` (the full `{sig}_` set would be ~15.2 MB); the long
+signal's unique value — >250-frame window behavior — is fully covered
+by `long_dec_transformer{,_win}`/`long_dec_wav{,_win}`, and SEANet
+stages are time-invariant convs whose code path chirp covers. Also
+dump `mimi_decoder_keys.txt` (done: 125 keys), small random
+ConvTranspose1d layout-pinning cases `ct_{i}_{in,w,b,out}` +
+`ct_manifest` (input/weight/output triples), and **measure the Python
+decode baseline** (offline 12 s clip wall time + per-token latency) —
+recorded into §7 and the generator's D0 section comment.
 
 ### 5.2 Test pyramid
 
@@ -440,11 +447,20 @@ Total **~7–10 working days**. Critical path D0→D1→D2→D3→D4.
 - **Audible artifact**: commit 3 native reconstructions (one per
   voice) under `audio/testdata/realworld/native_roundtrip/`.
 - `BenchmarkMimiDecode10s`: 125 tokens → 240 000 samples; Python
-  baseline measured in D0; target ≥5× faster.
+  baseline (measured in D0, 2026-08-07, transformers 4.57.1 /
+  torch 2.9.1, CPU, Apple M4): offline `model.decode` of the long
+  signal's 150 tokens (12 s audio) = **466.9 ms best-of-3**
+  (runs 535.2 / 466.9 / 490.2 ms; ≈3.1 ms/token, ≈389 ms per 10 s);
+  target ≥5× faster.
 - `BenchmarkMimiDecodeStreamChunk`: one Push (1 token → 80 ms);
   target **<10 ms** (encoder: 8.8 ms → full-duplex stays <20 ms per
-  80 ms, ~4× real-time headroom). Python per-token baseline: D0
-  records full-prefix re-decode and KV-cache-only chunking numbers.
+  80 ms, ~4× real-time headroom). Python per-token baselines
+  (measured in D0, same setup, one token per call over all 150
+  tokens): KV-cache incremental decode (`decoder_past_key_values` =
+  `DynamicCache`; HF streams only the transformer KV, not conv
+  state) = **mean 33.95 ms / median 31.88 ms / p95 44.73 ms per
+  token**; full-prefix re-decode fallback = **mean 260.96 ms /
+  median 240.91 ms per token** (433.3 ms at T=150).
 
 ## 8. Risks, ranked, with mitigations
 
