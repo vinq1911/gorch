@@ -85,8 +85,9 @@ func loadSEANetFrom(sf *model.SafetensorsFile) (*SEANet, error) {
 	}
 
 	// Every encoder.* key must have been consumed; other families are
-	// deliberately ignored for now (transformer/downsample arrive in
-	// Phase 3, quantizer in Phase 7, decoder never).
+	// loaded by their own loaders (transformer/downsample by Load,
+	// quantizer by LoadQuantizer, decoder-side keys by LoadDecoder) and
+	// deliberately ignored here.
 	var unexpected []string
 	for _, name := range sf.Names {
 		if strings.HasPrefix(name, "encoder.") && !consumed[name] {
@@ -109,7 +110,8 @@ func loadSEANetFrom(sf *model.SafetensorsFile) (*SEANet, error) {
 // downsample) from a kyutai/mimi model.safetensors checkpoint, with
 // the same fail-loudly key/shape validation as LoadSEANet. Keys under
 // decoder.*, decoder_transformer.*, upsample.* and quantizer.* are
-// ignored (quantizer arrives in Phase 7, decoder never).
+// ignored here — they are validated by LoadDecoder and LoadQuantizer
+// (LoadFull runs all loaders off one parse and asserts full coverage).
 func Load(path string) (*Encoder, error) {
 	sf, err := model.LoadSafetensors(path)
 	if err != nil {
@@ -145,10 +147,42 @@ func loadEncoderFrom(sf *model.SafetensorsFile) (*Encoder, error) {
 		assign(t)
 	}
 
-	dim, inter := e.Cfg.HiddenSize, e.Cfg.Intermediate
-	for i, l := range e.Layers {
+	dim := e.Cfg.HiddenSize
+	loadTransformerLayers(take, "encoder_transformer.", e.Layers[:], e.Cfg)
+
+	take("downsample.conv.weight", []int{dim, dim, 4}, func(t *g.Tensor) { e.Downsample.Weight = t })
+
+	// Every encoder_transformer.* and downsample.* key must have been
+	// consumed (encoder.* was validated by loadSEANetFrom).
+	var unexpected []string
+	for _, name := range sf.Names {
+		if (strings.HasPrefix(name, "encoder_transformer.") || strings.HasPrefix(name, "downsample.")) && !consumed[name] {
+			unexpected = append(unexpected, name)
+		}
+	}
+	sort.Strings(unexpected)
+	for _, name := range unexpected {
+		problems = append(problems, "unexpected: "+name)
+	}
+
+	if len(problems) > 0 {
+		return nil, fmt.Errorf("mimi: encoder checkpoint mismatch (%d problems):\n  %s",
+			len(problems), strings.Join(problems, "\n  "))
+	}
+	return e, nil
+}
+
+// loadTransformerLayers loads the 12-key parameter set of each Mimi
+// transformer layer under prefix ("encoder_transformer." or
+// "decoder_transformer." — the checkpoint layer structure is
+// bit-for-bit identical between the two, plan 0007 §0.2.3) via the
+// caller's take closure, which handles missing-key/shape collection
+// and consumed-key bookkeeping.
+func loadTransformerLayers(take func(key string, want []int, assign func(*g.Tensor)), prefix string, layers []*Layer, cfg Config) {
+	dim, inter := cfg.HiddenSize, cfg.Intermediate
+	for i, l := range layers {
 		l := l
-		p := fmt.Sprintf("encoder_transformer.layers.%d.", i)
+		p := fmt.Sprintf("%slayers.%d.", prefix, i)
 		for _, proj := range []struct {
 			key  string
 			dst  *nn.Linear
@@ -171,14 +205,88 @@ func loadEncoderFrom(sf *model.SafetensorsFile) (*Encoder, error) {
 		take(p+"self_attn_layer_scale.scale", []int{dim}, func(t *g.Tensor) { l.AttnScale = t })
 		take(p+"mlp_layer_scale.scale", []int{dim}, func(t *g.Tensor) { l.MlpScale = t })
 	}
+}
 
-	take("downsample.conv.weight", []int{dim, dim, 4}, func(t *g.Tensor) { e.Downsample.Weight = t })
+// LoadDecoder loads the full Mimi decoder (upsample + transformer +
+// SEANet decoder) from a kyutai/mimi model.safetensors checkpoint,
+// with the same fail-loudly key/shape validation as Load: every
+// decoder.*, decoder_transformer.* and upsample.* key must be consumed
+// with its expected shape.
+func LoadDecoder(path string) (*Decoder, error) {
+	sf, err := model.LoadSafetensors(path)
+	if err != nil {
+		return nil, err
+	}
+	return loadDecoderFrom(sf)
+}
 
-	// Every encoder_transformer.* and downsample.* key must have been
-	// consumed (encoder.* was validated by loadSEANetFrom).
+func loadDecoderFrom(sf *model.SafetensorsFile) (*Decoder, error) {
+	d := NewDecoder(DefaultConfig())
+
+	consumed := map[string]bool{}
+	var problems []string
+
+	take := func(key string, want []int, assign func(*g.Tensor)) {
+		t, ok := sf.Tensors[key]
+		if !ok {
+			problems = append(problems, "missing: "+key)
+			return
+		}
+		consumed[key] = true
+		if !shapeEq(t.Shape(), want) {
+			problems = append(problems, fmt.Sprintf("shape: %s is %v, want %v", key, t.Shape(), want))
+			return
+		}
+		assign(t)
+	}
+
+	// takeConv loads a plain conv's weight and bias by checkpoint
+	// prefix, with the weight-norm g/v fallback (plain convs only —
+	// transposed weight-norm fusion is out of scope and would fail
+	// loudly as missing + unexpected keys, plan 0007 §3.2).
+	takeConv := func(prefix string, conv *nn.CausalConv1d) {
+		w, keys, ok := convWeight(sf.Tensors, prefix)
+		if !ok {
+			problems = append(problems, fmt.Sprintf("missing: %s.weight (no weight-norm g/v fallback keys either)", prefix))
+		} else {
+			for _, k := range keys {
+				consumed[k] = true
+			}
+			if !shapeEq(w.Shape(), conv.Weight.Shape()) {
+				problems = append(problems, fmt.Sprintf("shape: %s.weight is %v, want %v", prefix, w.Shape(), conv.Weight.Shape()))
+			} else {
+				conv.Weight = w
+			}
+		}
+		take(prefix+".bias", conv.Bias.Shape(), func(t *g.Tensor) { conv.Bias = t })
+	}
+
+	// Depthwise 12.5→25 Hz upsample: (inC, outC/groups, k) ConvTranspose
+	// layout, no bias key exists (verified, plan 0007 §0.2.1).
+	take("upsample.conv.weight", []int{d.Cfg.HiddenSize, 1, 4}, func(t *g.Tensor) { d.Upsample.Weight = t })
+
+	loadTransformerLayers(take, "decoder_transformer.", d.Layers[:], d.Cfg)
+
+	takeConv("decoder.layers.0.conv", d.SEANet.Init)
+	for s := range d.SEANet.Ups {
+		up := d.SEANet.Ups[s]
+		p := fmt.Sprintf("decoder.layers.%d.conv", 2+3*s)
+		// ConvTranspose weight is (inC, outC, k) — the four non-square
+		// SEANet transposes make this shape check catch a transposed
+		// layout immediately (plan 0007 §8 risk 1).
+		take(p+".weight", up.Weight.Shape(), func(t *g.Tensor) { up.Weight = t })
+		take(p+".bias", up.Bias.Shape(), func(t *g.Tensor) { up.Bias = t })
+		blk := fmt.Sprintf("decoder.layers.%d.block.", 3+3*s)
+		takeConv(blk+"1.conv", d.SEANet.Res[s][0])
+		takeConv(blk+"3.conv", d.SEANet.Res[s][1])
+	}
+	takeConv("decoder.layers.14.conv", d.SEANet.Final)
+
+	// Every decoder-side key must have been consumed.
 	var unexpected []string
 	for _, name := range sf.Names {
-		if (strings.HasPrefix(name, "encoder_transformer.") || strings.HasPrefix(name, "downsample.")) && !consumed[name] {
+		if (strings.HasPrefix(name, "decoder.") || strings.HasPrefix(name, "decoder_transformer.") ||
+			strings.HasPrefix(name, "upsample.")) && !consumed[name] {
 			unexpected = append(unexpected, name)
 		}
 	}
@@ -188,10 +296,65 @@ func loadEncoderFrom(sf *model.SafetensorsFile) (*Encoder, error) {
 	}
 
 	if len(problems) > 0 {
-		return nil, fmt.Errorf("mimi: encoder checkpoint mismatch (%d problems):\n  %s",
+		return nil, fmt.Errorf("mimi: decoder checkpoint mismatch (%d problems):\n  %s",
 			len(problems), strings.Join(problems, "\n  "))
 	}
-	return e, nil
+	return d, nil
+}
+
+// mimiKeyFamilies are the checkpoint key prefixes claimed by the three
+// sub-loaders: encoder.*, encoder_transformer.*, downsample.* by Load;
+// quantizer.* by LoadQuantizer; decoder.*, decoder_transformer.*,
+// upsample.* by LoadDecoder.
+var mimiKeyFamilies = []string{
+	"encoder.", "encoder_transformer.", "downsample.",
+	"quantizer.",
+	"decoder.", "decoder_transformer.", "upsample.",
+}
+
+// LoadFull loads the encoder, quantizer and decoder from a single
+// checkpoint parse (the safetensors read dominates load time). It also
+// asserts the consumed-key union covers the whole checkpoint (all 350
+// tensors of kyutai/mimi): each sub-loader fail-loudly consumes every
+// key inside its prefix families, and LoadFull rejects any key outside
+// all families — so success proves every checkpoint tensor was
+// consumed by exactly one loader (plan 0007 §3.2, risk 7).
+func LoadFull(path string) (*Encoder, *Quantizer, *Decoder, error) {
+	sf, err := model.LoadSafetensors(path)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	var stray []string
+	for _, name := range sf.Names {
+		claimed := false
+		for _, fam := range mimiKeyFamilies {
+			if strings.HasPrefix(name, fam) {
+				claimed = true
+				break
+			}
+		}
+		if !claimed {
+			stray = append(stray, name)
+		}
+	}
+	if len(stray) > 0 {
+		sort.Strings(stray)
+		return nil, nil, nil, fmt.Errorf("mimi: checkpoint has %d keys outside every loader's families:\n  %s",
+			len(stray), strings.Join(stray, "\n  "))
+	}
+	e, err := loadEncoderFrom(sf)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	q, err := loadQuantizerFrom(sf)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	d, err := loadDecoderFrom(sf)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return e, q, d, nil
 }
 
 // convWeight fetches a conv weight by prefix. Primary path: the plain
