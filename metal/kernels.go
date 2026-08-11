@@ -192,4 +192,134 @@ kernel void rmsnorm_dx(device const float* x        [[buffer(0)]],
         dx[group * N + j] = inv * (weight[j] * grad[group * N + j] - nrm * sumDot);
     }
 }
+
+// softmax_causal_forward / softmax_backward
+//
+// Plan 0009 K1 — fused causal softmax for the attention chain. One
+// threadgroup of 256 per row of the (heads·qSeq, kSeq) score view.
+// Forward fuses the 1/√d scale, the causal compare-mask (column j
+// allowed iff j <= (row % qSeq) + (cols − qSeq) — no mask tensor, no
+// −1e9 fill tensor), the row max, exp, sum, and normalize; masked
+// columns are written as exact 0. Backward is the standard softmax
+// backward dx = y ⊙ (g − Σ(g⊙y)) times the fused scale factor.
+// CPU reference: causalSoftmaxForwardCPU / softmaxBackwardCPU in
+// softmax_metal.go; golden test softmax_metal_test.go.
+//
+// Drafted via the plan §4.2 Azure gpt-5.3-codex protocol (see commit
+// message for iteration record).
+kernel void softmax_causal_forward(device const float* x      [[buffer(0)]],
+                                   device const uint*  dims   [[buffer(1)]],
+                                   device const float* scale  [[buffer(2)]],
+                                   device float*       y      [[buffer(3)]],
+                                   uint tid    [[thread_index_in_threadgroup]],
+                                   uint group  [[threadgroup_position_in_grid]],
+                                   uint tgSize [[threads_per_threadgroup]])
+{
+    const uint rows = dims[0];
+    const uint cols = dims[1];
+    const uint qSeq = dims[2];
+    if (group >= rows) return;
+
+    threadgroup float scratch[256];
+
+    const uint r = group;
+    const uint base = r * cols;
+    const uint offset = cols - qSeq;
+    const uint i = r % qSeq;
+    const uint limit = i + offset;
+    const float s = scale[0];
+
+    float localMax = -INFINITY;
+    for (uint j = tid; j < cols; j += tgSize) {
+        if (j <= limit) {
+            float v = x[base + j] * s;
+            localMax = max(localMax, v);
+        }
+    }
+
+    scratch[tid] = localMax;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (uint stride = tgSize >> 1; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            scratch[tid] = max(scratch[tid], scratch[tid + stride]);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    const float rowMax = scratch[0];
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    float localSum = 0.0f;
+    for (uint j = tid; j < cols; j += tgSize) {
+        if (j <= limit) {
+            float e = exp((x[base + j] * s) - rowMax);
+            y[base + j] = e;
+            localSum += e;
+        } else {
+            y[base + j] = 0.0f;
+        }
+    }
+
+    scratch[tid] = localSum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (uint stride = tgSize >> 1; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            scratch[tid] += scratch[tid + stride];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    const float invSum = 1.0f / scratch[0];
+    for (uint j = tid; j < cols; j += tgSize) {
+        if (j <= limit) {
+            y[base + j] *= invSum;
+        } else {
+            y[base + j] = 0.0f;
+        }
+    }
+}
+
+kernel void softmax_backward(device const float* y      [[buffer(0)]],
+                             device const float* grad   [[buffer(1)]],
+                             device const uint*  dims   [[buffer(2)]],
+                             device const float* scale  [[buffer(3)]],
+                             device float*       dx     [[buffer(4)]],
+                             uint tid    [[thread_index_in_threadgroup]],
+                             uint group  [[threadgroup_position_in_grid]],
+                             uint tgSize [[threads_per_threadgroup]])
+{
+    const uint rows = dims[0];
+    const uint cols = dims[1];
+    if (group >= rows) return;
+
+    threadgroup float scratch[256];
+
+    const uint r = group;
+    const uint base = r * cols;
+    const float s = scale[0];
+
+    float localDot = 0.0f;
+    for (uint j = tid; j < cols; j += tgSize) {
+        localDot += grad[base + j] * y[base + j];
+    }
+
+    scratch[tid] = localDot;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (uint stride = tgSize >> 1; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            scratch[tid] += scratch[tid + stride];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    const float dot = scratch[0];
+    for (uint j = tid; j < cols; j += tgSize) {
+        float yv = y[base + j];
+        float gv = grad[base + j];
+        dx[base + j] = s * yv * (gv - dot);
+    }
+}
 `

@@ -20,10 +20,10 @@
         "kv_heads": 8,
         "layers": 28,
         "mimi_vocab": 16384,
-        "note": "head_dim 128 != hidden/q_heads (64); q/k/v/o projection dims follow the head config per Qwen3-0.6B config.json: q 1024-\u003e2048, k/v 1024-\u003e1024, o 2048-\u003e1024",
+        "note": "head_dim 128 != hidden/q_heads (64); q/k/v/o projection dims follow the head config per Qwen3-0.6B config.json: q 1024->2048, k/v 1024->1024, o 2048->1024",
         "q_dim": 2048,
         "q_heads": 16,
-        "rms_norm_eps": 0.000001,
+        "rms_norm_eps": 1e-06,
         "rope_theta": 1000000,
         "vocab": 168320
       },
@@ -229,7 +229,7 @@
         {
           "op": "matmul_ffn_proj",
           "seq": 1024,
-          "shape": "gate/up (1024,1024)-\u003e3072, down (1024,3072)-\u003e1024",
+          "shape": "gate/up (1024,1024)->3072, down (1024,3072)->1024",
           "fwd_ms": 18.57375,
           "bwd_ms": 43.845833,
           "count_per_step": 28,
@@ -279,7 +279,7 @@
         {
           "op": "matmul_attn_proj",
           "seq": 1024,
-          "shape": "q/k/v (1024,1024)-\u003e2048/1024/1024, o (1024,2048)-\u003e1024",
+          "shape": "q/k/v (1024,1024)->2048/1024/1024, o (1024,2048)->1024",
           "fwd_ms": 13.312125,
           "bwd_ms": 30.324375,
           "count_per_step": 28,
@@ -369,7 +369,7 @@
         {
           "op": "matmul_ffn_proj",
           "seq": 1500,
-          "shape": "gate/up (1500,1024)-\u003e3072, down (1500,3072)-\u003e1024",
+          "shape": "gate/up (1500,1024)->3072, down (1500,3072)->1024",
           "fwd_ms": 24.525417,
           "bwd_ms": 62.664667,
           "count_per_step": 28,
@@ -409,7 +409,7 @@
         {
           "op": "matmul_attn_proj",
           "seq": 1500,
-          "shape": "q/k/v (1500,1024)-\u003e2048/1024/1024, o (1500,2048)-\u003e1024",
+          "shape": "q/k/v (1500,1024)->2048/1024/1024, o (1500,2048)->1024",
           "fwd_ms": 18.257375,
           "bwd_ms": 45.268875,
           "count_per_step": 28,
@@ -512,7 +512,7 @@
         "Showing top 10 nodes out of 67",
         "flat  flat%   sum%        cum   cum%",
         "360ms 25.00% 25.00%      360ms 25.00%  runtime.cgocall",
-        "210ms 14.58% 39.58%      210ms 14.58%  \u003cunknown\u003e",
+        "210ms 14.58% 39.58%      210ms 14.58%  <unknown>",
         "140ms  9.72% 49.31%      270ms 18.75%  github.com/vinq1911/gorch.Softmax",
         "140ms  9.72% 59.03%      140ms  9.72%  math.archExp",
         "130ms  9.03% 68.06%      130ms  9.03%  github.com/vinq1911/gorch/optim.(*AdamW).Step",
@@ -531,10 +531,301 @@
       ],
       "notes": [
         "single-sequence step (no batching), matching model/finetune.go's one-sequence-at-a-time loop",
-        "block includes Qwen3 q_norm/k_norm; nn.Linear biases included (Qwen3 has none) — see harness file comment for divergences",
+        "block includes Qwen3 q_norm/k_norm; nn.Linear biases included (Qwen3 has none) \u2014 see harness file comment for divergences",
         "per-op rows are isolated fwd+bwd micro-benches at exact workload shapes; bwd segment includes the Sum-loss seed (representative of the upstream grad tensor in the real chain)",
-        "full_step_estimate = 28*block_total + embedding + lm_head + cross_entropy + adamw_172m_table (per plan §2.1)",
+        "full_step_estimate = 28*block_total + embedding + lm_head + cross_entropy + adamw_172m_table (per plan \u00a72.1)",
         "share_pct is relative to the sum of per_op per_step_ms at that seq"
+      ]
+    },
+    {
+      "phase": "X1K1",
+      "date": "2026-08-11",
+      "machine": "Apple M4",
+      "memory_gb": 24,
+      "go_version": "go1.26.0",
+      "load_avg_at_start": "{ 14.17 13.85 14.30 }",
+      "metal_initialized": true,
+      "geometry": {
+        "base_vocab": 151936,
+        "ffn_inter": 3072,
+        "head_dim": 128,
+        "hidden": 1024,
+        "kv_dim": 1024,
+        "kv_heads": 8,
+        "layers": 28,
+        "mimi_vocab": 16384,
+        "q_dim": 2048,
+        "q_heads": 16,
+        "rms_norm_eps": 1e-06,
+        "rope_theta": 1000000,
+        "vocab": 168320
+      },
+      "block_step_results": [
+        {
+          "seq": 512,
+          "warmups": 2,
+          "runs": 5,
+          "fwd_ms": 60.106375,
+          "bwd_ms": 71.313708,
+          "opt_ms": 44.32275,
+          "total_ms": 177.221083,
+          "total_min_ms": 169.868125,
+          "total_max_ms": 192.519708,
+          "alloc_per_step_mb": 6.43448,
+          "live_graph_after_fwd_mb": 117.504088,
+          "note": "weights+activations Metal-resident, K1 fused causal softmax; live graph includes Metal buffer bytes; alloc/step is Go heap only"
+        },
+        {
+          "seq": 1024,
+          "warmups": 2,
+          "runs": 5,
+          "fwd_ms": 157.391917,
+          "bwd_ms": 229.963791,
+          "opt_ms": 47.598209,
+          "total_ms": 435.215625,
+          "total_min_ms": 312.063542,
+          "total_max_ms": 594.477833,
+          "alloc_per_step_mb": 12.725936,
+          "live_graph_after_fwd_mb": 302.106728,
+          "note": "weights+activations Metal-resident, K1 fused causal softmax; live graph includes Metal buffer bytes; alloc/step is Go heap only"
+        },
+        {
+          "seq": 1500,
+          "warmups": 2,
+          "runs": 5,
+          "fwd_ms": 288.043834,
+          "bwd_ms": 287.012209,
+          "opt_ms": 58.676959,
+          "total_ms": 633.468708,
+          "total_min_ms": 518.354667,
+          "total_max_ms": 795.4325,
+          "alloc_per_step_mb": 18.575024,
+          "live_graph_after_fwd_mb": 533.926344,
+          "note": "weights+activations Metal-resident, K1 fused causal softmax; live graph includes Metal buffer bytes; alloc/step is Go heap only"
+        }
+      ],
+      "baseline_canary_results": [
+        {
+          "seq": 512,
+          "warmups": 2,
+          "runs": 5,
+          "fwd_ms": 72.110166,
+          "bwd_ms": 71.253042,
+          "opt_ms": 42.053,
+          "total_ms": 185.947708,
+          "total_min_ms": 183.511958,
+          "total_max_ms": 194.583958,
+          "alloc_per_step_mb": 401.004424,
+          "live_graph_after_fwd_mb": 172.030528,
+          "note": "CPU f32 canary (X0 op chain re-run under this session's load)"
+        },
+        {
+          "seq": 1024,
+          "warmups": 2,
+          "runs": 5,
+          "fwd_ms": 207.999834,
+          "bwd_ms": 177.341667,
+          "opt_ms": 41.8555,
+          "total_ms": 428.681333,
+          "total_min_ms": 419.285834,
+          "total_max_ms": 479.329167,
+          "alloc_per_step_mb": 1083.418504,
+          "live_graph_after_fwd_mb": 520.210992,
+          "note": "CPU f32 canary (X0 op chain re-run under this session's load)"
+        },
+        {
+          "seq": 1500,
+          "warmups": 2,
+          "runs": 5,
+          "fwd_ms": 380.813792,
+          "bwd_ms": 304.972917,
+          "opt_ms": 43.306416,
+          "total_ms": 729.093125,
+          "total_min_ms": 707.554875,
+          "total_max_ms": 1007.601459,
+          "alloc_per_step_mb": 2026.91164,
+          "live_graph_after_fwd_mb": 1001.970208,
+          "note": "CPU f32 canary (X0 op chain re-run under this session's load)"
+        }
+      ],
+      "tail_results": [
+        {
+          "name": "embedding_fwd_bwd",
+          "seq": 512,
+          "shape": "(512 ids) into (168320,1024)",
+          "fwd_ms": 0.425125,
+          "bwd_ms": 10.018792,
+          "total_ms": 10.443916999999999,
+          "note": "backward allocates + scatters a dense (vocab, hidden) f32 grad (~690 MB)"
+        },
+        {
+          "name": "lm_head_matmul_fwd_bwd",
+          "seq": 512,
+          "shape": "(512,1024)@(1024,168320)",
+          "fwd_ms": 139.883709,
+          "bwd_ms": 480.392084,
+          "total_ms": 620.275793,
+          "note": "x and W Metal-resident: fwd + both grads on MPS (Sum seed grad Metal-resident via fullLike)"
+        },
+        {
+          "name": "cross_entropy_fwd_bwd",
+          "seq": 512,
+          "shape": "(512,168320)",
+          "fwd_ms": 560.168125,
+          "bwd_ms": 623.091583,
+          "total_ms": 1183.259708,
+          "note": "backward recomputes Softmax over the full logits (loss.go)"
+        },
+        {
+          "name": "embedding_fwd_bwd",
+          "seq": 1024,
+          "shape": "(1024 ids) into (168320,1024)",
+          "fwd_ms": 0.960208,
+          "bwd_ms": 10.331,
+          "total_ms": 11.291208,
+          "note": "backward allocates + scatters a dense (vocab, hidden) f32 grad (~690 MB)"
+        },
+        {
+          "name": "lm_head_matmul_fwd_bwd",
+          "seq": 1024,
+          "shape": "(1024,1024)@(1024,168320)",
+          "fwd_ms": 368.138416,
+          "bwd_ms": 759.714042,
+          "total_ms": 1127.8524579999998,
+          "note": "x and W Metal-resident: fwd + both grads on MPS (Sum seed grad Metal-resident via fullLike)"
+        },
+        {
+          "name": "cross_entropy_fwd_bwd",
+          "seq": 1024,
+          "shape": "(1024,168320)",
+          "fwd_ms": 1300.026125,
+          "bwd_ms": 1264.09925,
+          "total_ms": 2564.125375,
+          "note": "backward recomputes Softmax over the full logits (loss.go)"
+        },
+        {
+          "name": "embedding_fwd_bwd",
+          "seq": 1500,
+          "shape": "(1500 ids) into (168320,1024)",
+          "fwd_ms": 0.839792,
+          "bwd_ms": 11.506292,
+          "total_ms": 12.346084,
+          "note": "backward allocates + scatters a dense (vocab, hidden) f32 grad (~690 MB)"
+        },
+        {
+          "name": "lm_head_matmul_fwd_bwd",
+          "seq": 1500,
+          "shape": "(1500,1024)@(1024,168320)",
+          "fwd_ms": 705.557792,
+          "bwd_ms": 1530.335084,
+          "total_ms": 2235.892876,
+          "note": "x and W Metal-resident: fwd + both grads on MPS (Sum seed grad Metal-resident via fullLike)"
+        },
+        {
+          "name": "cross_entropy_fwd_bwd",
+          "seq": 1500,
+          "shape": "(1500,168320)",
+          "fwd_ms": 1933.336209,
+          "bwd_ms": 2097.314,
+          "total_ms": 4030.650209,
+          "note": "backward recomputes Softmax over the full logits (loss.go)"
+        },
+        {
+          "name": "adamw_172m_table",
+          "seq": 0,
+          "shape": "(168320,1024) = 172M params",
+          "fwd_ms": 0,
+          "bwd_ms": 0,
+          "total_ms": 2019.655083,
+          "note": "scalar Go loop with math.Sqrt per element (optim/adamw.go)"
+        }
+      ],
+      "full_step_estimate": [
+        {
+          "seq": 512,
+          "block_ms": 177.221083,
+          "blocks_28_ms": 4962.190324,
+          "embedding_ms": 10.443916999999999,
+          "lm_head_ms": 620.275793,
+          "loss_ms": 1183.259708,
+          "optimizer_table_ms": 2019.655083,
+          "total_ms": 8795.824825,
+          "total_s": 8.795824825
+        },
+        {
+          "seq": 1024,
+          "block_ms": 435.215625,
+          "blocks_28_ms": 12186.0375,
+          "embedding_ms": 11.291208,
+          "lm_head_ms": 1127.8524579999998,
+          "loss_ms": 2564.125375,
+          "optimizer_table_ms": 2019.655083,
+          "total_ms": 17908.961624,
+          "total_s": 17.908961624
+        },
+        {
+          "seq": 1500,
+          "block_ms": 633.468708,
+          "blocks_28_ms": 17737.123824,
+          "embedding_ms": 12.346084,
+          "lm_head_ms": 2235.892876,
+          "loss_ms": 4030.650209,
+          "optimizer_table_ms": 2019.655083,
+          "total_ms": 26035.668075999998,
+          "total_s": 26.035668075999997
+        }
+      ],
+      "per_op_results": null,
+      "memory_results": [
+        {
+          "seq": 512,
+          "live_graph_after_fwd_gb_one_block": 0.1147500859375,
+          "extrapolated_28_layer_graph_gb": 5.66568311025,
+          "weights_f32_gb": 2.452680704,
+          "fits_24_gb": true,
+          "note": "as X0 but live graph includes Metal buffer bytes; K1 fusion eliminates the scale/mask/masked seq^2 intermediates (5 -> 2 live seq^2 tensors per layer)"
+        },
+        {
+          "seq": 1024,
+          "live_graph_after_fwd_gb_one_block": 0.2950261015625,
+          "extrapolated_28_layer_graph_gb": 10.713411547749999,
+          "weights_f32_gb": 2.452680704,
+          "fits_24_gb": true,
+          "note": "as X0 but live graph includes Metal buffer bytes; K1 fusion eliminates the scale/mask/masked seq^2 intermediates (5 -> 2 live seq^2 tensors per layer)"
+        },
+        {
+          "seq": 1500,
+          "live_graph_after_fwd_gb_one_block": 0.5214124453125,
+          "extrapolated_28_layer_graph_gb": 17.05222917275,
+          "weights_f32_gb": 2.452680704,
+          "fits_24_gb": true,
+          "note": "as X0 but live graph includes Metal buffer bytes; K1 fusion eliminates the scale/mask/masked seq^2 intermediates (5 -> 2 live seq^2 tensors per layer)"
+        }
+      ],
+      "dispatch_counts": {
+        "block_fwd_bwd_seq1024_mps_batched_matmul": 6,
+        "block_fwd_bwd_seq1024_mps_matmul": 21,
+        "block_fwd_bwd_seq1024_softmax_kernel": 2
+      },
+      "pprof_top10": null,
+      "measured_ranking_seq1500": null,
+      "notes": [
+        "X1K1: weights+activations Metal-resident (residency propagation), batched matmul backward on MPS, Sum-loss grad seeded Metal-resident, K1 fused causal softmax kernels (softmax_causal_forward/softmax_backward)",
+        "baseline_canary_results = same-session CPU re-run of the exact X0 op chain per plan \u00a72.1 (drift >10% would invalidate cross-session comparison)",
+        "live_graph_after_fwd includes live Metal buffer bytes (metal.LiveBufferBytes); Go HeapAlloc alone cannot see MTLBuffer memory",
+        "tails: lm_head measured Metal-resident; cross-entropy and embedding remain CPU (K2/K3 out of scope for this phase)",
+        "canary seq=512: 186ms vs X0 201ms (drift -7.6%)",
+        "canary seq=1024: 429ms vs X0 463ms (drift -7.3%)",
+        "canary seq=1500: 729ms vs X0 1163ms (drift -37.3%)",
+        "WARNING: canary drift at seq 1500 exceeds 10% \u2014 machine load differs from X0 session; treat cross-session speedups with care",
+        "block-step speedup vs X0 at seq 512: 1.14x (201ms -> 177ms)",
+        "block-step speedup vs X0 at seq 1024: 1.06x (463ms -> 435ms)",
+        "block-step speedup vs X0 at seq 1500: 1.84x (1163ms -> 633ms)",
+        "same-session speedup vs CPU canary (load-matched): seq 512 1.05x (186->177ms), seq 1024 0.99x (429->435ms), seq 1500 1.15x (729->633ms)",
+        "GATE VERDICT (revised X1K1 gate): block-step >=2.0x at seq 1024 NOT MET (1.06x vs X0 row, 0.99x vs same-session canary); dispatch-counter component MET (21 MPS matmul + 6 MPS batched + 2 softmax-kernel dispatches per block fwd+bwd, exactly the predicted counts); parity component MET (batched-backward + fused-softmax golden tests at 1e-3 abs); memory component MET (seq-1500 live graph 534 MB/block vs X0 1002 MB -> 28-layer extrapolation 17.05 GB incl f32 weights, fits 24 GB)",
+        "diagnosis (pprof of 5 Metal block steps at seq 1024, e2e/x1k1_profile_test.go): wall 302ms/step of which only ~160ms is CPU samples -- AdamW scalar loop 26%, Permute copies 25%, SwiGLU Go loop 14%, Linear bias/db loops ~10%, RoPE 4% -- and ~46% of wall is blocked in per-op waitUntilCompleted GPU sync (risk R6). The K1+matmul work moved its targets to GPU; the block step is now bounded by the not-yet-kerneled CPU ops (K4 SwiGLU, K6 RoPE-residency/permutes, K7 vDSP AdamW) and dispatch synchronization (command-buffer batching follow-up)",
+        "threshold audit (X1 item 4): every workload matmul fwd+bwd clears the 512M-FMA default at seq 512/1024/1500; thinnest margin 1.05x (k/v projections and attention batched at seq 512, 537M FMA); no per-callsite override needed -- confirmed empirically by the dispatch counters",
+        "session validity: 1-min load 14.2 at bench start (external training agent running); X0 was recorded at load 6.8. Canary drift -7.6%/-7.3%/-37.3% -- the seq-1500 X0 row was itself load-inflated (its min/max spread was 884-1379ms). Same-session canary numbers are the honest comparison basis; re-bench after cooldown recommended before quoting cross-session speedups"
       ]
     }
   ]

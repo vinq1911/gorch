@@ -57,7 +57,7 @@ func (rn *RMSNorm) Forward(x *g.Tensor) *g.Tensor {
 	// since the backward closure isn't built.
 	needsBackward := g.GradEnabled() && (x.RequiresGrad() || rn.Weight.RequiresGrad())
 
-	out := g.Zeros(M, N)
+	out := g.ZerosLike(x, M, N)
 	outData := out.Data()
 
 	var invRMS []float32 // per-row 1/sqrt(mean(x²) + eps), kept for backward
@@ -84,7 +84,7 @@ func (rn *RMSNorm) Forward(x *g.Tensor) *g.Tensor {
 		out.SetRequiresGrad(true)
 		out.SetGradFn("RMSNorm", []*g.Tensor{x, rn.Weight}, func(grad *g.Tensor) []*g.Tensor {
 			gData := grad.Data()
-			dx := g.Zeros(M, N)
+			dx := g.ZerosLike(x, M, N)
 			dw := g.Zeros(N)
 			dxData := dx.Data()
 			dwData := dw.Data()

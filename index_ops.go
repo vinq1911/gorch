@@ -264,7 +264,7 @@ func RepeatInterleave(src *Tensor, n int) *Tensor {
 		inner *= srcShape[i]
 	}
 
-	out := Zeros(dstShape...)
+	out := ZerosLike(src, dstShape...)
 	for o := 0; o < outer; o++ {
 		for k := 0; k < K; k++ {
 			srcOff := (o*K + k) * inner
@@ -281,7 +281,7 @@ func RepeatInterleave(src *Tensor, n int) *Tensor {
 			name:   "RepeatInterleave",
 			inputs: []*Tensor{src},
 			backward: func(grad *Tensor) []*Tensor {
-				dx := Zeros(srcShape...)
+				dx := zerosLikeEither(srcShape, grad, src)
 				for o := 0; o < outer; o++ {
 					for k := 0; k < K; k++ {
 						srcOff := (o*K + k) * inner

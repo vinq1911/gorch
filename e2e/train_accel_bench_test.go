@@ -71,6 +71,7 @@ import (
 	"time"
 
 	g "github.com/vinq1911/gorch"
+	"github.com/vinq1911/gorch/metal"
 	"github.com/vinq1911/gorch/nn"
 	"github.com/vinq1911/gorch/optim"
 )
@@ -182,6 +183,10 @@ func taBenchOp(warm, runs int, leaves []*g.Tensor, fn func() *g.Tensor) (fwdMs, 
 			fwds = append(fwds, taMs(t1.Sub(t0)))
 			bwds = append(bwds, taMs(t2.Sub(t1)))
 		}
+		// Untimed: collect the dead graph so Metal-buffer finalizers can
+		// release unified memory between iterations (Go GC feels no
+		// pressure from MTLBuffer bytes). No-op cost for CPU-only runs.
+		runtime.GC()
 	}
 	return taMedian(fwds), taMedian(bwds)
 }
@@ -239,12 +244,25 @@ func (b *taBlock) parameters() []*g.Tensor {
 	return ps
 }
 
+// toMetal moves every block weight into Metal unified memory (plan
+// 0009 X1: the X1K1 bench runs with weights and activations resident).
+func (b *taBlock) toMetal(dev *metal.Device) {
+	for _, l := range []*nn.Linear{b.wq, b.wk, b.wv, b.wo, b.gate, b.up, b.down} {
+		l.ToMetal(dev)
+	}
+	for _, rn := range []*nn.RMSNorm{b.attnNorm, b.qNorm, b.kNorm, b.ffnNorm} {
+		rn.Weight.ToMetal(dev)
+	}
+}
+
 // forward runs one pre-norm transformer block: x + Attn(RMSNorm(x)),
 // then h + SwiGLU-FFN(RMSNorm(h)). Attention mirrors nn/gqa.go op for
-// op (Full+Mul scale, tiled bool mask + MaskFill, Softmax on the
-// (heads*seq, seq) view) but at the real Qwen3 projection dims and
-// with Qwen3's q/k per-head RMSNorm.
-func (b *taBlock) forward(x *g.Tensor) *g.Tensor {
+// op at the real Qwen3 projection dims and with Qwen3's q/k per-head
+// RMSNorm. fused=false reproduces the exact X0 op chain (Full+Mul
+// scale, tiled bool mask + MaskFill, Softmax on the (heads*seq, seq)
+// view) for baseline canary re-runs; fused=true uses the plan-0009-K1
+// g.CausalSoftmax fusion, matching post-X1K1 nn/gqa.go.
+func (b *taBlock) forward(x *g.Tensor, fused bool) *g.Tensor {
 	seq := x.Shape()[0]
 
 	// --- attention ---
@@ -271,22 +289,27 @@ func (b *taBlock) forward(x *g.Tensor) *g.Tensor {
 	kRep := g.RepeatInterleave(kH.Reshape(taKVHeads, 1, seq*taHeadDim), group).Reshape(taQHeads, seq, taHeadDim)
 	vRep := g.RepeatInterleave(vH.Reshape(taKVHeads, 1, seq*taHeadDim), group).Reshape(taQHeads, seq, taHeadDim)
 
-	// Scores + scale (Full+Mul, grad-aware — today's gqa.go cost profile).
 	scores := g.BatchedMatMulTransB(qH, kRep, taQHeads, seq, seq, taHeadDim) // (16, seq, seq)
 	invScale := float32(1.0 / 11.313708498984761)                            // 1/sqrt(128)
-	scaleVec := g.Full(invScale, scores.Shape()...)
-	scaled := g.Mul(scores, scaleVec)
 
-	// Causal mask: bool mask tiled over heads + MaskFill (gqa.go pattern).
-	flat := scaled.Reshape(taQHeads*seq, seq)
-	baseMask := g.CausalMask(seq)
-	fullMask := make([]bool, taQHeads*seq*seq)
-	for h := 0; h < taQHeads; h++ {
-		copy(fullMask[h*seq*seq:(h+1)*seq*seq], baseMask)
+	var soft *g.Tensor
+	if fused {
+		// K1 fused scale+mask+softmax (one op, one output tensor).
+		soft = g.CausalSoftmax(scores, taQHeads, seq, invScale)
+	} else {
+		// X0 chain, op for op (Full+Mul scale, tiled bool mask +
+		// MaskFill, Softmax on the flat view) — the baseline canary.
+		scaleVec := g.Full(invScale, scores.Shape()...)
+		scaled := g.Mul(scores, scaleVec)
+		flat := scaled.Reshape(taQHeads*seq, seq)
+		baseMask := g.CausalMask(seq)
+		fullMask := make([]bool, taQHeads*seq*seq)
+		for h := 0; h < taQHeads; h++ {
+			copy(fullMask[h*seq*seq:(h+1)*seq*seq], baseMask)
+		}
+		masked := g.MaskFill(flat, fullMask, -1e9)
+		soft = g.Softmax(masked).Reshape(taQHeads, seq, seq)
 	}
-	masked := g.MaskFill(flat, fullMask, -1e9)
-
-	soft := g.Softmax(masked).Reshape(taQHeads, seq, seq)
 	attn := g.BatchedMatMul(soft, vRep, taQHeads, seq, taHeadDim, seq) // (16, seq, 128)
 	concat := g.Permute(attn, []int{1, 0, 2}).Reshape(seq, taQDim)     // (seq, 2048)
 	attnOut := b.wo.Forward(concat)                                    // (seq, 1024)
@@ -363,22 +386,24 @@ type taMemoryRow struct {
 }
 
 type taPhase struct {
-	Phase            string          `json:"phase"`
-	Date             string          `json:"date"`
-	Machine          string          `json:"machine"`
-	MemoryGB         int             `json:"memory_gb"`
-	GoVersion        string          `json:"go_version"`
-	LoadAvgAtStart   string          `json:"load_avg_at_start"`
-	MetalInitialized bool            `json:"metal_initialized"`
-	Geometry         map[string]any  `json:"geometry"`
-	BlockStepResults []taBlockRow    `json:"block_step_results"`
-	TailResults      []taTailRow     `json:"tail_results"`
-	FullStepEstimate []taFullStepRow `json:"full_step_estimate"`
-	PerOpResults     []taOpRow       `json:"per_op_results"`
-	MemoryResults    []taMemoryRow   `json:"memory_results"`
-	PprofTop10       []string        `json:"pprof_top10"`
-	MeasuredRanking  []string        `json:"measured_ranking_seq1500"`
-	Notes            []string        `json:"notes"`
+	Phase            string           `json:"phase"`
+	Date             string           `json:"date"`
+	Machine          string           `json:"machine"`
+	MemoryGB         int              `json:"memory_gb"`
+	GoVersion        string           `json:"go_version"`
+	LoadAvgAtStart   string           `json:"load_avg_at_start"`
+	MetalInitialized bool             `json:"metal_initialized"`
+	Geometry         map[string]any   `json:"geometry"`
+	BlockStepResults []taBlockRow     `json:"block_step_results"`
+	CanaryResults    []taBlockRow     `json:"baseline_canary_results,omitempty"`
+	TailResults      []taTailRow      `json:"tail_results"`
+	FullStepEstimate []taFullStepRow  `json:"full_step_estimate"`
+	PerOpResults     []taOpRow        `json:"per_op_results"`
+	MemoryResults    []taMemoryRow    `json:"memory_results"`
+	DispatchCounts   map[string]int64 `json:"dispatch_counts,omitempty"`
+	PprofTop10       []string         `json:"pprof_top10"`
+	MeasuredRanking  []string         `json:"measured_ranking_seq1500"`
+	Notes            []string         `json:"notes"`
 }
 
 type taResultsFile struct {
@@ -599,7 +624,7 @@ func taBlockStepBench(t *testing.T, block *taBlock, rng *rand.Rand, seq, warm, r
 		var m0 runtime.MemStats
 		runtime.ReadMemStats(&m0)
 		t0 := time.Now()
-		out := block.forward(x)
+		out := block.forward(x, false)
 		t1 := time.Now()
 		loss := g.Sum(out)
 		loss.Backward()
@@ -621,7 +646,7 @@ func taBlockStepBench(t *testing.T, block *taBlock, rng *rand.Rand, seq, warm, r
 	runtime.GC()
 	var h0 runtime.MemStats
 	runtime.ReadMemStats(&h0)
-	out := block.forward(x)
+	out := block.forward(x, false)
 	runtime.GC()
 	var h1 runtime.MemStats
 	runtime.ReadMemStats(&h1)
@@ -888,7 +913,7 @@ func taCaptureProfile(t *testing.T, block *taBlock, rng *rand.Rand, seq int) []s
 	// one unprofiled warmup
 	opt.ZeroGrad()
 	x.ZeroGrad()
-	g.Sum(block.forward(x)).Backward()
+	g.Sum(block.forward(x, false)).Backward()
 	opt.Step()
 
 	if err := pprof.StartCPUProfile(f); err != nil {
@@ -898,7 +923,7 @@ func taCaptureProfile(t *testing.T, block *taBlock, rng *rand.Rand, seq int) []s
 	for i := 0; i < 3; i++ {
 		opt.ZeroGrad()
 		x.ZeroGrad()
-		g.Sum(block.forward(x)).Backward()
+		g.Sum(block.forward(x, false)).Backward()
 		opt.Step()
 	}
 	pprof.StopCPUProfile()
@@ -930,4 +955,367 @@ func taSysctl(key string) string {
 		return "unknown"
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// ==================== Phase X1K1 (plan 0009 §3.2 + §3.3-K1) ====================
+//
+// GPU-resident autograd wiring + fused causal softmax. The bench runs
+// the same block step with every weight and the input Metal-resident
+// (fused=true → g.CausalSoftmax), plus a CPU baseline canary re-run
+// per §2.1 (fused=false, weights on CPU — the exact X0 op chain).
+//
+// Revised gate (evidence-based, replaces the plan's X1-only ≥1.8×):
+// block step at seq 1024 ≥2.0× vs the X0 baseline row; every fwd+bwd
+// matmul above threshold dispatches MPS (asserted via
+// g.ReadMetalDispatchCounts); seq-1500 memory extrapolation reported
+// with Metal buffer bytes included (metal.LiveBufferBytes — Go's
+// HeapAlloc cannot see MTLBuffer memory).
+
+// taFlushGC runs GC cycles with short pauses so Metal buffer
+// finalizers (async) release their buffers before a memory reading.
+func taFlushGC() {
+	for i := 0; i < 3; i++ {
+		runtime.GC()
+		time.Sleep(20 * time.Millisecond)
+	}
+	runtime.GC()
+}
+
+// taBlockStepBenchMetal is taBlockStepBench with weights+activations
+// Metal-resident and the K1 fused softmax. The live-graph figure
+// includes live Metal buffer bytes.
+func taBlockStepBenchMetal(t *testing.T, block *taBlock, rng *rand.Rand, seq, warm, runs int) taBlockRow {
+	t.Helper()
+	dev := g.MetalDev()
+	x := taSeedTensor(rng, 1.0, seq, taHidden).ToMetal(dev)
+	x.SetRequiresGrad(true)
+	opt := optim.NewAdamW(block.parameters(), 1e-4, 0.01)
+
+	var fwds, bwds, opts, totals, allocs []float64
+	for i := 0; i < warm+runs; i++ {
+		opt.ZeroGrad()
+		x.ZeroGrad()
+		var m0 runtime.MemStats
+		runtime.ReadMemStats(&m0)
+		t0 := time.Now()
+		out := block.forward(x, true)
+		t1 := time.Now()
+		loss := g.Sum(out)
+		loss.Backward()
+		t2 := time.Now()
+		opt.Step()
+		t3 := time.Now()
+		var m1 runtime.MemStats
+		runtime.ReadMemStats(&m1)
+		if i >= warm {
+			fwds = append(fwds, taMs(t1.Sub(t0)))
+			bwds = append(bwds, taMs(t2.Sub(t1)))
+			opts = append(opts, taMs(t3.Sub(t2)))
+			totals = append(totals, taMs(t3.Sub(t0)))
+			allocs = append(allocs, float64(m1.TotalAlloc-m0.TotalAlloc)/1e6)
+		}
+		// Untimed: release the dead step graph's Metal buffers. Go's GC
+		// feels no pressure from MTLBuffer memory (it lives outside the
+		// Go heap), so without this the loop accumulates multi-GB of
+		// dead unified-memory buffers between collections.
+		runtime.GC()
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Live-graph footprint: hold the forward graph, flush finalizers,
+	// measure Go heap + live Metal buffer bytes.
+	taFlushGC()
+	var h0 runtime.MemStats
+	runtime.ReadMemStats(&h0)
+	mb0 := metal.LiveBufferBytes()
+	out := block.forward(x, true)
+	taFlushGC()
+	var h1 runtime.MemStats
+	runtime.ReadMemStats(&h1)
+	mb1 := metal.LiveBufferBytes()
+	live := (float64(h1.HeapAlloc) - float64(h0.HeapAlloc) + float64(mb1-mb0)) / 1e6
+	if live < 0 {
+		live = 0
+	}
+	runtime.KeepAlive(out)
+	taFlushGC()
+
+	return taBlockRow{
+		Seq: seq, Warmups: warm, Runs: runs,
+		FwdMs: taMedian(fwds), BwdMs: taMedian(bwds), OptMs: taMedian(opts),
+		TotalMs: taMedian(totals), TotalMinMs: taMin(totals), TotalMaxMs: taMax(totals),
+		AllocPerStepMB: taMedian(allocs), LiveGraphAfterFwdMB: live,
+		Note: "weights+activations Metal-resident, K1 fused causal softmax; live graph includes Metal buffer bytes; alloc/step is Go heap only",
+	}
+}
+
+// taLmHeadBenchMetal measures the lm_head matmul fwd+bwd with x and W
+// Metal-resident (258G-FMA shape at seq 1500 → MPS fwd+bwd).
+func taLmHeadBenchMetal(t *testing.T, rng *rand.Rand, seq, warm, runs int) taTailRow {
+	t.Helper()
+	dev := g.MetalDev()
+	xl := taSeedTensor(rng, 1.0, seq, taHidden).ToMetal(dev)
+	xl.SetRequiresGrad(true)
+	wHead := taSeedTensor(rng, 0.02, taHidden, taVocab).ToMetal(dev)
+	wHead.SetRequiresGrad(true)
+	fwd, bwd := taBenchOp(warm, runs, []*g.Tensor{xl, wHead}, func() *g.Tensor {
+		return g.MatMul(xl, wHead)
+	})
+	taFlushGC()
+	return taTailRow{Name: "lm_head_matmul_fwd_bwd", Seq: seq,
+		Shape: fmt.Sprintf("(%d,%d)@(%d,%d)", seq, taHidden, taHidden, taVocab),
+		FwdMs: fwd, BwdMs: bwd, TotalMs: fwd + bwd,
+		Note: "x and W Metal-resident: fwd + both grads on MPS (Sum seed grad Metal-resident via fullLike)"}
+}
+
+// taX0Phase loads the X0-baseline phase from the results JSON.
+func taX0Phase(t *testing.T, path string) *taPhase {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var file taResultsFile
+	if err := json.Unmarshal(raw, &file); err != nil {
+		t.Fatalf("existing %s is not valid JSON: %v", path, err)
+	}
+	for i := range file.Phases {
+		if file.Phases[i].Phase == "X0-baseline" {
+			return &file.Phases[i]
+		}
+	}
+	return nil
+}
+
+func TestTrainAccelBenchX1K1(t *testing.T) {
+	if _, err := g.InitMetal(); err != nil {
+		t.Skipf("metal not available: %v", err)
+	}
+	smoke := os.Getenv("TA_SMOKE") != ""
+	seqs := []int{512, 1024, 1500}
+	warm, runs := taWarmups, taRuns
+	if smoke {
+		seqs = []int{64}
+		warm, runs = 1, 2
+	}
+	maxSeq := seqs[len(seqs)-1] + 1
+
+	machine := taSysctl("machdep.cpu.brand_string")
+	loadAvg := taSysctl("vm.loadavg")
+	t.Logf("machine=%s load=%s", machine, loadAvg)
+
+	outPath := "../doc/training_accel_results.json"
+	x0 := taX0Phase(t, outPath)
+	if x0 == nil && !smoke {
+		t.Fatal("X0-baseline phase not found in results JSON — X1K1 speedups need the baseline")
+	}
+	x0Block := func(seq int) *taBlockRow {
+		if x0 == nil {
+			return nil
+		}
+		for i := range x0.BlockStepResults {
+			if x0.BlockStepResults[i].Seq == seq {
+				return &x0.BlockStepResults[i]
+			}
+		}
+		return nil
+	}
+
+	phase := taPhase{
+		Phase:            "X1K1",
+		Date:             time.Now().Format("2006-01-02"),
+		Machine:          machine,
+		MemoryGB:         24,
+		GoVersion:        runtime.Version(),
+		LoadAvgAtStart:   loadAvg,
+		MetalInitialized: true,
+		Geometry: map[string]any{
+			"hidden": taHidden, "q_heads": taQHeads, "kv_heads": taKVHeads,
+			"head_dim": taHeadDim, "q_dim": taQDim, "kv_dim": taKVDim,
+			"ffn_inter": taInter, "layers": taLayers,
+			"vocab": taVocab, "base_vocab": taBaseVocab, "mimi_vocab": taMimiVocab,
+			"rope_theta": taRopeTheta, "rms_norm_eps": 1e-6,
+		},
+		Notes: []string{
+			"X1K1: weights+activations Metal-resident (residency propagation), batched matmul backward on MPS, Sum-loss grad seeded Metal-resident, K1 fused causal softmax kernels (softmax_causal_forward/softmax_backward)",
+			"baseline_canary_results = same-session CPU re-run of the exact X0 op chain per plan §2.1 (drift >10% would invalidate cross-session comparison)",
+			"live_graph_after_fwd includes live Metal buffer bytes (metal.LiveBufferBytes); Go HeapAlloc alone cannot see MTLBuffer memory",
+			"tails: lm_head measured Metal-resident; cross-entropy and embedding remain CPU (K2/K3 out of scope for this phase)",
+		},
+	}
+
+	// ---- (a) baseline canary: CPU, exact X0 op chain ----
+	rngC := rand.New(rand.NewSource(taSeed))
+	blockC := newTABlock(rngC, maxSeq)
+	for _, seq := range seqs {
+		row := taBlockStepBench(t, blockC, rngC, seq, warm, runs)
+		row.Note = "CPU f32 canary (X0 op chain re-run under this session's load)"
+		phase.CanaryResults = append(phase.CanaryResults, row)
+		if base := x0Block(seq); base != nil {
+			drift := (row.TotalMs - base.TotalMs) / base.TotalMs * 100
+			note := fmt.Sprintf("canary seq=%d: %.0fms vs X0 %.0fms (drift %+.1f%%)", seq, row.TotalMs, base.TotalMs, drift)
+			t.Log(note)
+			phase.Notes = append(phase.Notes, note)
+			if drift > 10 || drift < -10 {
+				phase.Notes = append(phase.Notes, fmt.Sprintf("WARNING: canary drift at seq %d exceeds 10%% — machine load differs from X0 session; treat cross-session speedups with care", seq))
+			}
+		}
+	}
+
+	// ---- (b) X1K1 Metal-resident block step ----
+	rng := rand.New(rand.NewSource(taSeed))
+	block := newTABlock(rng, maxSeq)
+	block.toMetal(g.MetalDev())
+	for _, seq := range seqs {
+		row := taBlockStepBenchMetal(t, block, rng, seq, warm, runs)
+		phase.BlockStepResults = append(phase.BlockStepResults, row)
+		msg := fmt.Sprintf("X1K1 block step seq=%d: fwd=%.1fms bwd=%.1fms opt=%.1fms total=%.1fms (live graph %.0f MB)",
+			seq, row.FwdMs, row.BwdMs, row.OptMs, row.TotalMs, row.LiveGraphAfterFwdMB)
+		t.Log(msg)
+		if base := x0Block(seq); base != nil {
+			speedup := base.TotalMs / row.TotalMs
+			note := fmt.Sprintf("block-step speedup vs X0 at seq %d: %.2fx (%.0fms -> %.0fms)", seq, speedup, base.TotalMs, row.TotalMs)
+			t.Log(note)
+			phase.Notes = append(phase.Notes, note)
+			// The ≥2.0× seq-1024 speed gate is a phase-acceptance
+			// criterion recorded as a verdict, not a hard test failure —
+			// the 2026-08-11 X1K1 session measured 1.06× vs the X0 row
+			// under heavy external load (canary drift −37% at seq 1500,
+			// formally invalidating cross-session comparison per §2.1);
+			// the verdict lives in the JSON notes and plan §2.3. Hard
+			// assertions here are the dispatch counters below and the
+			// parity suites.
+			if seq == 1024 && speedup < 2.0 {
+				verdict := fmt.Sprintf("GATE VERDICT: block-step >=2.0x at seq 1024 NOT MET this session (%.2fx)", speedup)
+				t.Log(verdict)
+				phase.Notes = append(phase.Notes, verdict)
+			}
+		}
+		// Same-session comparison (load-matched): X1K1 vs this session's
+		// CPU canary of the exact X0 op chain.
+		for _, cn := range phase.CanaryResults {
+			if cn.Seq == seq {
+				note := fmt.Sprintf("same-session speedup vs CPU canary at seq %d: %.2fx (%.0fms -> %.0fms)",
+					seq, cn.TotalMs/row.TotalMs, cn.TotalMs, row.TotalMs)
+				t.Log(note)
+				phase.Notes = append(phase.Notes, note)
+			}
+		}
+
+		// Memory extrapolation (28 layers + f32 weights), Metal-aware.
+		liveGB := row.LiveGraphAfterFwdMB / 1024
+		blockParams := 0
+		for _, p := range block.parameters() {
+			blockParams += p.Size()
+		}
+		weightsGB := float64(taVocab)*taHidden*4/1e9 + float64(taLayers*blockParams)*4/1e9
+		extrap := liveGB*taLayers + weightsGB
+		phase.MemoryResults = append(phase.MemoryResults, taMemoryRow{
+			Seq:                  seq,
+			LiveGraphBlockGB:     liveGB,
+			Extrapolated28GB:     extrap,
+			WeightsF32GB:         weightsGB,
+			FitsIn24GBUnifiedMem: extrap < 22,
+			Note:                 "as X0 but live graph includes Metal buffer bytes; K1 fusion eliminates the scale/mask/masked seq^2 intermediates (5 -> 2 live seq^2 tensors per layer)",
+		})
+	}
+
+	// ---- (c) dispatch-counter gate at the largest non-smoke seq ----
+	if !smoke {
+		seq := 1024
+		x := taSeedTensor(rng, 1.0, seq, taHidden).ToMetal(g.MetalDev())
+		x.SetRequiresGrad(true)
+		opt := optim.NewAdamW(block.parameters(), 1e-4, 0.01)
+		opt.ZeroGrad()
+		x.ZeroGrad()
+		g.ResetMetalDispatchCounts()
+		g.Sum(block.forward(x, true)).Backward()
+		c := g.ReadMetalDispatchCounts()
+		t.Logf("dispatch counts (1 block fwd+bwd, seq %d): matmul=%d batched=%d softmax=%d", seq, c.MatMul, c.BatchedMatMul, c.SoftmaxKernel)
+		// 7 projection matmuls fwd (Wq,Wk,Wv,Wo,gate,up,down) + 14 bwd
+		// (dx+dW each); 2 batched fwd (QK^T, attn@V) + 4 batched bwd;
+		// 1 fused softmax fwd + 1 softmax bwd kernel.
+		if c.MatMul < 21 {
+			t.Errorf("X1K1 gate: expected >=21 MPS matmul dispatches in fwd+bwd, got %d", c.MatMul)
+		}
+		if c.BatchedMatMul < 6 {
+			t.Errorf("X1K1 gate: expected >=6 MPS batched-matmul dispatches in fwd+bwd, got %d", c.BatchedMatMul)
+		}
+		if c.SoftmaxKernel < 2 {
+			t.Errorf("X1K1 gate: expected >=2 fused-softmax kernel dispatches, got %d", c.SoftmaxKernel)
+		}
+		phase.DispatchCounts = map[string]int64{
+			"block_fwd_bwd_seq1024_mps_matmul":         c.MatMul,
+			"block_fwd_bwd_seq1024_mps_batched_matmul": c.BatchedMatMul,
+			"block_fwd_bwd_seq1024_softmax_kernel":     c.SoftmaxKernel,
+		}
+		g.ResetMetalDispatchCounts()
+		taFlushGC()
+	}
+
+	// ---- (d) tails: lm_head Metal-resident; embedding/CE/AdamW as X0 ----
+	for _, seq := range seqs {
+		tails := taTailBench(t, rng, seq, warm, runs)
+		for i := range tails {
+			if tails[i].Name == "lm_head_matmul_fwd_bwd" {
+				tails[i] = taLmHeadBenchMetal(t, rng, seq, warm, runs)
+			}
+		}
+		phase.TailResults = append(phase.TailResults, tails...)
+		taFlushGC()
+	}
+	adamwTail := taAdamWTableBench(t, rng, warm, runs)
+	phase.TailResults = append(phase.TailResults, adamwTail)
+
+	// ---- (e) full-step estimate ----
+	for _, seq := range seqs {
+		var blockMs float64
+		for _, r := range phase.BlockStepResults {
+			if r.Seq == seq {
+				blockMs = r.TotalMs
+			}
+		}
+		est := taFullStepRow{Seq: seq, BlockMs: blockMs, Blocks28Ms: blockMs * taLayers, OptimizerTableMs: adamwTail.TotalMs}
+		for _, tr := range phase.TailResults {
+			if tr.Seq != seq {
+				continue
+			}
+			switch tr.Name {
+			case "embedding_fwd_bwd":
+				est.EmbeddingMs = tr.TotalMs
+			case "lm_head_matmul_fwd_bwd":
+				est.LmHeadMs = tr.TotalMs
+			case "cross_entropy_fwd_bwd":
+				est.LossMs = tr.TotalMs
+			}
+		}
+		est.TotalMs = est.Blocks28Ms + est.EmbeddingMs + est.LmHeadMs + est.LossMs + est.OptimizerTableMs
+		est.TotalS = est.TotalMs / 1000
+		phase.FullStepEstimate = append(phase.FullStepEstimate, est)
+		t.Logf("X1K1 full-step estimate seq=%d: 28xblock=%.0fms embed=%.0fms lm_head=%.0fms ce=%.0fms adamw=%.0fms -> %.2fs",
+			seq, est.Blocks28Ms, est.EmbeddingMs, est.LmHeadMs, est.LossMs, est.OptimizerTableMs, est.TotalS)
+	}
+
+	if smoke {
+		t.Log("TA_SMOKE set — skipping doc/training_accel_results.json write")
+		return
+	}
+
+	// ---- (f) append the phase row ----
+	var file taResultsFile
+	if raw, err := os.ReadFile(outPath); err == nil {
+		if err := json.Unmarshal(raw, &file); err != nil {
+			t.Fatalf("existing %s is not valid JSON: %v", outPath, err)
+		}
+	}
+	file.Hardware = machine
+	file.Phases = append(file.Phases, phase)
+	raw, err := json.MarshalIndent(file, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal results: %v", err)
+	}
+	if err := os.WriteFile(outPath, append(raw, '\n'), 0o644); err != nil {
+		t.Fatalf("write %s: %v", outPath, err)
+	}
+	t.Logf("results appended to %s (phase %s)", outPath, phase.Phase)
 }

@@ -14,7 +14,7 @@ func SiLU(a *Tensor) *Tensor {
 	if a.dtype == BFloat16 {
 		return downcastToBF16(SiLU(promoteToF32(a)))
 	}
-	out := Zeros(a.shape...)
+	out := ZerosLike(a, a.shape...)
 
 	// Cache sigmoid for backward — SiLU's derivative needs it.
 	// In NoGrad mode we skip the cache (no graph being built).
@@ -38,7 +38,7 @@ func SiLU(a *Tensor) *Tensor {
 			name:   "SiLU",
 			inputs: []*Tensor{a},
 			backward: func(grad *Tensor) []*Tensor {
-				dx := Zeros(a.shape...)
+				dx := zerosLikeEither(a.shape, grad, a)
 				for i, x := range a.data {
 					s := sig[i]
 					dx.data[i] = grad.data[i] * s * (1 + x*(1-s))
@@ -71,7 +71,7 @@ func SwiGLU(gate, value *Tensor) *Tensor {
 	if gate.dtype == BFloat16 {
 		return downcastToBF16(SwiGLU(promoteToF32(gate), promoteToF32(value)))
 	}
-	out := Zeros(gate.shape...)
+	out := zerosLikeEither(gate.shape, gate, value)
 
 	needsBackward := GradEnabled() && (gate.requiresGrad || value.requiresGrad)
 	var sig []float32
@@ -93,8 +93,8 @@ func SwiGLU(gate, value *Tensor) *Tensor {
 			name:   "SwiGLU",
 			inputs: []*Tensor{gate, value},
 			backward: func(grad *Tensor) []*Tensor {
-				dGate := Zeros(gate.shape...)
-				dValue := Zeros(value.shape...)
+				dGate := zerosLikeEither(gate.shape, grad, gate)
+				dValue := zerosLikeEither(value.shape, grad, value)
 				for i := range gate.data {
 					gx := gate.data[i]
 					vx := value.data[i]

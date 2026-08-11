@@ -50,7 +50,7 @@ func Permute(t *Tensor, perm []int) *Tensor {
 		srcStride[i] = srcStride[i+1] * srcShape[i+1]
 	}
 
-	out := Zeros(dstShape...)
+	out := ZerosLike(t, dstShape...)
 	dstData := out.data
 	srcData := t.data
 

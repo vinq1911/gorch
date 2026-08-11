@@ -83,7 +83,12 @@ func (l *Linear) Forward(x *g.Tensor) *g.Tensor {
 		// NewTensor — which copied the entire slice again. Single-
 		// alloc cuts ~10% off forward time at GPT-2 small dims and
 		// drops the GC churn from per-Linear allocations.
-		out = g.Zeros(batch, l.out)
+		//
+		// The output inherits x's Metal residency (plan 0009 X1):
+		// below-threshold or CPU-computed Linears in a GPU-resident
+		// chain must not strip the chain of its residency — sgemm
+		// writes through unified memory either way.
+		out = g.ZerosLike(x, batch, l.out)
 		outData := out.Data()
 		accelerate.SgemmTransB(batch, l.out, l.in, 1.0, x.Data(), l.Weight.Data(), 0.0, outData)
 		bData := l.Bias.Data()
@@ -128,21 +133,23 @@ func (l *Linear) Forward(x *g.Tensor) *g.Tensor {
 
 			gData := grad.Data()
 			// dL/dx = grad @ W  (batch, out) @ (out, in) = (batch, in)
-			var dx *g.Tensor
+			// Grads inherit the residency of the tensor they belong to
+			// so a partially-resident chain keeps its residency through
+			// the CPU backward (plan 0009 X1).
+			dx := g.ZerosLike(capturedX, capturedBatch, capturedIn)
 			if capturedX.RequiresGrad() {
-				dxData := make([]float32, capturedBatch*capturedIn)
-				accelerate.Sgemm(capturedBatch, capturedIn, capturedOut, 1.0, gData, capturedW.Data(), 0.0, dxData)
-				dx = g.NewTensor(dxData, capturedBatch, capturedIn)
-			} else {
-				dx = g.Zeros(capturedBatch, capturedIn)
+				accelerate.Sgemm(capturedBatch, capturedIn, capturedOut, 1.0, gData, capturedW.Data(), 0.0, dx.Data())
 			}
 
 			// dL/dW = grad^T @ x  (out, batch) @ (batch, in) = (out, in)
+			// Frozen-dW skip (plan 0008 M1) composed with residency
+			// inheritance (plan 0009 X1): only compute dW when the
+			// weight actually trains, and allocate it with the
+			// weight's residency when we do.
 			var dw *g.Tensor
 			if needDW {
-				dwData := make([]float32, capturedOut*capturedIn)
-				accelerate.SgemmTransA(capturedOut, capturedIn, capturedBatch, 1.0, gData, capturedX.Data(), 0.0, dwData)
-				dw = g.NewTensor(dwData, capturedOut, capturedIn)
+				dw = g.ZerosLike(capturedW, capturedOut, capturedIn)
+				accelerate.SgemmTransA(capturedOut, capturedIn, capturedBatch, 1.0, gData, capturedX.Data(), 0.0, dw.Data())
 			}
 
 			var db *g.Tensor

@@ -137,7 +137,7 @@ func (r *RoPE) Apply(x *g.Tensor, startPos int) *g.Tensor {
 	}
 	half := headDim / 2
 
-	out := g.Zeros(shape...)
+	out := g.ZerosLike(x, shape...)
 	xData := x.Data()
 	outData := out.Data()
 	cos := r.cos
@@ -184,7 +184,7 @@ func (r *RoPE) Apply(x *g.Tensor, startPos int) *g.Tensor {
 	if g.GradEnabled() && x.RequiresGrad() {
 		out.SetRequiresGrad(true)
 		out.SetGradFn("RoPE", []*g.Tensor{x}, func(grad *g.Tensor) []*g.Tensor {
-			dx := g.Zeros(shape...)
+			dx := g.ZerosLike(x, shape...)
 			gData := grad.Data()
 			dxData := dx.Data()
 			switch r.Style {
