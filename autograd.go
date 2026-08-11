@@ -2,6 +2,8 @@
 
 package gorch
 
+import "github.com/vinq1911/gorch/accelerate"
+
 // Backward computes gradients for all tensors in the computation graph
 // that require gradients, starting from this tensor (typically a scalar loss).
 //
@@ -78,9 +80,10 @@ func accumulateGrad(dst, add *Tensor) {
 		}
 		return
 	}
-	for k := range dst.data {
-		dst.data[k] += add.data[k]
-	}
+	// CPU read-modify-write of possibly-GPU-written grads — wait for
+	// pending async GPU work first (plan 0009 R6).
+	syncForCPU(dst, add)
+	accelerate.VAdd(dst.data, add.data, dst.data)
 }
 
 // noGradDepth tracks nested NoGrad scopes.

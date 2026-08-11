@@ -152,7 +152,9 @@ func RMSNormBackwardDXMetal(x, weight, grad, invRMS *Tensor) (dx, dw *Tensor) {
 	}
 
 	// dW = sum over i of grad[i,j] * x[i,j] * invRMS[i] for each j.
-	// Read from unified memory; no copy.
+	// Read from unified memory; no copy — but wait for pending async
+	// GPU work (incl. the rmsnorm_dx dispatch above) first.
+	syncForCPU(x, grad, invRMS)
 	dwData := make([]float32, N)
 	xData := x.data
 	gData := grad.data

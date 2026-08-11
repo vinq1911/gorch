@@ -51,6 +51,60 @@ var liveBufferBytes atomic.Int64
 // count — call runtime.GC() (twice, finalizers run async) to flush.
 func LiveBufferBytes() int64 { return liveBufferBytes.Load() }
 
+// ---------- async dispatch mode (plan 0009 X2, risk R6) ----------
+//
+// Default (sync) mode blocks in waitUntilCompleted after every
+// dispatch — one full GPU round trip per op, measured at ~46% of the
+// X1K1 block-step wall clock. Async mode commits without waiting;
+// SyncQueue blocks until all committed work completes (command buffers
+// on one queue run in commit order, so waiting on the last suffices).
+// Callers must SyncQueue before any CPU read of GPU-written memory —
+// gorch's op layer does this via its syncForCPU helper and
+// Tensor.Data(). Single global queue, single-threaded by design.
+
+var (
+	asyncMode    atomic.Bool
+	asyncPending atomic.Bool
+	// SyncWaits counts SyncQueue calls that actually had pending GPU
+	// work to wait for — the R6 measurement of how many host-visible
+	// sync points remain per step in async mode.
+	SyncWaits atomic.Int64
+)
+
+// SetAsync switches commit-without-wait mode on or off. Turning it off
+// synchronizes first, so pending work never outlives the mode.
+func SetAsync(on bool) {
+	if on {
+		asyncMode.Store(true)
+		C.metal_set_async(1)
+		return
+	}
+	C.metal_set_async(0) // also waits for pending work
+	asyncPending.Store(false)
+	asyncMode.Store(false)
+}
+
+// AsyncEnabled reports whether commit-without-wait mode is on.
+func AsyncEnabled() bool { return asyncMode.Load() }
+
+// SyncQueue blocks until every committed command buffer has completed.
+// Cheap no-op (one atomic load) when nothing is pending.
+func SyncQueue() {
+	if !asyncPending.Load() {
+		return
+	}
+	SyncWaits.Add(1)
+	C.metal_sync_queue()
+	asyncPending.Store(false)
+}
+
+// notePending marks that a dispatch was committed without waiting.
+func notePending() {
+	if asyncMode.Load() {
+		asyncPending.Store(true)
+	}
+}
+
 // Pipeline wraps a compiled Metal compute pipeline (one kernel function).
 type Pipeline struct{ ptr C.MTLComputePipelineRef }
 
@@ -142,6 +196,7 @@ func (q *CommandQueue) Dispatch1D(pipe *Pipeline, bufs []*Buffer, threadCount in
 	C.metal_dispatch_1d(q.ptr, pipe.ptr,
 		&cbufs[0], C.uint32_t(len(cbufs)),
 		C.uint32_t(threadCount))
+	notePending()
 	runtime.KeepAlive(bufs)
 }
 
@@ -158,6 +213,7 @@ func (q *CommandQueue) Dispatch1DThreadgroups(pipe *Pipeline, bufs []*Buffer, gr
 	C.metal_dispatch_threadgroups_1d(q.ptr, pipe.ptr,
 		&cbufs[0], C.uint32_t(len(cbufs)),
 		C.uint32_t(groupCount), C.uint32_t(groupThreads))
+	notePending()
 	runtime.KeepAlive(bufs)
 }
 
@@ -166,6 +222,7 @@ func (q *CommandQueue) Dispatch1DThreadgroups(pipe *Pipeline, bufs []*Buffer, gr
 func (q *CommandQueue) MatMul(a, b, c *Buffer, M, N, K int) {
 	C.metal_mps_matmul(q.ptr, a.ptr, b.ptr, c.ptr,
 		C.uint32_t(M), C.uint32_t(N), C.uint32_t(K))
+	notePending()
 	keepAlive3(a, b, c)
 }
 
@@ -182,6 +239,7 @@ func keepAlive3(a, b, c *Buffer) {
 func (q *CommandQueue) MatMulTransB(a, b, c *Buffer, M, N, K int) {
 	C.metal_mps_matmul_transB(q.ptr, a.ptr, b.ptr, c.ptr,
 		C.uint32_t(M), C.uint32_t(N), C.uint32_t(K))
+	notePending()
 	keepAlive3(a, b, c)
 }
 
@@ -190,6 +248,7 @@ func (q *CommandQueue) MatMulTransB(a, b, c *Buffer, M, N, K int) {
 func (q *CommandQueue) MatMulTransA(a, b, c *Buffer, M, N, K int) {
 	C.metal_mps_matmul_transA(q.ptr, a.ptr, b.ptr, c.ptr,
 		C.uint32_t(M), C.uint32_t(N), C.uint32_t(K))
+	notePending()
 	keepAlive3(a, b, c)
 }
 
@@ -199,6 +258,7 @@ func (q *CommandQueue) MatMulTransA(a, b, c *Buffer, M, N, K int) {
 func (q *CommandQueue) BatchedMatMul(a, b, c *Buffer, M, N, K, batchSize int) {
 	C.metal_mps_batched_matmul(q.ptr, a.ptr, b.ptr, c.ptr,
 		C.uint32_t(M), C.uint32_t(N), C.uint32_t(K), C.uint32_t(batchSize))
+	notePending()
 	keepAlive3(a, b, c)
 }
 
@@ -207,6 +267,7 @@ func (q *CommandQueue) BatchedMatMul(a, b, c *Buffer, M, N, K, batchSize int) {
 func (q *CommandQueue) BatchedMatMulTransB(a, b, c *Buffer, M, N, K, batchSize int) {
 	C.metal_mps_batched_matmul_transB(q.ptr, a.ptr, b.ptr, c.ptr,
 		C.uint32_t(M), C.uint32_t(N), C.uint32_t(K), C.uint32_t(batchSize))
+	notePending()
 	keepAlive3(a, b, c)
 }
 
@@ -220,6 +281,7 @@ func (q *CommandQueue) BatchedMatMulTransB(a, b, c *Buffer, M, N, K, batchSize i
 func (q *CommandQueue) BatchedMatMulTransA(a, b, c *Buffer, M, N, K, batchSize int) {
 	C.metal_mps_batched_matmul_transA(q.ptr, a.ptr, b.ptr, c.ptr,
 		C.uint32_t(M), C.uint32_t(N), C.uint32_t(K), C.uint32_t(batchSize))
+	notePending()
 	keepAlive3(a, b, c)
 }
 

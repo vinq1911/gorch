@@ -75,6 +75,33 @@ void acc_vrelu(const float* A, float* C, int64_t n) {
     vDSP_vthres(A, 1, &zero, C, 1, (vDSP_Length)n);
 }
 
+void acc_vsadd(const float* A, float scalar, float* C, int64_t n) {
+    vDSP_vsadd(A, 1, &scalar, C, 1, (vDSP_Length)n);
+}
+
+// ---------- fused optimizer step (plan 0009 K7) ----------
+
+void acc_adamw_step(float* restrict p, const float* restrict g,
+                    float* restrict m, float* restrict v, int64_t n,
+                    float lr, float beta1, float beta2, float eps,
+                    float wd, float bc1, float bc2) {
+    const float omb1 = 1.0f - beta1;
+    const float omb2 = 1.0f - beta2;
+    for (int64_t i = 0; i < n; i++) {
+        float gi = g[i];
+        float mi = beta1 * m[i] + omb1 * gi;
+        float vi = beta2 * v[i] + omb2 * gi * gi;
+        m[i] = mi;
+        v[i] = vi;
+        // Same expression structure as the Go scalar loop (divisions,
+        // not reciprocal-multiplies) so trajectories stay comparable to
+        // well under the 1e-6-over-20-steps gate.
+        float mHat = mi / bc1;
+        float vHat = vi / bc2;
+        p[i] -= lr * (mHat / (sqrtf(vHat) + eps) + wd * p[i]);
+    }
+}
+
 // ---------- vForce ----------
 
 void acc_vexp(const float* A, float* C, int n) {
@@ -146,4 +173,47 @@ void acc_vsigmoid(const float* A, float* C, int n) {
     vDSP_vsadd(C, 1, &one, C, 1, (vDSP_Length)n);
     // Step 4: C = 1 / C
     vDSP_svdiv(&one, C, 1, C, 1, (vDSP_Length)n);
+}
+
+// ---------- SiLU / SwiGLU (plan 0009 K4 CPU fallback) ----------
+//
+// All four use the same recipe: one vForce-vectorized sigmoid into the
+// output (or a designated output used as scratch), then a pure-
+// arithmetic combine loop that clang auto-vectorizes. The combine reads
+// the sigmoid value from the scratch slot before overwriting it —
+// element-wise same-index access, so no ordering hazard.
+
+void acc_vsilu(const float* restrict A, float* restrict C, int n) {
+    acc_vsigmoid(A, C, n);       // C = sigmoid(A)
+    vDSP_vmul(A, 1, C, 1, C, 1, (vDSP_Length)n); // C = A * sigmoid(A)
+}
+
+void acc_vsilu_bwd(const float* restrict X, const float* restrict G,
+                   float* restrict DX, int n) {
+    acc_vsigmoid(X, DX, n);      // DX = s
+    for (int i = 0; i < n; i++) {
+        float s = DX[i];
+        DX[i] = G[i] * s * (1.0f + X[i] * (1.0f - s));
+    }
+}
+
+void acc_vswiglu(const float* restrict gate, const float* restrict val,
+                 float* restrict C, int n) {
+    acc_vsigmoid(gate, C, n);    // C = s
+    for (int i = 0; i < n; i++) {
+        C[i] = gate[i] * C[i] * val[i];
+    }
+}
+
+void acc_vswiglu_bwd(const float* restrict gate, const float* restrict val,
+                     const float* restrict G,
+                     float* restrict dGate, float* restrict dVal, int n) {
+    acc_vsigmoid(gate, dGate, n); // dGate = s (scratch)
+    for (int i = 0; i < n; i++) {
+        float s = dGate[i];
+        float gx = gate[i];
+        float gi = G[i];
+        dVal[i]  = gi * gx * s;
+        dGate[i] = gi * val[i] * s * (1.0f + gx * (1.0f - s));
+    }
 }

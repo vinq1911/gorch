@@ -116,6 +116,7 @@ func pad1d(src []float32, C, L, padLeft, padRight int, mode PadMode, dst []float
 // uses them (only the decoder's upsample conv has upsample_groups=512),
 // and no other gorch path needs them yet.
 func Conv1dForward(input, weight, bias *Tensor, stride, dilation, padLeft, padRight int, mode PadMode) *Tensor {
+	syncForCPU(input, weight, bias)
 	if len(input.shape) != 3 {
 		panic(fmt.Sprintf("gorch: Conv1dForward input must be (batch, inC, L), got %v", input.shape))
 	}
@@ -212,6 +213,7 @@ func Conv1dForward(input, weight, bias *Tensor, stride, dilation, padLeft, padRi
 
 // conv1dBackward computes gradients for Conv1dForward.
 func conv1dBackward(gradOutput, input, weight, bias *Tensor, stride, dilation, padLeft, padRight int, mode PadMode) []*Tensor {
+	syncForCPU(gradOutput, input, weight, bias)
 	batch := input.shape[0]
 	inC := input.shape[1]
 	L := input.shape[2]

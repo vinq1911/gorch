@@ -35,6 +35,7 @@ import (
 // producing a detached output would corrupt a training graph — so fail
 // loudly instead.
 func ConvTranspose1dForward(input, weight, bias *Tensor, stride, groups int) *Tensor {
+	syncForCPU(input, weight, bias)
 	if len(input.shape) != 3 {
 		panic(fmt.Sprintf("gorch: ConvTranspose1dForward input must be (batch, inC, L), got %v", input.shape))
 	}

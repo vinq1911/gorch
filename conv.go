@@ -72,6 +72,7 @@ func col2im(col []float32, C, H, W, kH, kW, stride, pad int, dx []float32) {
 //
 // Uses im2col + BLAS sgemm. For 1x1 convolutions, skips im2col entirely.
 func Conv2dForward(input *Tensor, weight *Tensor, bias *Tensor, stride, pad int) *Tensor {
+	syncForCPU(input, weight, bias)
 	batch := input.shape[0]
 	inC := input.shape[1]
 	H := input.shape[2]
@@ -150,6 +151,7 @@ func Conv2dForward(input *Tensor, weight *Tensor, bias *Tensor, stride, pad int)
 
 // conv2dBackward computes gradients for Conv2d.
 func conv2dBackward(gradOutput *Tensor, input *Tensor, weight *Tensor, bias *Tensor, stride, pad int) []*Tensor {
+	syncForCPU(gradOutput, input, weight, bias)
 	batch := input.shape[0]
 	inC := input.shape[1]
 	H := input.shape[2]

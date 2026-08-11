@@ -92,6 +92,27 @@ void metal_mps_batched_matmul_transA(MTLCommandQueueRef queue,
                                      uint32_t M, uint32_t N, uint32_t K,
                                      uint32_t batchSize);
 
+// ---------------------------------------------------------------------------
+// Async dispatch mode (plan 0009 X2, risk R6).
+//
+// By default every dispatch/matmul entry point commits its command
+// buffer and blocks in waitUntilCompleted — one full GPU round trip
+// (~0.2–1 ms) per op, measured at ~46% of the X1K1 block-step wall.
+// With async mode ON, entry points commit WITHOUT waiting and remember
+// the last committed command buffer; metal_sync_queue() blocks until
+// it (and, by the command queue's in-order execution guarantee, every
+// earlier buffer) has completed. Callers must sync before any CPU read
+// of GPU-written unified memory. Buffers released while work is in
+// flight are safe: command buffers retain their encoded resources
+// until completion (default retained-references mode).
+//
+// Single-queue, single-threaded by design — matches gorch's one global
+// command queue and single-threaded training loop.
+// ---------------------------------------------------------------------------
+
+void metal_set_async(int on);   // turning off also syncs
+void metal_sync_queue(void);    // wait for all committed GPU work
+
 // Release a device or command queue.
 void metal_release(void* obj);
 

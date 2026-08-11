@@ -312,7 +312,15 @@ func (t *Tensor) Size() int { return numElements(t.shape) }
 func (t *Tensor) Dim() int { return len(t.shape) }
 
 // Data returns the underlying float32 slice (shared, not copied).
-func (t *Tensor) Data() []float32 { return t.data }
+// If the tensor is Metal-resident and async dispatch mode is on, this
+// waits for pending GPU work first — Data() is the read barrier for
+// package-external consumers (nn, optim, user code).
+func (t *Tensor) Data() []float32 {
+	if t.buf != nil {
+		metal.SyncQueue()
+	}
+	return t.data
+}
 
 // Device returns CPU or Metal.
 func (t *Tensor) Device() DeviceType {
@@ -382,6 +390,7 @@ func (t *Tensor) ToCPU() *Tensor {
 	if t.buf == nil {
 		return t
 	}
+	syncForCPU(t)
 	cpuData := make([]float32, len(t.data))
 	copy(cpuData, t.data)
 	t.buf.Release()
@@ -428,11 +437,13 @@ func MetalDev() *metal.Device {
 
 // At returns the value at the given indices.
 func (t *Tensor) At(indices ...int) float32 {
+	syncForCPU(t)
 	return t.data[t.flatIndex(indices)]
 }
 
 // Set sets the value at the given indices.
 func (t *Tensor) Set(val float32, indices ...int) {
+	syncForCPU(t)
 	t.data[t.flatIndex(indices)] = val
 }
 
@@ -541,6 +552,7 @@ func Transpose2D(a *Tensor) *Tensor {
 	}
 	M, N := a.shape[0], a.shape[1]
 	out := ZerosLike(a, N, M)
+	syncForCPU(a)
 	for i := 0; i < M; i++ {
 		for j := 0; j < N; j++ {
 			out.data[j*M+i] = a.data[i*N+j]
@@ -576,6 +588,7 @@ func AddBias(a, bias *Tensor) *Tensor {
 	}
 
 	out := ZerosLike(a, M, N)
+	syncForCPU(a, bias)
 	for i := 0; i < M; i++ {
 		for j := 0; j < N; j++ {
 			out.data[i*N+j] = a.data[i*N+j] + bData[j]
@@ -590,6 +603,7 @@ func AddBias(a, bias *Tensor) *Tensor {
 			backward: func(grad *Tensor) []*Tensor {
 				// dL/da = grad (same shape)
 				// dL/dbias = sum over rows
+				syncForCPU(grad)
 				db := Zeros(N)
 				for i := 0; i < M; i++ {
 					for j := 0; j < N; j++ {
@@ -610,6 +624,7 @@ func (t *Tensor) String() string {
 	fmt.Fprintf(&b, "tensor(")
 	// Render via the active storage so bf16 tensors don't crash on a
 	// nil .data slice. Materialise as f32 for display only.
+	syncForCPU(t)
 	display := t.data
 	if t.dtype == BFloat16 {
 		display = BF16ToF32Slice(t.data16)

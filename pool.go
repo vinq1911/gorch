@@ -9,6 +9,7 @@ import "math"
 // Returns: (batch, C, outH, outW)
 // Also returns argmax indices for backward pass.
 func MaxPool2dForward(input *Tensor, kernelSize, stride int) *Tensor {
+	syncForCPU(input)
 	batch := input.shape[0]
 	C := input.shape[1]
 	H := input.shape[2]

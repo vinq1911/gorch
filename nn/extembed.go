@@ -140,7 +140,11 @@ func (e *ExtendedEmbedding) Logits(h *g.Tensor) *g.Tensor {
 	v0 := e.BaseVocab()
 	v1 := e.Ext.Shape()[0]
 
-	out := g.Zeros(M, v0+v1)
+	// Residency-inheriting output (plan 0009 X1 rule, applied in X2):
+	// when the hidden chain is Metal-resident the concatenated logits
+	// stay resident too, so CrossEntropyLoss can dispatch the K2 fused
+	// Metal kernels on the gathered supervised path (qwen SupervisedLoss).
+	out := g.ZerosLike(h, M, v0+v1)
 	od := out.Data()
 	// Two GEMMs into scratch blocks, then row-interleave into the
 	// concatenated layout (SgemmTransB writes a contiguous (M, N)
@@ -171,7 +175,7 @@ func (e *ExtendedEmbedding) Logits(h *g.Tensor) *g.Tensor {
 			// dh = gb @ Base + ge @ Ext — both blocks contribute.
 			var dh *g.Tensor
 			if h.RequiresGrad() {
-				dh = g.Zeros(M, dim)
+				dh = g.ZerosLike(h, M, dim)
 				accelerate.Sgemm(M, dim, v0, 1.0, gb, base.Data(), 0.0, dh.Data())
 				accelerate.Sgemm(M, dim, v1, 1.0, ge, ext.Data(), 1.0, dh.Data())
 			}

@@ -51,6 +51,7 @@ func Permute(t *Tensor, perm []int) *Tensor {
 	}
 
 	out := ZerosLike(t, dstShape...)
+	syncForCPU(t)
 	dstData := out.data
 	srcData := t.data
 

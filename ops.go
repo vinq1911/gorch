@@ -18,6 +18,8 @@ var (
 	mpsMatMulDispatches        atomic.Int64
 	mpsBatchedMatMulDispatches atomic.Int64
 	metalSoftmaxDispatches     atomic.Int64
+	metalSiluDispatches        atomic.Int64 // K4: vec_silu/vec_swiglu fwd+bwd
+	metalCEDispatches          atomic.Int64 // K2: cross_entropy fwd+bwd
 )
 
 // MetalDispatchCounts is a snapshot of how many times each GPU dispatch
@@ -27,6 +29,8 @@ type MetalDispatchCounts struct {
 	MatMul        int64 // MPS single matmuls (plain/transA/transB), fwd+bwd
 	BatchedMatMul int64 // MPS batched matmuls (plain/transA/transB), fwd+bwd
 	SoftmaxKernel int64 // fused causal-softmax fwd + softmax bwd kernel dispatches
+	SiluKernel    int64 // K4 SiLU/SwiGLU fwd + bwd kernel dispatches
+	CEKernel      int64 // K2 fused cross-entropy fwd + bwd kernel dispatches
 }
 
 // ReadMetalDispatchCounts returns the current dispatch counters.
@@ -35,6 +39,8 @@ func ReadMetalDispatchCounts() MetalDispatchCounts {
 		MatMul:        mpsMatMulDispatches.Load(),
 		BatchedMatMul: mpsBatchedMatMulDispatches.Load(),
 		SoftmaxKernel: metalSoftmaxDispatches.Load(),
+		SiluKernel:    metalSiluDispatches.Load(),
+		CEKernel:      metalCEDispatches.Load(),
 	}
 }
 
@@ -43,6 +49,8 @@ func ResetMetalDispatchCounts() {
 	mpsMatMulDispatches.Store(0)
 	mpsBatchedMatMulDispatches.Store(0)
 	metalSoftmaxDispatches.Store(0)
+	metalSiluDispatches.Store(0)
+	metalCEDispatches.Store(0)
 }
 
 // GPU holds the shared Metal device, command queue, and compiled kernels.
@@ -77,7 +85,11 @@ func InitMetal() (*GPU, error) {
 		// Plan 0004 part A — non-MatMul backward kernels.
 		"rmsnorm_forward", "rmsnorm_dx",
 		// Plan 0009 K1 — fused causal softmax fwd + softmax bwd.
-		"softmax_causal_forward", "softmax_backward"} {
+		"softmax_causal_forward", "softmax_backward",
+		// Plan 0009 K4 — SiLU/SwiGLU fwd + bwd.
+		"vec_silu", "vec_silu_bwd", "vec_swiglu", "vec_swiglu_bwd",
+		// Plan 0009 K2 — fused cross-entropy fwd + bwd.
+		"cross_entropy_forward", "cross_entropy_backward"} {
 		pipe, err := dev.CompileKernel(metal.KernelSource, name)
 		if err != nil {
 			return nil, fmt.Errorf("gorch: compile %s: %w", name, err)
@@ -218,6 +230,7 @@ func Neg(a *Tensor) *Tensor {
 		return downcastToBF16(Neg(promoteToF32(a)))
 	}
 	out := ZerosLike(a, a.shape...)
+	syncForCPU(a)
 	for i, v := range a.data {
 		out.data[i] = -v
 	}
@@ -245,6 +258,7 @@ func Scale(a *Tensor, s float32) *Tensor {
 		return downcastToBF16(Scale(promoteToF32(a), s))
 	}
 	out := ZerosLike(a, a.shape...)
+	syncForCPU(a)
 	accelerate.VScale(a.data, s, out.data)
 	if GradEnabled() && a.requiresGrad {
 		out.requiresGrad = true
@@ -253,6 +267,7 @@ func Scale(a *Tensor, s float32) *Tensor {
 			inputs: []*Tensor{a},
 			backward: func(grad *Tensor) []*Tensor {
 				dx := zerosLikeEither(a.shape, grad, a)
+				syncForCPU(grad)
 				accelerate.VScale(grad.data, s, dx.data)
 				return []*Tensor{dx}
 			},
@@ -279,6 +294,7 @@ func ReLU(a *Tensor) *Tensor {
 			inputs: []*Tensor{a},
 			backward: func(grad *Tensor) []*Tensor {
 				g := zerosLikeEither(a.shape, grad, a)
+				syncForCPU(a, grad)
 				for i, v := range a.data {
 					if v > 0 {
 						g.data[i] = grad.data[i]
@@ -307,6 +323,7 @@ func Sigmoid(a *Tensor) *Tensor {
 			backward: func(grad *Tensor) []*Tensor {
 				// sigmoid'(x) = sigmoid(x) * (1 - sigmoid(x))
 				g := zerosLikeEither(a.shape, grad, a)
+				syncForCPU(out, grad)
 				for i, v := range out.data {
 					g.data[i] = grad.data[i] * v * (1 - v)
 				}
@@ -333,6 +350,7 @@ func Tanh(a *Tensor) *Tensor {
 			backward: func(grad *Tensor) []*Tensor {
 				// tanh'(x) = 1 - tanh(x)^2
 				g := zerosLikeEither(a.shape, grad, a)
+				syncForCPU(out, grad)
 				for i, v := range out.data {
 					g.data[i] = grad.data[i] * (1 - v*v)
 				}
@@ -366,6 +384,7 @@ func GELU(a *Tensor) *Tensor {
 		// then one vForce vector-tanh, then 0.5 * x * (1 + tanh(inner)).
 		// `inner` is a transient scratch buffer — pooled to drop
 		// allocations across calls.
+		syncForCPU(a)
 		n := len(a.data)
 		inner := AcquireFloat32(n)
 		for i, x := range a.data {
@@ -386,6 +405,7 @@ func GELU(a *Tensor) *Tensor {
 			inputs: []*Tensor{a},
 			backward: func(grad *Tensor) []*Tensor {
 				dx := zerosLikeEither(a.shape, grad, a)
+				syncForCPU(a, grad)
 				for i, x := range a.data {
 					x3 := x * x * x
 					inner := float32(0.7978845608) * (x + 0.044715*x3)
@@ -409,6 +429,7 @@ func Exp(a *Tensor) *Tensor {
 		return downcastToBF16(Exp(promoteToF32(a)))
 	}
 	out := ZerosLike(a, a.shape...)
+	syncForCPU(a)
 	accelerate.Exp(a.data, out.data)
 	if GradEnabled() && (a.requiresGrad) {
 		out.requiresGrad = true
@@ -418,6 +439,7 @@ func Exp(a *Tensor) *Tensor {
 			backward: func(grad *Tensor) []*Tensor {
 				// d(exp(x))/dx = exp(x)
 				g := zerosLikeEither(a.shape, grad, a)
+				syncForCPU(out, grad)
 				for i, v := range out.data {
 					g.data[i] = grad.data[i] * v
 				}
@@ -434,6 +456,7 @@ func Log(a *Tensor) *Tensor {
 		return downcastToBF16(Log(promoteToF32(a)))
 	}
 	out := ZerosLike(a, a.shape...)
+	syncForCPU(a)
 	accelerate.Log(a.data, out.data)
 	if GradEnabled() && (a.requiresGrad) {
 		out.requiresGrad = true
@@ -442,6 +465,7 @@ func Log(a *Tensor) *Tensor {
 			inputs: []*Tensor{a},
 			backward: func(grad *Tensor) []*Tensor {
 				g := zerosLikeEither(a.shape, grad, a)
+				syncForCPU(a, grad)
 				for i, v := range a.data {
 					g.data[i] = grad.data[i] / v
 				}
@@ -465,6 +489,7 @@ func Softmax(a *Tensor) *Tensor {
 	}
 	batch, classes := a.shape[0], a.shape[1]
 	out := ZerosLike(a, batch, classes)
+	syncForCPU(a)
 
 	for i := 0; i < batch; i++ {
 		// Numerical stability: subtract max
@@ -491,6 +516,7 @@ func Softmax(a *Tensor) *Tensor {
 			inputs: []*Tensor{a},
 			backward: func(grad *Tensor) []*Tensor {
 				dx := zerosLikeEither([]int{batch, classes}, grad, out)
+				syncForCPU(out, grad)
 				for i := 0; i < batch; i++ {
 					// For each sample: dx = s * (grad - sum(grad * s))
 					var dot float32
@@ -519,6 +545,7 @@ func LogSoftmax(a *Tensor) *Tensor {
 	}
 	batch, classes := a.shape[0], a.shape[1]
 	out := ZerosLike(a, batch, classes)
+	syncForCPU(a)
 
 	// Also store softmax for backward
 	sm := make([]float32, batch*classes)
@@ -549,6 +576,7 @@ func LogSoftmax(a *Tensor) *Tensor {
 			inputs: []*Tensor{a},
 			backward: func(grad *Tensor) []*Tensor {
 				dx := zerosLikeEither([]int{batch, classes}, grad, out)
+				syncForCPU(grad)
 				for i := 0; i < batch; i++ {
 					var sumGrad float32
 					for j := 0; j < classes; j++ {
@@ -572,6 +600,7 @@ func Sum(a *Tensor) *Tensor {
 	if a.dtype == BFloat16 {
 		return downcastToBF16(Sum(promoteToF32(a)))
 	}
+	syncForCPU(a)
 	s := accelerate.Sum(a.data)
 	out := NewTensor([]float32{s}, 1)
 	if GradEnabled() && (a.requiresGrad) {
@@ -661,6 +690,7 @@ func MatMul(a, b *Tensor) *Tensor {
 	} else {
 		// CPU path: Accelerate BLAS sgemm. Reads through unified-
 		// memory slices when operands are Metal-backed.
+		syncForCPU(a, b)
 		accelerate.Sgemm(M, N, K, 1.0, a.data, b.data, 0.0, out.data)
 	}
 
@@ -693,6 +723,7 @@ func MatMul(a, b *Tensor) *Tensor {
 				// CPU path: Accelerate BLAS. Grads inherit the residency
 				// of the tensor they belong to so the backward chain
 				// stays GPU-resident below the threshold too.
+				syncForCPU(a, b, grad)
 				dA := zerosLikeEither([]int{gM, bK}, a, grad)
 				accelerate.SgemmTransB(gM, bK, gN, 1.0, grad.data, b.data, 0.0, dA.data)
 
@@ -728,6 +759,7 @@ func MatMulTransB(a, b *Tensor) *Tensor {
 		gpu.Queue.MatMulTransB(a.buf, b.buf, out.buf, M, N, K)
 		mpsMatMulDispatches.Add(1)
 	} else {
+		syncForCPU(a, b)
 		accelerate.SgemmTransB(M, N, K, 1.0, a.data, b.data, 0.0, out.data)
 	}
 
@@ -757,6 +789,7 @@ func MatMulTransA(a, b *Tensor) *Tensor {
 		gpu.Queue.MatMulTransA(a.buf, b.buf, out.buf, M, N, K)
 		mpsMatMulDispatches.Add(1)
 	} else {
+		syncForCPU(a, b)
 		accelerate.SgemmTransA(M, N, K, 1.0, a.data, b.data, 0.0, out.data)
 	}
 	return out
@@ -782,6 +815,7 @@ func BatchedMatMul(a, b *Tensor, batchSize, M, N, K int) *Tensor {
 		gpu.Queue.BatchedMatMul(a.buf, b.buf, out.buf, M, N, K, batchSize)
 		mpsBatchedMatMulDispatches.Add(1)
 	} else {
+		syncForCPU(a, b)
 		for i := 0; i < batchSize; i++ {
 			aOff := i * M * K
 			bOff := i * K * N
@@ -814,6 +848,7 @@ func BatchedMatMul(a, b *Tensor, batchSize, M, N, K int) *Tensor {
 					return []*Tensor{dA, dB}
 				}
 
+				syncForCPU(a, b, grad)
 				dA := zerosLikeEither([]int{batchSize, M, K}, a, grad)
 				dB := zerosLikeEither([]int{batchSize, K, N}, b, grad)
 				for i := 0; i < batchSize; i++ {
@@ -855,6 +890,7 @@ func BatchedMatMulTransB(a, b *Tensor, batchSize, M, N, K int) *Tensor {
 		gpu.Queue.BatchedMatMulTransB(a.buf, b.buf, out.buf, M, N, K, batchSize)
 		mpsBatchedMatMulDispatches.Add(1)
 	} else {
+		syncForCPU(a, b)
 		for i := 0; i < batchSize; i++ {
 			aOff := i * M * K
 			bOff := i * N * K
@@ -884,6 +920,7 @@ func BatchedMatMulTransB(a, b *Tensor, batchSize, M, N, K int) *Tensor {
 					return []*Tensor{dA, dB}
 				}
 
+				syncForCPU(a, b, grad)
 				dA := zerosLikeEither([]int{batchSize, M, K}, a, grad)
 				dB := zerosLikeEither([]int{batchSize, N, K}, b, grad)
 				for i := 0; i < batchSize; i++ {
@@ -922,8 +959,10 @@ func binaryOp(a, b *Tensor, kernelName string, cpuFn func(float32, float32) floa
 	if a.buf != nil && b.buf != nil && out.buf != nil && gpu != nil {
 		gpu.Queue.Dispatch1D(gpu.pipe(kernelName), []*metal.Buffer{a.buf, b.buf, out.buf}, a.Size())
 	} else if fn := accBinaryFor(kernelName); fn != nil {
+		syncForCPU(a, b)
 		fn(a.data, b.data, out.data)
 	} else {
+		syncForCPU(a, b)
 		for i := range a.data {
 			out.data[i] = cpuFn(a.data[i], b.data[i])
 		}
@@ -939,8 +978,10 @@ func unaryOp(a *Tensor, kernelName string, cpuFn func(float32) float32) *Tensor 
 	if a.buf != nil && out.buf != nil && gpu != nil {
 		gpu.Queue.Dispatch1D(gpu.pipe(kernelName), []*metal.Buffer{a.buf, out.buf}, a.Size())
 	} else if fn := accUnaryFor(kernelName); fn != nil {
+		syncForCPU(a)
 		fn(a.data, out.data)
 	} else {
+		syncForCPU(a)
 		for i, v := range a.data {
 			out.data[i] = cpuFn(v)
 		}

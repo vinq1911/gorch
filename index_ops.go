@@ -33,7 +33,11 @@ func Gather(src *Tensor, idx []int) *Tensor {
 	N, D := src.shape[0], src.shape[1]
 	M := len(idx)
 
-	out := Zeros(M, D)
+	// Output and grad inherit src's Metal residency (plan 0009 X1 rule;
+	// applied here in X2 so the qwen gathered-CE path keeps the chain
+	// resident for the K2 fused loss).
+	out := ZerosLike(src, M, D)
+	syncForCPU(src)
 	for i, j := range idx {
 		if j < 0 || j >= N {
 			panic(fmt.Sprintf("gorch: Gather index %d out of range [0, %d)", j, N))
@@ -48,7 +52,8 @@ func Gather(src *Tensor, idx []int) *Tensor {
 			name:   "Gather",
 			inputs: []*Tensor{src},
 			backward: func(grad *Tensor) []*Tensor {
-				dx := Zeros(N, D)
+				dx := zerosLikeEither([]int{N, D}, grad, src)
+				syncForCPU(grad)
 				for i, j := range idxCopy {
 					for d := 0; d < D; d++ {
 						dx.data[j*D+d] += grad.data[i*D+d]
@@ -96,7 +101,8 @@ func ScatterAdd(src *Tensor, idx []int, N int) *Tensor {
 		panic(fmt.Sprintf("gorch: ScatterAdd idx length %d != src rows %d", len(idx), M))
 	}
 
-	out := Zeros(N, D)
+	out := ZerosLike(src, N, D)
+	syncForCPU(src)
 	for i, j := range idx {
 		if j < 0 || j >= N {
 			panic(fmt.Sprintf("gorch: ScatterAdd index %d out of range [0, %d)", j, N))
@@ -114,7 +120,8 @@ func ScatterAdd(src *Tensor, idx []int, N int) *Tensor {
 			inputs: []*Tensor{src},
 			backward: func(grad *Tensor) []*Tensor {
 				// d/dsrc[i, :] = grad[idx[i], :] — that's just Gather(grad, idx).
-				dSrc := Zeros(M, D)
+				dSrc := zerosLikeEither([]int{M, D}, grad, src)
+				syncForCPU(grad)
 				for i, j := range idxCopy {
 					copy(dSrc.data[i*D:(i+1)*D], grad.data[j*D:(j+1)*D])
 				}
@@ -152,6 +159,7 @@ func TopK(x *Tensor, k int) (values *Tensor, indices []int) {
 
 	values = Zeros(B, k)
 	indices = make([]int, B*k)
+	syncForCPU(x)
 
 	// Per-row partial selection: O(V log K) using a min-heap would be
 	// faster, but at vocab/expert sizes (≤ a few thousand) and B
@@ -192,6 +200,7 @@ func Multinomial(probs *Tensor, rng *rand.Rand) []int {
 	}
 	B, V := probs.shape[0], probs.shape[1]
 	out := make([]int, B)
+	syncForCPU(probs)
 	rnd := func() float64 {
 		if rng != nil {
 			return rng.Float64()
@@ -265,6 +274,7 @@ func RepeatInterleave(src *Tensor, n int) *Tensor {
 	}
 
 	out := ZerosLike(src, dstShape...)
+	syncForCPU(src)
 	for o := 0; o < outer; o++ {
 		for k := 0; k < K; k++ {
 			srcOff := (o*K + k) * inner
@@ -282,6 +292,7 @@ func RepeatInterleave(src *Tensor, n int) *Tensor {
 			inputs: []*Tensor{src},
 			backward: func(grad *Tensor) []*Tensor {
 				dx := zerosLikeEither(srcShape, grad, src)
+				syncForCPU(grad)
 				for o := 0; o < outer; o++ {
 					for k := 0; k < K; k++ {
 						srcOff := (o*K + k) * inner

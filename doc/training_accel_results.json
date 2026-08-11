@@ -827,6 +827,387 @@
         "threshold audit (X1 item 4): every workload matmul fwd+bwd clears the 512M-FMA default at seq 512/1024/1500; thinnest margin 1.05x (k/v projections and attention batched at seq 512, 537M FMA); no per-callsite override needed -- confirmed empirically by the dispatch counters",
         "session validity: 1-min load 14.2 at bench start (external training agent running); X0 was recorded at load 6.8. Canary drift -7.6%/-7.3%/-37.3% -- the seq-1500 X0 row was itself load-inflated (its min/max spread was 884-1379ms). Same-session canary numbers are the honest comparison basis; re-bench after cooldown recommended before quoting cross-session speedups"
       ]
+    },
+    {
+      "phase": "X2",
+      "date": "2026-08-11",
+      "machine": "Apple M4",
+      "memory_gb": 24,
+      "go_version": "go1.26.0",
+      "load_avg_at_start": "{ 4.94 7.56 8.30 }",
+      "metal_initialized": true,
+      "geometry": {
+        "base_vocab": 151936,
+        "ffn_inter": 3072,
+        "head_dim": 128,
+        "hidden": 1024,
+        "kv_dim": 1024,
+        "kv_heads": 8,
+        "layers": 28,
+        "mimi_vocab": 16384,
+        "q_dim": 2048,
+        "q_heads": 16,
+        "rms_norm_eps": 1e-06,
+        "rope_theta": 1000000,
+        "vocab": 168320
+      },
+      "block_step_results": [
+        {
+          "seq": 512,
+          "warmups": 2,
+          "runs": 5,
+          "fwd_ms": 61.208625,
+          "bwd_ms": 75.281792,
+          "opt_ms": 9.874792,
+          "total_ms": 140.861834,
+          "total_min_ms": 121.281083,
+          "total_max_ms": 152.29525,
+          "alloc_per_step_mb": 0.143184,
+          "live_graph_after_fwd_mb": 111.21272,
+          "note": "X2 kernels (K1+K4 GPU, K7 vectorized AdamW), per-op sync dispatch"
+        },
+        {
+          "seq": 512,
+          "warmups": 2,
+          "runs": 5,
+          "fwd_ms": 52.077583,
+          "bwd_ms": 59.539834,
+          "opt_ms": 10.405125,
+          "total_ms": 127.241917,
+          "total_min_ms": 110.584375,
+          "total_max_ms": 130.886167,
+          "alloc_per_step_mb": 0.143184,
+          "live_graph_after_fwd_mb": 111.21272,
+          "note": "X2 kernels, R6 async dispatch (commit-without-wait); ~21 host sync waits per step"
+        },
+        {
+          "seq": 1024,
+          "warmups": 2,
+          "runs": 5,
+          "fwd_ms": 118.331208,
+          "bwd_ms": 151.075292,
+          "opt_ms": 10.3235,
+          "total_ms": 350.94675,
+          "total_min_ms": 242.587541,
+          "total_max_ms": 398.759208,
+          "alloc_per_step_mb": 0.143184,
+          "live_graph_after_fwd_mb": 289.523888,
+          "note": "X2 kernels (K1+K4 GPU, K7 vectorized AdamW), per-op sync dispatch"
+        },
+        {
+          "seq": 1024,
+          "warmups": 2,
+          "runs": 5,
+          "fwd_ms": 105.387375,
+          "bwd_ms": 148.462375,
+          "opt_ms": 14.770958,
+          "total_ms": 267.013167,
+          "total_min_ms": 264.537958,
+          "total_max_ms": 348.274334,
+          "alloc_per_step_mb": 0.143184,
+          "live_graph_after_fwd_mb": 289.523904,
+          "note": "X2 kernels, R6 async dispatch (commit-without-wait); ~21 host sync waits per step"
+        },
+        {
+          "seq": 1500,
+          "warmups": 2,
+          "runs": 5,
+          "fwd_ms": 247.496542,
+          "bwd_ms": 231.087083,
+          "opt_ms": 10.720458,
+          "total_ms": 487.431625,
+          "total_min_ms": 429.207667,
+          "total_max_ms": 512.083167,
+          "alloc_per_step_mb": 0.1432,
+          "live_graph_after_fwd_mb": 515.494432,
+          "note": "X2 kernels (K1+K4 GPU, K7 vectorized AdamW), per-op sync dispatch"
+        },
+        {
+          "seq": 1500,
+          "warmups": 2,
+          "runs": 5,
+          "fwd_ms": 171.671916,
+          "bwd_ms": 210.06975,
+          "opt_ms": 16.083792,
+          "total_ms": 417.886666,
+          "total_min_ms": 359.366167,
+          "total_max_ms": 479.3135,
+          "alloc_per_step_mb": 0.143184,
+          "live_graph_after_fwd_mb": 515.494416,
+          "note": "X2 kernels, R6 async dispatch (commit-without-wait); ~21 host sync waits per step"
+        }
+      ],
+      "baseline_canary_results": [
+        {
+          "seq": 512,
+          "warmups": 2,
+          "runs": 5,
+          "fwd_ms": 59.214333,
+          "bwd_ms": 62.546208,
+          "opt_ms": 37.258375,
+          "total_ms": 161.0545,
+          "total_min_ms": 157.417916,
+          "total_max_ms": 165.576875,
+          "alloc_per_step_mb": 394.713072,
+          "live_graph_after_fwd_mb": 165.73916,
+          "note": "CPU f32 canary (X0 op chain re-run under this session's load; scalar AdamW forced, CPU SwiGLU is K4-vectorized \u2014 see notes)"
+        },
+        {
+          "seq": 1024,
+          "warmups": 2,
+          "runs": 5,
+          "fwd_ms": 177.350333,
+          "bwd_ms": 150.749375,
+          "opt_ms": 37.442458,
+          "total_ms": 365.711334,
+          "total_min_ms": 364.444459,
+          "total_max_ms": 372.4235,
+          "alloc_per_step_mb": 1070.83568,
+          "live_graph_after_fwd_mb": 507.628168,
+          "note": "CPU f32 canary (X0 op chain re-run under this session's load; scalar AdamW forced, CPU SwiGLU is K4-vectorized \u2014 see notes)"
+        },
+        {
+          "seq": 1500,
+          "warmups": 2,
+          "runs": 5,
+          "fwd_ms": 346.475125,
+          "bwd_ms": 271.515208,
+          "opt_ms": 39.433084,
+          "total_ms": 671.714459,
+          "total_min_ms": 634.885875,
+          "total_max_ms": 691.111833,
+          "alloc_per_step_mb": 2008.479728,
+          "live_graph_after_fwd_mb": 983.538296,
+          "note": "CPU f32 canary (X0 op chain re-run under this session's load; scalar AdamW forced, CPU SwiGLU is K4-vectorized \u2014 see notes)"
+        }
+      ],
+      "tail_results": [
+        {
+          "name": "embedding_fwd_bwd",
+          "seq": 512,
+          "shape": "(512 ids) into (168320,1024)",
+          "fwd_ms": 0.307584,
+          "bwd_ms": 19.690666,
+          "total_ms": 19.99825,
+          "note": "backward allocates + scatters a dense (vocab, hidden) f32 grad (~690 MB)"
+        },
+        {
+          "name": "lm_head_matmul_fwd_bwd",
+          "seq": 512,
+          "shape": "(512,1024)@(1024,168320)",
+          "fwd_ms": 91.604292,
+          "bwd_ms": 343.202666,
+          "total_ms": 434.806958,
+          "note": "x and W Metal-resident: fwd + both grads on MPS (Sum seed grad Metal-resident via fullLike)"
+        },
+        {
+          "name": "cross_entropy_fwd_bwd_cpu_vectorized",
+          "seq": 512,
+          "shape": "(512,168320)",
+          "fwd_ms": 51.020833,
+          "bwd_ms": 57.3365,
+          "total_ms": 108.35733300000001,
+          "note": "K2 CPU fallback: Accelerate acc_vexp path with saved logsumexp (no double softmax)"
+        },
+        {
+          "name": "cross_entropy_fwd_bwd",
+          "seq": 512,
+          "shape": "(512,168320)",
+          "fwd_ms": 9.06,
+          "bwd_ms": 73.151041,
+          "total_ms": 82.21104100000001,
+          "note": "K2 fused Metal kernels (logits Metal-resident): fwd logsumexp+target pick, bwd softmax-onehot from saved lse"
+        },
+        {
+          "name": "embedding_fwd_bwd",
+          "seq": 1024,
+          "shape": "(1024 ids) into (168320,1024)",
+          "fwd_ms": 0.649,
+          "bwd_ms": 10.159041,
+          "total_ms": 10.808041,
+          "note": "backward allocates + scatters a dense (vocab, hidden) f32 grad (~690 MB)"
+        },
+        {
+          "name": "lm_head_matmul_fwd_bwd",
+          "seq": 1024,
+          "shape": "(1024,1024)@(1024,168320)",
+          "fwd_ms": 317.918917,
+          "bwd_ms": 737.641958,
+          "total_ms": 1055.5608750000001,
+          "note": "x and W Metal-resident: fwd + both grads on MPS (Sum seed grad Metal-resident via fullLike)"
+        },
+        {
+          "name": "cross_entropy_fwd_bwd_cpu_vectorized",
+          "seq": 1024,
+          "shape": "(1024,168320)",
+          "fwd_ms": 100.425791,
+          "bwd_ms": 114.481042,
+          "total_ms": 214.906833,
+          "note": "K2 CPU fallback: Accelerate acc_vexp path with saved logsumexp (no double softmax)"
+        },
+        {
+          "name": "cross_entropy_fwd_bwd",
+          "seq": 1024,
+          "shape": "(1024,168320)",
+          "fwd_ms": 17.313208,
+          "bwd_ms": 92.332458,
+          "total_ms": 109.645666,
+          "note": "K2 fused Metal kernels (logits Metal-resident): fwd logsumexp+target pick, bwd softmax-onehot from saved lse"
+        },
+        {
+          "name": "embedding_fwd_bwd",
+          "seq": 1500,
+          "shape": "(1500 ids) into (168320,1024)",
+          "fwd_ms": 1.260875,
+          "bwd_ms": 14.413834,
+          "total_ms": 15.674709,
+          "note": "backward allocates + scatters a dense (vocab, hidden) f32 grad (~690 MB)"
+        },
+        {
+          "name": "lm_head_matmul_fwd_bwd",
+          "seq": 1500,
+          "shape": "(1500,1024)@(1024,168320)",
+          "fwd_ms": 367.772125,
+          "bwd_ms": 1151.845,
+          "total_ms": 1519.617125,
+          "note": "x and W Metal-resident: fwd + both grads on MPS (Sum seed grad Metal-resident via fullLike)"
+        },
+        {
+          "name": "cross_entropy_fwd_bwd_cpu_vectorized",
+          "seq": 1500,
+          "shape": "(1500,168320)",
+          "fwd_ms": 150.161791,
+          "bwd_ms": 161.882,
+          "total_ms": 312.043791,
+          "note": "K2 CPU fallback: Accelerate acc_vexp path with saved logsumexp (no double softmax)"
+        },
+        {
+          "name": "cross_entropy_fwd_bwd",
+          "seq": 1500,
+          "shape": "(1500,168320)",
+          "fwd_ms": 28.188833,
+          "bwd_ms": 167.001334,
+          "total_ms": 195.190167,
+          "note": "K2 fused Metal kernels (logits Metal-resident): fwd logsumexp+target pick, bwd softmax-onehot from saved lse"
+        },
+        {
+          "name": "adamw_172m_table_scalar",
+          "seq": 0,
+          "shape": "(168320,1024) = 172M params",
+          "fwd_ms": 0,
+          "bwd_ms": 0,
+          "total_ms": 457.500125,
+          "note": "pre-K7 scalar Go loop forced via optim.UseScalarAdamW (K7 gate baseline)"
+        },
+        {
+          "name": "adamw_172m_table",
+          "seq": 0,
+          "shape": "(168320,1024) = 172M params",
+          "fwd_ms": 0,
+          "bwd_ms": 0,
+          "total_ms": 74.64375,
+          "note": "K7 vectorized Accelerate step (acc_adamw_step)"
+        }
+      ],
+      "full_step_estimate": [
+        {
+          "seq": 512,
+          "block_ms": 127.241917,
+          "blocks_28_ms": 3562.773676,
+          "embedding_ms": 19.99825,
+          "lm_head_ms": 434.806958,
+          "loss_ms": 82.21104100000001,
+          "optimizer_table_ms": 74.64375,
+          "total_ms": 4174.433675,
+          "total_s": 4.174433675
+        },
+        {
+          "seq": 1024,
+          "block_ms": 267.013167,
+          "blocks_28_ms": 7476.368676,
+          "embedding_ms": 10.808041,
+          "lm_head_ms": 1055.5608750000001,
+          "loss_ms": 109.645666,
+          "optimizer_table_ms": 74.64375,
+          "total_ms": 8727.027008000001,
+          "total_s": 8.727027008
+        },
+        {
+          "seq": 1500,
+          "block_ms": 417.886666,
+          "blocks_28_ms": 11700.826648,
+          "embedding_ms": 15.674709,
+          "lm_head_ms": 1519.617125,
+          "loss_ms": 195.190167,
+          "optimizer_table_ms": 74.64375,
+          "total_ms": 13505.952399000002,
+          "total_s": 13.505952399000002
+        }
+      ],
+      "per_op_results": null,
+      "memory_results": [
+        {
+          "seq": 512,
+          "live_graph_after_fwd_gb_one_block": 0.108606171875,
+          "extrapolated_28_layer_graph_gb": 5.4936535165,
+          "weights_f32_gb": 2.452680704,
+          "fits_24_gb": true,
+          "note": "as X1K1 (live graph includes Metal buffer bytes); K4 backward recomputes sigma(x) instead of caching a (seq,3072) sigmoid slice per layer"
+        },
+        {
+          "seq": 1024,
+          "live_graph_after_fwd_gb_one_block": 0.2827381875,
+          "extrapolated_28_layer_graph_gb": 10.369349954,
+          "weights_f32_gb": 2.452680704,
+          "fits_24_gb": true,
+          "note": "as X1K1 (live graph includes Metal buffer bytes); K4 backward recomputes sigma(x) instead of caching a (seq,3072) sigmoid slice per layer"
+        },
+        {
+          "seq": 1500,
+          "live_graph_after_fwd_gb_one_block": 0.503412515625,
+          "extrapolated_28_layer_graph_gb": 16.5482311415,
+          "weights_f32_gb": 2.452680704,
+          "fits_24_gb": true,
+          "note": "as X1K1 (live graph includes Metal buffer bytes); K4 backward recomputes sigma(x) instead of caching a (seq,3072) sigmoid slice per layer"
+        }
+      ],
+      "dispatch_counts": {
+        "block_fwd_bwd_seq1024_mps_batched_matmul": 6,
+        "block_fwd_bwd_seq1024_mps_matmul": 21,
+        "block_fwd_bwd_seq1024_silu_kernel": 2,
+        "block_fwd_bwd_seq1024_softmax_kernel": 2,
+        "ce_fwd_bwd_seq256_ce_kernel": 2
+      },
+      "pprof_top10": null,
+      "measured_ranking_seq1500": null,
+      "notes": [
+        "X2 second wave: K7 vectorized AdamW (accelerate.AdamWStep), K4 SiLU/SwiGLU Metal kernels + Accelerate CPU fallback, K2 fused cross-entropy Metal kernels + vectorized CPU fallback, R6 commit-without-wait async dispatch (g.SetMetalAsync) with wait-on-CPU-read fencing",
+        "block_step_results carry TWO rows per seq: per-op sync dispatch and async dispatch (R6); the async row is the X2 configuration used in full_step_estimate, and the sync-vs-async delta is the recovered per-op waitUntilCompleted cost",
+        "canary caveat: the CPU canary chain is NOT byte-identical to X0's code \u2014 K4 also vectorized the CPU SwiGLU (~5% of the CPU block step) and K2 vectorized the CPU CE fallback; the canary forces the pre-K7 scalar AdamW (optim.UseScalarAdamW) but cannot un-vectorize SwiGLU. Treat the canary as approximate load calibration",
+        "tails: lm_head + cross-entropy measured Metal-resident (K2); a cross_entropy_fwd_bwd_cpu_vectorized row records the K2 CPU-fallback (acc_vexp) path; adamw_172m_table is the K7 vectorized step with adamw_172m_table_scalar as the pre-K7 baseline",
+        "canary seq=512: 161ms vs X0 201ms (drift -20.0%)",
+        "WARNING: canary drift at seq 512 exceeds 10% \u2014 cross-session comparison degraded per plan \u00a72.1",
+        "canary seq=1024: 366ms vs X0 463ms (drift -21.0%)",
+        "WARNING: canary drift at seq 1024 exceeds 10% \u2014 cross-session comparison degraded per plan \u00a72.1",
+        "canary seq=1500: 672ms vs X0 1163ms (drift -42.3%)",
+        "WARNING: canary drift at seq 1500 exceeds 10% \u2014 cross-session comparison degraded per plan \u00a72.1",
+        "block-step speedup vs X0 at seq 512: sync 1.43x, async 1.58x (201ms -> 141ms/127ms)",
+        "same-session speedup vs CPU canary at seq 512: sync 1.14x, async 1.27x",
+        "block-step speedup vs X0 at seq 1024: sync 1.32x, async 1.73x (463ms -> 351ms/267ms)",
+        "same-session speedup vs CPU canary at seq 1024: sync 1.04x, async 1.37x",
+        "block-step speedup vs X0 at seq 1500: sync 2.39x, async 2.78x (1163ms -> 487ms/418ms)",
+        "same-session speedup vs CPU canary at seq 1500: sync 1.38x, async 1.61x",
+        "R6 dispatch microbench (200x vec_mul on 1k elements): sync 0.172 ms/dispatch vs async 0.030 ms/dispatch -> waitUntilCompleted round trip ~0.142 ms recovered per GPU-GPU dispatch",
+        "K7 gate: 172M-param AdamW step 458ms (scalar) -> 75ms (vectorized), 6.13x",
+        "full-step speedup vs X0 at seq 512: 2.03x (8.5s -> 4.2s)",
+        "full-step speedup vs X0 at seq 1024: 2.08x (18.1s -> 8.7s)",
+        "full-step speedup vs X0 at seq 1500: 2.88x (38.9s -> 13.5s)",
+        "GATE (plan X2, block >=3.5x at seq 1024 vs X0): NOT MET (1.73x)",
+        "GATE (plan X2, full-step >=4x at seq 1024 vs X0): NOT MET (2.08x)",
+        "REDUCED CONFIDENCE: 1-min loadavg 4.9-5.4 at bench start and 5-8 throughout (persistent background load: viewer-api server, Docker, WindowServer/screen sharing); the plan's quiet-machine (<3) condition was never met this session. The X0 rows carry their own load inflation (canary drift -20.0/-21.0/-42.3%), so vs-X0 speedups are optimistic at seq 1500 and the same-session canary rows are the honest comparison basis",
+        "bench executed as two processes (TA_X2_PART=blocks then TA_X2_PART=tails, temp-file phase handoff): the single full-length process was reproducibly SIGKILLed at ~110s wall in this session's environment (no jetsam/log trace, 74% memory free at kill time; isolated tails and a 150s CPU burner both survive) \u2014 see the harness comment",
+        "async block rows: the fwd/bwd segment split is approximate (the forward timestamp is taken before pending GPU work completes; the optimizer's Data() read fences the total, which is exact)"
+      ]
     }
   ]
 }

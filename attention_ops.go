@@ -18,6 +18,7 @@ func MaskFill(a *Tensor, mask []bool, val float32) *Tensor {
 		return downcastToBF16(MaskFill(promoteToF32(a), mask, val))
 	}
 	out := ZerosLike(a, a.shape...)
+	syncForCPU(a)
 	copy(out.data, a.data)
 	for i, m := range mask {
 		if m {
@@ -31,6 +32,7 @@ func MaskFill(a *Tensor, mask []bool, val float32) *Tensor {
 			inputs: []*Tensor{a},
 			backward: func(grad *Tensor) []*Tensor {
 				dx := zerosLikeEither(a.shape, grad, a)
+				syncForCPU(grad)
 				for i, m := range mask {
 					if !m {
 						dx.data[i] = grad.data[i]
@@ -68,7 +70,8 @@ func EmbeddingLookup(weight *Tensor, ids []int) *Tensor {
 	}
 	dim := weight.shape[1]
 	n := len(ids)
-	out := Zeros(n, dim)
+	out := ZerosLike(weight, n, dim)
+	syncForCPU(weight)
 
 	for i, id := range ids {
 		copy(out.data[i*dim:(i+1)*dim], weight.data[id*dim:(id+1)*dim])
@@ -81,6 +84,7 @@ func EmbeddingLookup(weight *Tensor, ids []int) *Tensor {
 			inputs: []*Tensor{weight},
 			backward: func(grad *Tensor) []*Tensor {
 				dw := Zeros(weight.shape...)
+				syncForCPU(grad)
 				for i, id := range ids {
 					for j := 0; j < dim; j++ {
 						dw.data[id*dim+j] += grad.data[i*dim+j]
@@ -103,6 +107,7 @@ func ScaledMatMul(a, b *Tensor, scale float32) *Tensor {
 	out := MatMul(a, b)
 	invScale := 1.0 / float32(math.Sqrt(float64(scale)))
 	result := ZerosLike(out, out.shape...)
+	syncForCPU(out)
 	accelerate.VScale(out.data, invScale, result.data)
 
 	if GradEnabled() && (out.requiresGrad) {
@@ -113,6 +118,7 @@ func ScaledMatMul(a, b *Tensor, scale float32) *Tensor {
 			backward: func(grad *Tensor) []*Tensor {
 				// Scale the gradient, then delegate to MatMul backward
 				scaledGrad := ZerosLike(grad, grad.shape...)
+				syncForCPU(grad)
 				accelerate.VScale(grad.data, invScale, scaledGrad.data)
 				return out.gradFn.backward(scaledGrad)
 			},

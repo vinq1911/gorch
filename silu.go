@@ -2,7 +2,39 @@
 
 package gorch
 
-import "math"
+import (
+	"github.com/vinq1911/gorch/accelerate"
+	"github.com/vinq1911/gorch/metal"
+)
+
+// SiLU / SwiGLU — plan 0009 K4 (X2 kernel set).
+//
+// The SwiGLU FFN activation was a pure-Go scalar loop with a per-call
+// math.Exp — 0.97 s/step at seq 1500 in the X0 per-op table, and 14%
+// of the remaining CPU samples in the X1K1 profile. Both ops now
+// dispatch element-wise Metal kernels (vec_silu / vec_swiglu + _bwd,
+// metal/kernels.go) when the input is Metal-resident, and a vectorized
+// Accelerate path (acc_vsilu / acc_vswiglu + _bwd: one vForce sigmoid
+// pass + one auto-vectorized combine loop) otherwise. Backward
+// recomputes σ(x) instead of caching a sigmoid tensor per layer —
+// one exp per lane beats keeping a (seq, 3072) cache alive in the
+// autograd graph.
+//
+// Golden tests: silu_metal_test.go (kernel vs CPU reference at 1e-3
+// abs per the plan tolerance table + numerical-grad 1e-2).
+
+// siluPipelinesReady reports whether the K4 kernels were compiled.
+func siluPipelinesReady() bool {
+	if gpu == nil {
+		return false
+	}
+	for _, k := range []string{"vec_silu", "vec_silu_bwd", "vec_swiglu", "vec_swiglu_bwd"} {
+		if _, ok := gpu.pipelines[k]; !ok {
+			return false
+		}
+	}
+	return true
+}
 
 // SiLU returns x * sigmoid(x) element-wise (also called Swish).
 // Used by Llama, Mistral, OpenMythos and most modern transformers
@@ -16,32 +48,28 @@ func SiLU(a *Tensor) *Tensor {
 	}
 	out := ZerosLike(a, a.shape...)
 
-	// Cache sigmoid for backward — SiLU's derivative needs it.
-	// In NoGrad mode we skip the cache (no graph being built).
-	needsBackward := GradEnabled() && a.requiresGrad
-	var sig []float32
-	if needsBackward {
-		sig = make([]float32, len(a.data))
+	if a.buf != nil && out.buf != nil && siluPipelinesReady() {
+		gpu.Queue.Dispatch1D(gpu.pipe("vec_silu"), []*metal.Buffer{a.buf, out.buf}, a.Size())
+		metalSiluDispatches.Add(1)
+	} else {
+		syncForCPU(a)
+		accelerate.SiLU(a.data, out.data)
 	}
 
-	for i, x := range a.data {
-		s := float32(1.0 / (1.0 + math.Exp(float64(-x))))
-		out.data[i] = x * s
-		if needsBackward {
-			sig[i] = s
-		}
-	}
-
-	if needsBackward {
+	if GradEnabled() && a.requiresGrad {
 		out.requiresGrad = true
 		out.gradFn = &GradFn{
 			name:   "SiLU",
 			inputs: []*Tensor{a},
 			backward: func(grad *Tensor) []*Tensor {
 				dx := zerosLikeEither(a.shape, grad, a)
-				for i, x := range a.data {
-					s := sig[i]
-					dx.data[i] = grad.data[i] * s * (1 + x*(1-s))
+				if a.buf != nil && grad.buf != nil && dx.buf != nil && siluPipelinesReady() {
+					gpu.Queue.Dispatch1D(gpu.pipe("vec_silu_bwd"),
+						[]*metal.Buffer{a.buf, grad.buf, dx.buf}, a.Size())
+					metalSiluDispatches.Add(1)
+				} else {
+					syncForCPU(a, grad)
+					accelerate.SiLUBwd(a.data, grad.data, dx.data)
 				}
 				return []*Tensor{dx}
 			},
@@ -73,21 +101,16 @@ func SwiGLU(gate, value *Tensor) *Tensor {
 	}
 	out := zerosLikeEither(gate.shape, gate, value)
 
-	needsBackward := GradEnabled() && (gate.requiresGrad || value.requiresGrad)
-	var sig []float32
-	if needsBackward {
-		sig = make([]float32, len(gate.data))
+	if gate.buf != nil && value.buf != nil && out.buf != nil && siluPipelinesReady() {
+		gpu.Queue.Dispatch1D(gpu.pipe("vec_swiglu"),
+			[]*metal.Buffer{gate.buf, value.buf, out.buf}, gate.Size())
+		metalSiluDispatches.Add(1)
+	} else {
+		syncForCPU(gate, value)
+		accelerate.SwiGLU(gate.data, value.data, out.data)
 	}
 
-	for i, g := range gate.data {
-		s := float32(1.0 / (1.0 + math.Exp(float64(-g))))
-		out.data[i] = g * s * value.data[i]
-		if needsBackward {
-			sig[i] = s
-		}
-	}
-
-	if needsBackward {
+	if GradEnabled() && (gate.requiresGrad || value.requiresGrad) {
 		out.requiresGrad = true
 		out.gradFn = &GradFn{
 			name:   "SwiGLU",
@@ -95,15 +118,15 @@ func SwiGLU(gate, value *Tensor) *Tensor {
 			backward: func(grad *Tensor) []*Tensor {
 				dGate := zerosLikeEither(gate.shape, grad, gate)
 				dValue := zerosLikeEither(value.shape, grad, value)
-				for i := range gate.data {
-					gx := gate.data[i]
-					vx := value.data[i]
-					s := sig[i]
-					gi := grad.data[i]
-					// dy/dgate = value * σ(gate) * (1 + gate*(1 - σ(gate)))
-					dGate.data[i] = gi * vx * s * (1 + gx*(1-s))
-					// dy/dvalue = gate * σ(gate)
-					dValue.data[i] = gi * gx * s
+				if gate.buf != nil && value.buf != nil && grad.buf != nil &&
+					dGate.buf != nil && dValue.buf != nil && siluPipelinesReady() {
+					gpu.Queue.Dispatch1D(gpu.pipe("vec_swiglu_bwd"),
+						[]*metal.Buffer{gate.buf, value.buf, grad.buf, dGate.buf, dValue.buf},
+						gate.Size())
+					metalSiluDispatches.Add(1)
+				} else {
+					syncForCPU(gate, value, grad)
+					accelerate.SwiGLUBwd(gate.data, value.data, grad.data, dGate.data, dValue.data)
 				}
 				return []*Tensor{dGate, dValue}
 			},

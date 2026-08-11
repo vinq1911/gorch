@@ -34,6 +34,7 @@ func axisSplit(a *Tensor, axis int) (outer, n, inner int, outShape []int) {
 func MeanAxis(a *Tensor, axis int) *Tensor {
 	outer, n, inner, outShape := axisSplit(a, axis)
 	out := Zeros(outShape...)
+	syncForCPU(a)
 	invN := 1 / float32(n)
 	for o := 0; o < outer; o++ {
 		for j := 0; j < n; j++ {
@@ -54,6 +55,7 @@ func MeanAxis(a *Tensor, axis int) *Tensor {
 			name:   "MeanAxis",
 			inputs: []*Tensor{a},
 			backward: func(grad *Tensor) []*Tensor {
+				syncForCPU(a, grad)
 				dx := Zeros(a.shape...)
 				for o := 0; o < outer; o++ {
 					gRow := grad.data[o*inner : (o+1)*inner]
@@ -90,6 +92,7 @@ func VarAxis(a *Tensor, axis int, unbiased bool) *Tensor {
 	invDenom := 1 / float32(denom)
 
 	// Per-slice mean, kept for the backward closure.
+	syncForCPU(a)
 	mean := make([]float32, outer*inner)
 	invN := 1 / float32(n)
 	for o := 0; o < outer; o++ {
@@ -127,6 +130,7 @@ func VarAxis(a *Tensor, axis int, unbiased bool) *Tensor {
 			name:   "VarAxis",
 			inputs: []*Tensor{a},
 			backward: func(grad *Tensor) []*Tensor {
+				syncForCPU(a, grad)
 				dx := Zeros(a.shape...)
 				for o := 0; o < outer; o++ {
 					gRow := grad.data[o*inner : (o+1)*inner]
@@ -152,6 +156,7 @@ func VarAxis(a *Tensor, axis int, unbiased bool) *Tensor {
 func MaxAxis(a *Tensor, axis int) *Tensor {
 	outer, n, inner, outShape := axisSplit(a, axis)
 	out := Zeros(outShape...)
+	syncForCPU(a)
 	argmax := make([]int, outer*inner)
 	for o := 0; o < outer; o++ {
 		dst := out.data[o*inner : (o+1)*inner]
@@ -175,6 +180,7 @@ func MaxAxis(a *Tensor, axis int) *Tensor {
 			name:   "MaxAxis",
 			inputs: []*Tensor{a},
 			backward: func(grad *Tensor) []*Tensor {
+				syncForCPU(a, grad)
 				dx := Zeros(a.shape...)
 				for o := 0; o < outer; o++ {
 					gRow := grad.data[o*inner : (o+1)*inner]

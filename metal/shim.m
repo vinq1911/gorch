@@ -7,6 +7,39 @@
 #include <string.h>
 
 // ---------------------------------------------------------------------------
+// Async dispatch mode (plan 0009 X2, risk R6) — see shim.h.
+// ---------------------------------------------------------------------------
+
+static int g_async = 0;
+static id<MTLCommandBuffer> g_lastCmdBuf = nil; // strong ref under ARC
+
+// metal_finish: called after [cmdBuf commit] by every dispatch entry
+// point. Sync mode blocks; async mode records the buffer so
+// metal_sync_queue can block later. Command buffers on one queue
+// execute in commit order, so waiting on the last suffices for all.
+static inline void metal_finish(id<MTLCommandBuffer> cmdBuf) {
+    if (g_async) {
+        g_lastCmdBuf = cmdBuf;
+    } else {
+        [cmdBuf waitUntilCompleted];
+    }
+}
+
+void metal_sync_queue(void) {
+    if (g_lastCmdBuf) {
+        [g_lastCmdBuf waitUntilCompleted];
+        g_lastCmdBuf = nil;
+    }
+}
+
+void metal_set_async(int on) {
+    if (!on) {
+        metal_sync_queue();
+    }
+    g_async = on;
+}
+
+// ---------------------------------------------------------------------------
 // Device / queue
 // ---------------------------------------------------------------------------
 
@@ -124,7 +157,7 @@ void metal_dispatch_1d(MTLCommandQueueRef queue,
 
         [enc endEncoding];
         [cmdBuf commit];
-        [cmdBuf waitUntilCompleted];
+        metal_finish(cmdBuf);
     }
 }
 
@@ -158,7 +191,7 @@ void metal_dispatch_threadgroups_1d(MTLCommandQueueRef queue,
 
         [enc endEncoding];
         [cmdBuf commit];
-        [cmdBuf waitUntilCompleted];
+        metal_finish(cmdBuf);
     }
 }
 
@@ -196,7 +229,7 @@ void metal_mps_matmul(MTLCommandQueueRef queue,
         id<MTLCommandBuffer> cmdBuf = [q commandBuffer];
         [mul encodeToCommandBuffer:cmdBuf leftMatrix:matA rightMatrix:matB resultMatrix:matC];
         [cmdBuf commit];
-        [cmdBuf waitUntilCompleted];
+        metal_finish(cmdBuf);
     }
 }
 
@@ -246,7 +279,7 @@ void metal_mps_batched_matmul(MTLCommandQueueRef queue,
         }
 
         [cmdBuf commit];
-        [cmdBuf waitUntilCompleted];
+        metal_finish(cmdBuf);
     }
 }
 
@@ -302,7 +335,7 @@ void metal_mps_batched_matmul_transB(MTLCommandQueueRef queue,
         }
 
         [cmdBuf commit];
-        [cmdBuf waitUntilCompleted];
+        metal_finish(cmdBuf);
     }
 }
 
@@ -355,7 +388,7 @@ void metal_mps_batched_matmul_transA(MTLCommandQueueRef queue,
         }
 
         [cmdBuf commit];
-        [cmdBuf waitUntilCompleted];
+        metal_finish(cmdBuf);
     }
 }
 
@@ -400,7 +433,7 @@ void metal_mps_matmul_transB(MTLCommandQueueRef queue,
         id<MTLCommandBuffer> cmdBuf = [q commandBuffer];
         [mul encodeToCommandBuffer:cmdBuf leftMatrix:matA rightMatrix:matB resultMatrix:matC];
         [cmdBuf commit];
-        [cmdBuf waitUntilCompleted];
+        metal_finish(cmdBuf);
     }
 }
 
@@ -444,7 +477,7 @@ void metal_mps_matmul_transA(MTLCommandQueueRef queue,
         id<MTLCommandBuffer> cmdBuf = [q commandBuffer];
         [mul encodeToCommandBuffer:cmdBuf leftMatrix:matA rightMatrix:matB resultMatrix:matC];
         [cmdBuf commit];
-        [cmdBuf waitUntilCompleted];
+        metal_finish(cmdBuf);
     }
 }
 

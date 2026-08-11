@@ -7,6 +7,7 @@ import (
 	"math"
 
 	g "github.com/vinq1911/gorch"
+	"github.com/vinq1911/gorch/accelerate"
 )
 
 // AdamW implements the AdamW optimizer (Loshchilov & Hutter 2019).
@@ -93,7 +94,21 @@ func NewAdamWGroups(groups []ParamGroup, weightDecay float32) *AdamW {
 	}
 }
 
+// UseScalarAdamW forces the pre-plan-0009-K7 scalar Go update loop.
+// The vectorized Accelerate step (acc_adamw_step) is the default; the
+// scalar loop stays as the numerical reference for the K7 trajectory-
+// parity gate (loss curve over 20 synthetic steps within 1e-6).
+var UseScalarAdamW = false
+
 // Step applies one AdamW update.
+//
+// Plan 0009 K7: the per-element update runs through a single fused
+// Accelerate/clang-vectorized C loop (accelerate.AdamWStep) instead of
+// the scalar Go loop — the scalar path was 2.4 s/step at the workload's
+// 172M-param embedding table + 28×15.7M block params (X0 per-op table).
+// Math is identical (bias-corrected moments, decoupled weight decay);
+// the scalar loop below is kept as the parity oracle behind
+// UseScalarAdamW.
 func (o *AdamW) Step() {
 	o.t++
 	bc1 := 1 - float32(math.Pow(float64(o.beta1), float64(o.t)))
@@ -104,9 +119,22 @@ func (o *AdamW) Step() {
 		if grad == nil {
 			continue
 		}
+		if p.Dtype() != g.Float32 {
+			// bf16 params have nil Data(); the moment slices are keyed to
+			// f32 storage. Fail loudly instead of silently skipping
+			// (plan 0009 §3.4 item B3).
+			panic("optim: AdamW.Step on a non-f32 parameter — bf16 params must stay out of the optimizer (plan 0009 X3-B3)")
+		}
 		lr := o.lr * o.lrMul[i]
 		data := p.Data()
 		gData := grad.Data()
+
+		if !UseScalarAdamW {
+			accelerate.AdamWStep(data, gData, o.m[i], o.v[i],
+				lr, o.beta1, o.beta2, o.eps, o.weightDecay, bc1, bc2)
+			continue
+		}
+
 		for j := range data {
 			gj := gData[j]
 			o.m[i][j] = o.beta1*o.m[i][j] + (1-o.beta1)*gj

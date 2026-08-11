@@ -1319,3 +1319,447 @@ func TestTrainAccelBenchX1K1(t *testing.T) {
 	}
 	t.Logf("results appended to %s (phase %s)", outPath, phase.Phase)
 }
+
+// ==================== Phase X2 (plan 0009 §3.3 K2/K4/K7 + R6) ====================
+//
+// Second X2 wave: K7 vectorized AdamW (accelerate.AdamWStep), K4
+// SiLU/SwiGLU Metal kernels + Accelerate fallback, K2 fused
+// cross-entropy Metal kernels + vectorized CPU fallback, and the R6
+// commit-without-wait async dispatch mode (g.SetMetalAsync). The bench
+// measures the Metal block step in both sync and async dispatch modes
+// (their delta IS the recovered per-op waitUntilCompleted cost), the
+// Metal-resident CE tail, and the AdamW 172M table in scalar vs
+// vectorized form (the K7 gate delta). Canary discipline per §2.1 —
+// note that the canary CPU chain is no longer byte-identical to X0's:
+// K4/K7 also sped up the *CPU* SwiGLU path (vectorized) while the
+// canary forces the scalar AdamW; the residual difference is small
+// (SwiGLU ≈5% of the CPU block step) and is flagged in the notes.
+
+// taAdamWTableBenchScalar is taAdamWTableBench with the pre-K7 scalar
+// Go loop forced — the K7 baseline side of the gate.
+func taAdamWTableBenchScalar(t *testing.T, rng *rand.Rand, warm, runs int) taTailRow {
+	t.Helper()
+	prev := optim.UseScalarAdamW
+	optim.UseScalarAdamW = true
+	defer func() { optim.UseScalarAdamW = prev }()
+	row := taAdamWTableBench(t, rng, warm, runs)
+	row.Name = "adamw_172m_table_scalar"
+	row.Note = "pre-K7 scalar Go loop forced via optim.UseScalarAdamW (K7 gate baseline)"
+	return row
+}
+
+// taCEBenchMetal measures CrossEntropyLoss fwd+bwd with Metal-resident
+// logits — the K2 fused-kernel path at the exact workload shape.
+func taCEBenchMetal(t *testing.T, rng *rand.Rand, seq, warm, runs int) taTailRow {
+	t.Helper()
+	dev := g.MetalDev()
+	logits := taSeedTensor(rng, 1.0, seq, taVocab).ToMetal(dev)
+	logits.SetRequiresGrad(true)
+	tgt := g.Zeros(seq, 1)
+	for i := 0; i < seq; i++ {
+		tgt.Data()[i] = float32(rng.Intn(taVocab))
+	}
+	fwd, bwd := taBenchOp(warm, runs, []*g.Tensor{logits}, func() *g.Tensor {
+		return g.CrossEntropyLoss(logits, tgt)
+	})
+	taFlushGC()
+	return taTailRow{Name: "cross_entropy_fwd_bwd", Seq: seq,
+		Shape: fmt.Sprintf("(%d,%d)", seq, taVocab),
+		FwdMs: fwd, BwdMs: bwd, TotalMs: fwd + bwd,
+		Note: "K2 fused Metal kernels (logits Metal-resident): fwd logsumexp+target pick, bwd softmax-onehot from saved lse"}
+}
+
+// taDispatchOverheadBench measures the per-dispatch round-trip cost
+// precisely (R6 deliverable): 200 tiny vec_mul kernel dispatches on
+// 1k-element Metal buffers, sync mode (commit+wait each) vs async mode
+// (commit all + one final wait). The per-dispatch difference is the
+// pure waitUntilCompleted round trip that async mode recovers.
+func taDispatchOverheadBench(t *testing.T) (syncPerDispatchMs, asyncPerDispatchMs float64) {
+	t.Helper()
+	dev := g.MetalDev()
+	const n = 1024
+	const iters = 200
+	rng := rand.New(rand.NewSource(1))
+	x := taSeedTensor(rng, 1.0, n).ToMetal(dev)
+	y := taSeedTensor(rng, 1.0, n).ToMetal(dev)
+
+	run := func() float64 {
+		// warmup
+		for i := 0; i < 10; i++ {
+			_ = g.Mul(x, y) // both Metal-resident → vec_mul GPU dispatch
+		}
+		g.SyncMetal()
+		t0 := time.Now()
+		for i := 0; i < iters; i++ {
+			_ = g.Mul(x, y)
+		}
+		g.SyncMetal()
+		return taMs(time.Since(t0)) / iters
+	}
+
+	syncPerDispatchMs = run()
+	g.SetMetalAsync(true)
+	asyncPerDispatchMs = run()
+	g.SetMetalAsync(false)
+	taFlushGC()
+	return syncPerDispatchMs, asyncPerDispatchMs
+}
+
+// taX2PartialPath is the handoff file for the two-part X2 run (see
+// TA_X2_PART below).
+func taX2PartialPath() string {
+	return filepath.Join(os.TempDir(), "ta_x2_partial_phase.json")
+}
+
+// TestTrainAccelBenchX2 supports TA_X2_PART=blocks|tails: the 2026-08-11
+// bench session found the single full-length process reproducibly
+// SIGKILLed at ~110s wall (isolated tails and a 150s CPU-burner both
+// survive — cause undetermined, no jetsam/log trace; memory was 74%
+// free). Splitting into two shorter processes (blocks ≈60s, tails ≈60s)
+// with a temp-file phase handoff stays under the kill horizon. Unset
+// runs everything in one process as originally written.
+func TestTrainAccelBenchX2(t *testing.T) {
+	if _, err := g.InitMetal(); err != nil {
+		t.Skipf("metal not available: %v", err)
+	}
+	smoke := os.Getenv("TA_SMOKE") != ""
+	part := os.Getenv("TA_X2_PART") // "", "blocks", "tails"
+	seqs := []int{512, 1024, 1500}
+	warm, runs := taWarmups, taRuns
+	if smoke {
+		seqs = []int{64}
+		warm, runs = 1, 2
+	}
+	maxSeq := seqs[len(seqs)-1] + 1
+
+	machine := taSysctl("machdep.cpu.brand_string")
+	loadAvg := taSysctl("vm.loadavg")
+	t.Logf("machine=%s load=%s", machine, loadAvg)
+
+	outPath := "../doc/training_accel_results.json"
+	x0 := taX0Phase(t, outPath)
+	if x0 == nil && !smoke {
+		t.Fatal("X0-baseline phase not found in results JSON — X2 speedups need the baseline")
+	}
+	x0Block := func(seq int) *taBlockRow {
+		if x0 == nil {
+			return nil
+		}
+		for i := range x0.BlockStepResults {
+			if x0.BlockStepResults[i].Seq == seq {
+				return &x0.BlockStepResults[i]
+			}
+		}
+		return nil
+	}
+	x0Full := func(seq int) *taFullStepRow {
+		if x0 == nil {
+			return nil
+		}
+		for i := range x0.FullStepEstimate {
+			if x0.FullStepEstimate[i].Seq == seq {
+				return &x0.FullStepEstimate[i]
+			}
+		}
+		return nil
+	}
+
+	phase := taPhase{
+		Phase:            "X2",
+		Date:             time.Now().Format("2006-01-02"),
+		Machine:          machine,
+		MemoryGB:         24,
+		GoVersion:        runtime.Version(),
+		LoadAvgAtStart:   loadAvg,
+		MetalInitialized: true,
+		Geometry: map[string]any{
+			"hidden": taHidden, "q_heads": taQHeads, "kv_heads": taKVHeads,
+			"head_dim": taHeadDim, "q_dim": taQDim, "kv_dim": taKVDim,
+			"ffn_inter": taInter, "layers": taLayers,
+			"vocab": taVocab, "base_vocab": taBaseVocab, "mimi_vocab": taMimiVocab,
+			"rope_theta": taRopeTheta, "rms_norm_eps": 1e-6,
+		},
+		Notes: []string{
+			"X2 second wave: K7 vectorized AdamW (accelerate.AdamWStep), K4 SiLU/SwiGLU Metal kernels + Accelerate CPU fallback, K2 fused cross-entropy Metal kernels + vectorized CPU fallback, R6 commit-without-wait async dispatch (g.SetMetalAsync) with wait-on-CPU-read fencing",
+			"block_step_results carry TWO rows per seq: per-op sync dispatch and async dispatch (R6); the async row is the X2 configuration used in full_step_estimate, and the sync-vs-async delta is the recovered per-op waitUntilCompleted cost",
+			"canary caveat: the CPU canary chain is NOT byte-identical to X0's code — K4 also vectorized the CPU SwiGLU (~5% of the CPU block step) and K2 vectorized the CPU CE fallback; the canary forces the pre-K7 scalar AdamW (optim.UseScalarAdamW) but cannot un-vectorize SwiGLU. Treat the canary as approximate load calibration",
+			"tails: lm_head + cross-entropy measured Metal-resident (K2); a cross_entropy_fwd_bwd_cpu_vectorized row records the K2 CPU-fallback (acc_vexp) path; adamw_172m_table is the K7 vectorized step with adamw_172m_table_scalar as the pre-K7 baseline",
+		},
+	}
+
+	rng := rand.New(rand.NewSource(taSeed))
+	asyncRows := map[int]taBlockRow{}
+
+	if part != "tails" {
+		taX2BlocksPart(t, &phase, seqs, warm, runs, maxSeq, smoke, x0Block, asyncRows)
+	}
+
+	if part == "blocks" && !smoke {
+		raw, err := json.MarshalIndent(phase, "", "  ")
+		if err != nil {
+			t.Fatalf("marshal partial phase: %v", err)
+		}
+		if err := os.WriteFile(taX2PartialPath(), append(raw, '\n'), 0o644); err != nil {
+			t.Fatalf("write partial phase: %v", err)
+		}
+		t.Logf("TA_X2_PART=blocks: partial phase written to %s — run again with TA_X2_PART=tails", taX2PartialPath())
+		return
+	}
+	if part == "tails" && !smoke {
+		raw, err := os.ReadFile(taX2PartialPath())
+		if err != nil {
+			t.Fatalf("TA_X2_PART=tails needs the blocks part first: %v", err)
+		}
+		if err := json.Unmarshal(raw, &phase); err != nil {
+			t.Fatalf("partial phase unmarshal: %v", err)
+		}
+		for _, r := range phase.BlockStepResults {
+			if strings.Contains(r.Note, "async dispatch") {
+				asyncRows[r.Seq] = r
+			}
+		}
+		if len(asyncRows) == 0 {
+			t.Fatal("partial phase has no async block rows")
+		}
+	}
+
+	taX2TailsPart(t, &phase, rng, seqs, warm, runs, smoke, x0Block, x0Full, asyncRows, outPath, machine)
+}
+
+// taX2BlocksPart runs the canary, the sync/async Metal block steps,
+// the dispatch-counter gates, and the R6 microbench (sections a–c of
+// the X2 bench).
+func taX2BlocksPart(t *testing.T, phase *taPhase, seqs []int, warm, runs, maxSeq int, smoke bool, x0Block func(int) *taBlockRow, asyncRows map[int]taBlockRow) {
+	t.Helper()
+	// ---- (a) baseline canary: CPU, X0 op chain (scalar AdamW forced) ----
+	rngC := rand.New(rand.NewSource(taSeed))
+	blockC := newTABlock(rngC, maxSeq)
+	optim.UseScalarAdamW = true
+	for _, seq := range seqs {
+		row := taBlockStepBench(t, blockC, rngC, seq, warm, runs)
+		row.Note = "CPU f32 canary (X0 op chain re-run under this session's load; scalar AdamW forced, CPU SwiGLU is K4-vectorized — see notes)"
+		phase.CanaryResults = append(phase.CanaryResults, row)
+		if base := x0Block(seq); base != nil {
+			drift := (row.TotalMs - base.TotalMs) / base.TotalMs * 100
+			note := fmt.Sprintf("canary seq=%d: %.0fms vs X0 %.0fms (drift %+.1f%%)", seq, row.TotalMs, base.TotalMs, drift)
+			t.Log(note)
+			phase.Notes = append(phase.Notes, note)
+			if drift > 10 || drift < -10 {
+				phase.Notes = append(phase.Notes, fmt.Sprintf("WARNING: canary drift at seq %d exceeds 10%% — cross-session comparison degraded per plan §2.1", seq))
+			}
+		}
+	}
+	optim.UseScalarAdamW = false
+
+	// ---- (b) X2 Metal block step: sync dispatch, then async (R6) ----
+	rng := rand.New(rand.NewSource(taSeed))
+	block := newTABlock(rng, maxSeq)
+	block.toMetal(g.MetalDev())
+	for _, seq := range seqs {
+		rowSync := taBlockStepBenchMetal(t, block, rng, seq, warm, runs)
+		rowSync.Note = "X2 kernels (K1+K4 GPU, K7 vectorized AdamW), per-op sync dispatch"
+		phase.BlockStepResults = append(phase.BlockStepResults, rowSync)
+
+		g.SetMetalAsync(true)
+		w0 := metal.SyncWaits.Load()
+		rowAsync := taBlockStepBenchMetal(t, block, rng, seq, warm, runs)
+		w1 := metal.SyncWaits.Load()
+		g.SetMetalAsync(false)
+		stepsRun := int64(warm + runs + 1) // +1: the live-graph forward
+		rowAsync.Note = fmt.Sprintf("X2 kernels, R6 async dispatch (commit-without-wait); ~%d host sync waits per step", (w1-w0)/stepsRun)
+		phase.BlockStepResults = append(phase.BlockStepResults, rowAsync)
+		asyncRows[seq] = rowAsync
+
+		t.Logf("X2 block step seq=%d: sync=%.1fms async=%.1fms (sync-async delta %.1fms; ~%d waits/step in async)",
+			seq, rowSync.TotalMs, rowAsync.TotalMs, rowSync.TotalMs-rowAsync.TotalMs, (w1-w0)/stepsRun)
+		if base := x0Block(seq); base != nil {
+			note := fmt.Sprintf("block-step speedup vs X0 at seq %d: sync %.2fx, async %.2fx (%.0fms -> %.0fms/%.0fms)",
+				seq, base.TotalMs/rowSync.TotalMs, base.TotalMs/rowAsync.TotalMs, base.TotalMs, rowSync.TotalMs, rowAsync.TotalMs)
+			t.Log(note)
+			phase.Notes = append(phase.Notes, note)
+		}
+		for _, cn := range phase.CanaryResults {
+			if cn.Seq == seq {
+				note := fmt.Sprintf("same-session speedup vs CPU canary at seq %d: sync %.2fx, async %.2fx",
+					seq, cn.TotalMs/rowSync.TotalMs, cn.TotalMs/rowAsync.TotalMs)
+				t.Log(note)
+				phase.Notes = append(phase.Notes, note)
+			}
+		}
+
+		liveGB := rowAsync.LiveGraphAfterFwdMB / 1024
+		blockParams := 0
+		for _, p := range block.parameters() {
+			blockParams += p.Size()
+		}
+		weightsGB := float64(taVocab)*taHidden*4/1e9 + float64(taLayers*blockParams)*4/1e9
+		extrap := liveGB*taLayers + weightsGB
+		phase.MemoryResults = append(phase.MemoryResults, taMemoryRow{
+			Seq: seq, LiveGraphBlockGB: liveGB, Extrapolated28GB: extrap,
+			WeightsF32GB: weightsGB, FitsIn24GBUnifiedMem: extrap < 22,
+			Note: "as X1K1 (live graph includes Metal buffer bytes); K4 backward recomputes sigma(x) instead of caching a (seq,3072) sigmoid slice per layer",
+		})
+	}
+
+	// ---- (c) dispatch-counter gate ----
+	if !smoke {
+		seq := 1024
+		x := taSeedTensor(rng, 1.0, seq, taHidden).ToMetal(g.MetalDev())
+		x.SetRequiresGrad(true)
+		opt := optim.NewAdamW(block.parameters(), 1e-4, 0.01)
+		opt.ZeroGrad()
+		x.ZeroGrad()
+		g.ResetMetalDispatchCounts()
+		g.Sum(block.forward(x, true)).Backward()
+		c := g.ReadMetalDispatchCounts()
+		t.Logf("dispatch counts (1 block fwd+bwd, seq %d): matmul=%d batched=%d softmax=%d silu=%d", seq, c.MatMul, c.BatchedMatMul, c.SoftmaxKernel, c.SiluKernel)
+		if c.MatMul < 21 {
+			t.Errorf("X2 gate: expected >=21 MPS matmul dispatches, got %d", c.MatMul)
+		}
+		if c.BatchedMatMul < 6 {
+			t.Errorf("X2 gate: expected >=6 MPS batched-matmul dispatches, got %d", c.BatchedMatMul)
+		}
+		if c.SoftmaxKernel < 2 {
+			t.Errorf("X2 gate: expected >=2 fused-softmax dispatches, got %d", c.SoftmaxKernel)
+		}
+		if c.SiluKernel < 2 {
+			t.Errorf("X2 gate (K4): expected >=2 SwiGLU kernel dispatches (fwd+bwd), got %d", c.SiluKernel)
+		}
+		phase.DispatchCounts = map[string]int64{
+			"block_fwd_bwd_seq1024_mps_matmul":         c.MatMul,
+			"block_fwd_bwd_seq1024_mps_batched_matmul": c.BatchedMatMul,
+			"block_fwd_bwd_seq1024_softmax_kernel":     c.SoftmaxKernel,
+			"block_fwd_bwd_seq1024_silu_kernel":        c.SiluKernel,
+		}
+		g.ResetMetalDispatchCounts()
+
+		// K2 CE dispatch check at a real shape.
+		logits := taSeedTensor(rng, 1.0, 256, taVocab).ToMetal(g.MetalDev())
+		logits.SetRequiresGrad(true)
+		tgt := g.Zeros(256, 1)
+		g.CrossEntropyLoss(logits, tgt).Backward()
+		c = g.ReadMetalDispatchCounts()
+		if c.CEKernel < 2 {
+			t.Errorf("X2 gate (K2): expected 2 CE kernel dispatches (fwd+bwd), got %d", c.CEKernel)
+		}
+		phase.DispatchCounts["ce_fwd_bwd_seq256_ce_kernel"] = c.CEKernel
+		g.ResetMetalDispatchCounts()
+		taFlushGC()
+
+		// R6 per-dispatch round-trip microbench.
+		syncMs, asyncMs := taDispatchOverheadBench(t)
+		note := fmt.Sprintf("R6 dispatch microbench (200x vec_mul on 1k elements): sync %.3f ms/dispatch vs async %.3f ms/dispatch -> waitUntilCompleted round trip ~%.3f ms recovered per GPU-GPU dispatch", syncMs, asyncMs, syncMs-asyncMs)
+		t.Log(note)
+		phase.Notes = append(phase.Notes, note)
+	}
+}
+
+// taX2TailsPart runs the tail benches, full-step estimates, gate
+// verdicts, and the results-JSON append (sections d–g of the X2
+// bench).
+func taX2TailsPart(t *testing.T, phase *taPhase, rng *rand.Rand, seqs []int, warm, runs int, smoke bool, x0Block func(int) *taBlockRow, x0Full func(int) *taFullStepRow, asyncRows map[int]taBlockRow, outPath, machine string) {
+	t.Helper()
+
+	// ---- (d) tails ----
+	for _, seq := range seqs {
+		tails := taTailBench(t, rng, seq, warm, runs)
+		for i := range tails {
+			switch tails[i].Name {
+			case "lm_head_matmul_fwd_bwd":
+				tails[i] = taLmHeadBenchMetal(t, rng, seq, warm, runs)
+			case "cross_entropy_fwd_bwd":
+				// Keep the (now K2-vectorized) CPU row under a new name…
+				tails[i].Name = "cross_entropy_fwd_bwd_cpu_vectorized"
+				tails[i].Note = "K2 CPU fallback: Accelerate acc_vexp path with saved logsumexp (no double softmax)"
+			}
+		}
+		phase.TailResults = append(phase.TailResults, tails...)
+		// …and measure the Metal CE as the primary row.
+		phase.TailResults = append(phase.TailResults, taCEBenchMetal(t, rng, seq, warm, runs))
+		taFlushGC()
+	}
+	adamwScalar := taAdamWTableBenchScalar(t, rng, warm, runs)
+	phase.TailResults = append(phase.TailResults, adamwScalar)
+	adamwTail := taAdamWTableBench(t, rng, warm, runs)
+	adamwTail.Note = "K7 vectorized Accelerate step (acc_adamw_step)"
+	phase.TailResults = append(phase.TailResults, adamwTail)
+	k7note := fmt.Sprintf("K7 gate: 172M-param AdamW step %.0fms (scalar) -> %.0fms (vectorized), %.2fx", adamwScalar.TotalMs, adamwTail.TotalMs, adamwScalar.TotalMs/adamwTail.TotalMs)
+	t.Log(k7note)
+	phase.Notes = append(phase.Notes, k7note)
+
+	// ---- (e) full-step estimate (async block rows + Metal CE + K7 AdamW) ----
+	for _, seq := range seqs {
+		blockMs := asyncRows[seq].TotalMs
+		est := taFullStepRow{Seq: seq, BlockMs: blockMs, Blocks28Ms: blockMs * taLayers, OptimizerTableMs: adamwTail.TotalMs}
+		for _, tr := range phase.TailResults {
+			if tr.Seq != seq {
+				continue
+			}
+			switch tr.Name {
+			case "embedding_fwd_bwd":
+				est.EmbeddingMs = tr.TotalMs
+			case "lm_head_matmul_fwd_bwd":
+				est.LmHeadMs = tr.TotalMs
+			case "cross_entropy_fwd_bwd":
+				est.LossMs = tr.TotalMs
+			}
+		}
+		est.TotalMs = est.Blocks28Ms + est.EmbeddingMs + est.LmHeadMs + est.LossMs + est.OptimizerTableMs
+		est.TotalS = est.TotalMs / 1000
+		phase.FullStepEstimate = append(phase.FullStepEstimate, est)
+		t.Logf("X2 full-step estimate seq=%d: 28xblock=%.0fms embed=%.0fms lm_head=%.0fms ce=%.0fms adamw=%.0fms -> %.2fs",
+			seq, est.Blocks28Ms, est.EmbeddingMs, est.LmHeadMs, est.LossMs, est.OptimizerTableMs, est.TotalS)
+		if base := x0Full(seq); base != nil {
+			note := fmt.Sprintf("full-step speedup vs X0 at seq %d: %.2fx (%.1fs -> %.1fs)", seq, base.TotalMs/est.TotalMs, base.TotalS, est.TotalS)
+			t.Log(note)
+			phase.Notes = append(phase.Notes, note)
+		}
+	}
+
+	// ---- (f) gate verdicts ----
+	if !smoke {
+		if base := x0Block(1024); base != nil {
+			sp := base.TotalMs / asyncRows[1024].TotalMs
+			verdict := "NOT MET"
+			if sp >= 3.5 {
+				verdict = "MET"
+			}
+			phase.Notes = append(phase.Notes, fmt.Sprintf("GATE (plan X2, block >=3.5x at seq 1024 vs X0): %s (%.2fx)", verdict, sp))
+		}
+		if base := x0Full(1024); base != nil {
+			for _, est := range phase.FullStepEstimate {
+				if est.Seq == 1024 {
+					sp := base.TotalMs / est.TotalMs
+					verdict := "NOT MET"
+					if sp >= 4.0 {
+						verdict = "MET"
+					}
+					phase.Notes = append(phase.Notes, fmt.Sprintf("GATE (plan X2, full-step >=4x at seq 1024 vs X0): %s (%.2fx)", verdict, sp))
+				}
+			}
+		}
+	}
+
+	if smoke {
+		t.Log("TA_SMOKE set — skipping doc/training_accel_results.json write")
+		return
+	}
+
+	// ---- (g) append the phase row ----
+	var file taResultsFile
+	if raw, err := os.ReadFile(outPath); err == nil {
+		if err := json.Unmarshal(raw, &file); err != nil {
+			t.Fatalf("existing %s is not valid JSON: %v", outPath, err)
+		}
+	}
+	file.Hardware = machine
+	file.Phases = append(file.Phases, *phase)
+	raw, err := json.MarshalIndent(file, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal results: %v", err)
+	}
+	if err := os.WriteFile(outPath, append(raw, '\n'), 0o644); err != nil {
+		t.Fatalf("write %s: %v", outPath, err)
+	}
+	t.Logf("results appended to %s (phase %s)", outPath, phase.Phase)
+}

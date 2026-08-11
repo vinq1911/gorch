@@ -27,6 +27,7 @@ func ELU(a *Tensor) *Tensor {
 	// its rounding depends on the call's array length, which broke
 	// bit-exact streaming == offline parity.
 	out := Zeros(a.shape...)
+	syncForCPU(a)
 	accelerate.ELU(a.data, out.data)
 
 	if GradEnabled() && a.requiresGrad {
@@ -36,6 +37,7 @@ func ELU(a *Tensor) *Tensor {
 			inputs: []*Tensor{a},
 			backward: func(grad *Tensor) []*Tensor {
 				dx := Zeros(a.shape...)
+				syncForCPU(a, grad)
 				for i, x := range a.data {
 					if x > 0 {
 						dx.data[i] = grad.data[i]
@@ -72,6 +74,7 @@ func GELUErf(a *Tensor) *Tensor {
 	// of scalar float64 math.Erf); the backward pass below keeps the
 	// float64 formulation.
 	out := Zeros(a.shape...)
+	syncForCPU(a)
 	accelerate.GELUErf(a.data, out.data)
 
 	if GradEnabled() && a.requiresGrad {
@@ -81,6 +84,7 @@ func GELUErf(a *Tensor) *Tensor {
 			inputs: []*Tensor{a},
 			backward: func(grad *Tensor) []*Tensor {
 				dx := Zeros(a.shape...)
+				syncForCPU(a, grad)
 				for i, x := range a.data {
 					xf := float64(x)
 					cdf := 0.5 * (1 + math.Erf(xf*invSqrt2))

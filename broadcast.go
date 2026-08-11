@@ -120,6 +120,7 @@ func AddB(a, b *Tensor) *Tensor {
 
 	outShape := broadcastShapes(a.shape, b.shape)
 
+	syncForCPU(a, b)
 	aData := broadcastData(a.data, a.shape, outShape)
 	bData := broadcastData(b.data, b.shape, outShape)
 
@@ -135,6 +136,7 @@ func AddB(a, b *Tensor) *Tensor {
 			name:   "AddB",
 			inputs: []*Tensor{a, b},
 			backward: func(grad *Tensor) []*Tensor {
+				syncForCPU(grad)
 				ga := NewTensor(reduceBroadcastGrad(grad.data, grad.shape, a.shape), a.shape...)
 				gb := NewTensor(reduceBroadcastGrad(grad.data, grad.shape, b.shape), b.shape...)
 				return []*Tensor{ga, gb}
@@ -155,6 +157,7 @@ func SubB(a, b *Tensor) *Tensor {
 	}
 
 	outShape := broadcastShapes(a.shape, b.shape)
+	syncForCPU(a, b)
 	aData := broadcastData(a.data, a.shape, outShape)
 	bData := broadcastData(b.data, b.shape, outShape)
 
@@ -169,6 +172,7 @@ func SubB(a, b *Tensor) *Tensor {
 		out.gradFn = &GradFn{
 			name: "SubB", inputs: []*Tensor{a, b},
 			backward: func(grad *Tensor) []*Tensor {
+				syncForCPU(grad)
 				ga := tensorLike(reduceBroadcastGrad(grad.data, grad.shape, a.shape), a.shape, grad, a)
 				negGrad := make([]float32, len(grad.data))
 				for i, v := range grad.data {
@@ -194,6 +198,7 @@ func MulB(a, b *Tensor) *Tensor {
 
 	outShape := broadcastShapes(a.shape, b.shape)
 	outSize := numElements(outShape)
+	syncForCPU(a, b)
 	aData := broadcastData(a.data, a.shape, outShape)
 	bData := broadcastData(b.data, b.shape, outShape)
 
@@ -209,6 +214,7 @@ func MulB(a, b *Tensor) *Tensor {
 			name: "MulB", inputs: []*Tensor{a, b},
 			backward: func(grad *Tensor) []*Tensor {
 				// d(a*b)/da = b*grad, reduced to a's shape
+				syncForCPU(grad)
 				gaData := make([]float32, outSize)
 				gbData := make([]float32, outSize)
 				for i := range gaData {
@@ -236,6 +242,7 @@ func DivB(a, b *Tensor) *Tensor {
 
 	outShape := broadcastShapes(a.shape, b.shape)
 	outSize := numElements(outShape)
+	syncForCPU(a, b)
 	aData := broadcastData(a.data, a.shape, outShape)
 	bData := broadcastData(b.data, b.shape, outShape)
 
@@ -250,6 +257,7 @@ func DivB(a, b *Tensor) *Tensor {
 		out.gradFn = &GradFn{
 			name: "DivB", inputs: []*Tensor{a, b},
 			backward: func(grad *Tensor) []*Tensor {
+				syncForCPU(grad)
 				gaData := make([]float32, outSize)
 				gbData := make([]float32, outSize)
 				for i := range gaData {

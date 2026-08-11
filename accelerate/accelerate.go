@@ -70,6 +70,11 @@ func VScale(A []float32, scalar float32, out []float32) {
 	C.acc_vscale(ptr(A), C.float(scalar), ptr(out), C.int64_t(len(A)))
 }
 
+// VSAdd computes out = A + scalar element-wise.
+func VSAdd(A []float32, scalar float32, out []float32) {
+	C.acc_vsadd(ptr(A), C.float(scalar), ptr(out), C.int64_t(len(A)))
+}
+
 // Sum returns the sum of all elements.
 func Sum(A []float32) float32 {
 	var out C.float
@@ -127,4 +132,47 @@ func Tanh(A, out []float32) {
 // Sigmoid computes out = 1/(1+exp(-A)) element-wise.
 func Sigmoid(A, out []float32) {
 	C.acc_vsigmoid(ptr(A), ptr(out), C.int(len(A)))
+}
+
+// ---------- SiLU / SwiGLU (plan 0009 K4) ----------
+
+// SiLU computes out = A*sigmoid(A) element-wise. out must not alias A.
+func SiLU(A, out []float32) {
+	C.acc_vsilu(ptr(A), ptr(out), C.int(len(A)))
+}
+
+// SiLUBwd computes dx = G*s*(1+X*(1-s)) with s = sigmoid(X).
+// dx must not alias X or G.
+func SiLUBwd(X, G, dx []float32) {
+	C.acc_vsilu_bwd(ptr(X), ptr(G), ptr(dx), C.int(len(X)))
+}
+
+// SwiGLU computes out = gate*sigmoid(gate)*val element-wise.
+// out must not alias gate or val.
+func SwiGLU(gate, val, out []float32) {
+	C.acc_vswiglu(ptr(gate), ptr(val), ptr(out), C.int(len(gate)))
+}
+
+// SwiGLUBwd computes, with s = sigmoid(gate):
+//
+//	dGate = G*val*s*(1+gate*(1-s))
+//	dVal  = G*gate*s
+//
+// dGate/dVal must not alias the inputs or each other.
+func SwiGLUBwd(gate, val, G, dGate, dVal []float32) {
+	C.acc_vswiglu_bwd(ptr(gate), ptr(val), ptr(G), ptr(dGate), ptr(dVal), C.int(len(gate)))
+}
+
+// ---------- fused optimizer step (plan 0009 K7) ----------
+
+// AdamWStep applies one AdamW update over n contiguous f32 elements,
+// in-place on p, m, v. bc1/bc2 are the bias-correction denominators
+// (1 − βᵗ). Exact same math as the scalar reference in optim/adamw.go.
+func AdamWStep(p, g, m, v []float32, lr, beta1, beta2, eps, wd, bc1, bc2 float32) {
+	if len(p) == 0 {
+		return
+	}
+	C.acc_adamw_step(ptr(p), ptr(g), ptr(m), ptr(v), C.int64_t(len(p)),
+		C.float(lr), C.float(beta1), C.float(beta2), C.float(eps),
+		C.float(wd), C.float(bc1), C.float(bc2))
 }

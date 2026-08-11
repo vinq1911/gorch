@@ -110,6 +110,7 @@ func CausalSoftmax(x *Tensor, heads, qSeq int, scale float32) *Tensor {
 // attention_ops.go, without materializing any intermediate.
 func causalSoftmaxForwardCPU(x *Tensor, rows, cols, qSeq int, scale float32) *Tensor {
 	out := ZerosLike(x, x.shape...)
+	syncForCPU(x)
 	offset := cols - qSeq
 	for r := 0; r < rows; r++ {
 		i := r % qSeq
@@ -143,6 +144,7 @@ func causalSoftmaxForwardCPU(x *Tensor, rows, cols, qSeq int, scale float32) *Te
 // ops.go Softmax backward closure math times the fused scale.
 func softmaxBackwardCPU(y, grad *Tensor, rows, cols int, scale float32) *Tensor {
 	dx := zerosLikeEither(y.shape, grad, y)
+	syncForCPU(y, grad)
 	for r := 0; r < rows; r++ {
 		yrow := y.data[r*cols : (r+1)*cols]
 		grow := grad.data[r*cols : (r+1)*cols]
