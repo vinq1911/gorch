@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 
@@ -407,14 +409,34 @@ func TestQwenGenerateGreedy(t *testing.T) {
 }
 
 // TestQwenParisE2E — text-level end-to-end gate ("What is the capital
-// of France?" through the chat template must contain "Paris").
+// of France?" through the chat template must contain "Paris"). The
+// full M0 stitch: Go tokenizer + ChatML renderer + ported model +
+// KV-cached greedy generation, no HF anywhere.
 func TestQwenParisE2E(t *testing.T) {
-	// The tokenizer + chat template are the sibling M0 deliverable
-	// (model/qwen_tokenizer.go, model/qwen/chat_template.go); this
-	// package works at the token-id level. Stitch after both halves
-	// merge: render the ChatML prompt, Generate with Greedy, decode,
-	// assert the answer contains "Paris".
-	t.Skip("plan 0008 M0: text-level e2e lands with the tokenizer half; token-id parity + generation covered above")
+	m := loadModelCached(t)
+	tokDir := os.Getenv("QWEN_TOKENIZER_DIR")
+	if tokDir == "" {
+		path, err := FindCheckpoint()
+		if err != nil {
+			t.Skipf("qwen checkpoint not available: %v", err)
+		}
+		tokDir = filepath.Dir(path)
+	}
+	tok, err := model.LoadQwenTokenizer(tokDir)
+	if err != nil {
+		t.Skipf("qwen tokenizer files not available: %v", err)
+	}
+
+	prompt := RenderChatML([]Message{
+		{Role: "user", Content: "What is the capital of France? Answer in one short sentence."},
+	}, true)
+	ids := tok.Encode(prompt)
+	out := Generate(m, ids, Greedy(48))
+	answer := tok.Decode(out[len(ids):])
+	t.Logf("answer: %q", answer)
+	if !strings.Contains(answer, "Paris") {
+		t.Fatalf("greedy answer does not mention Paris: %q", answer)
+	}
 }
 
 // TestQwenLoadRejectsBadConfig — fail-loudly loader discipline: a
