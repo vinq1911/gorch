@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
+	"strings"
 
 	g "github.com/vinq1911/gorch"
 	"github.com/vinq1911/gorch/model"
@@ -113,6 +115,19 @@ func Download(dir string) (string, error) {
 // attention biases) stay frozen zeros. All parameters are frozen after
 // loading — M1's LoRA/vocab-extension owns trainable state.
 func Load(path string, cfg Config) (*Model, error) {
+	return load(path, cfg, false)
+}
+
+// LoadTruncated loads only the first cfg.NumLayers layers from a
+// deeper checkpoint, ignoring the deeper layers' tensors — the
+// depth-truncation knob for the M1 overfit gate (plan 0008 §3.6):
+// training MECHANICS are gated on real pretrained weights even when a
+// full-depth CPU run would be impractically slow.
+func LoadTruncated(path string, cfg Config) (*Model, error) {
+	return load(path, cfg, true)
+}
+
+func load(path string, cfg Config, allowDeeperLayers bool) (*Model, error) {
 	sf, err := model.LoadSafetensors(path)
 	if err != nil {
 		return nil, err
@@ -198,6 +213,9 @@ func Load(path string, cfg Config) (*Model, error) {
 
 	for _, name := range sf.Names {
 		if !consumed[name] {
+			if allowDeeperLayers && isDeeperLayerKey(name, cfg.NumLayers) {
+				continue
+			}
 			problems = append(problems, "unexpected key: "+name)
 		}
 	}
@@ -224,6 +242,22 @@ func LoadPretrained() (*Model, error) {
 		return nil, err
 	}
 	return Load(path, Qwen3_0_6B())
+}
+
+// isDeeperLayerKey reports whether name addresses a transformer layer
+// at index ≥ numLayers ("model.layers.{i}.…").
+func isDeeperLayerKey(name string, numLayers int) bool {
+	const p = "model.layers."
+	if !strings.HasPrefix(name, p) {
+		return false
+	}
+	rest := name[len(p):]
+	dot := strings.IndexByte(rest, '.')
+	if dot <= 0 {
+		return false
+	}
+	idx, err := strconv.Atoi(rest[:dot])
+	return err == nil && idx >= numLayers
 }
 
 func shapeEq(a, b []int) bool {

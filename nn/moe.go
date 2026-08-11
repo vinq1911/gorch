@@ -40,6 +40,11 @@ type Expert struct {
 	Wgate *Linear // dim → expertDim
 	Wup   *Linear // dim → expertDim
 	Wdown *Linear // expertDim → dim
+
+	// Optional LoRA adapters (plan 0008 §3.1); nil = plain projection.
+	LoRAGate *LoRALinear
+	LoRAUp   *LoRALinear
+	LoRADown *LoRALinear
 }
 
 // NewExpert builds one SwiGLU expert.
@@ -53,10 +58,10 @@ func NewExpert(dim, expertDim int) *Expert {
 
 // Forward applies the SwiGLU FFN to x: (M, dim) → (M, dim).
 func (e *Expert) Forward(x *g.Tensor) *g.Tensor {
-	gate := e.Wgate.Forward(x)
-	up := e.Wup.Forward(x)
+	gate := loraForward(e.LoRAGate, e.Wgate, x)
+	up := loraForward(e.LoRAUp, e.Wup, x)
 	hidden := g.SwiGLU(gate, up)
-	return e.Wdown.Forward(hidden)
+	return loraForward(e.LoRADown, e.Wdown, hidden)
 }
 
 // Parameters returns the three linear layers' weights+biases.
