@@ -18,4 +18,5 @@ as an ADR and mark the plan superseded.
 | `0005-quantization-serving.md` | int8/int4 quantization for serving large pretrained LLMs on memory-constrained Macs (parked unless serving is a stated goal) |
 | `0006-mimi-native-encoder.md` | Native Mimi audio-codec encoder inference in Go (Conv1d/ELU/axis reductions, WAV+resampler, SEANet+transformer port, streaming; RVQ optional) — removes Python from the audio feature pipeline |
 | `0007-mimi-native-decoder.md` | Native Mimi decoder in Go (ConvTranspose1d + streaming overlap-add; tokens → 24 kHz audio) — removes the reference Python decoder, the last non-Go step in the audio path |
+| `0008-qwen-voice-lora.md` | Port Qwen3-0.6B into gorch + LoRA chain-of-modality adaptation to Mimi tokens (listen/speak/chain) for a conversational voice-to-voice demo; training throughput gated on 0009 |
 | `0009-training-acceleration-execution.md` | Execution plan operationalizing 0002+0004 for the plan-0008 LoRA workload: GPU-resident autograd, ranked Metal kernel set, bf16 frozen path, Azure-codex kernel protocol; FA2 deferred with arithmetic |
