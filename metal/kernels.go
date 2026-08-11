@@ -431,6 +431,187 @@ kernel void cross_entropy_backward(device const float* x       [[buffer(0)]],
     }
 }
 
+// permute_copy / rope_apply / repeat_interleave_* / rmsnorm_dgamma /
+// col_sum — plan 0009 X2b (the block-step CPU residue: Permute copies,
+// RoPE, GQA KV expansion, RMSNorm dW host loop, Linear db loops). All
+// f32, hand-written from the exact CPU references (permute.go,
+// nn/rope.go, index_ops.go RepeatInterleave, rmsnorm_metal.go dW loop,
+// nn/gpu_backward.go linearDb); golden tests permute_metal_test.go,
+// nn/rope_metal_test.go, index_ops_metal_test.go,
+// nn/rmsnorm_metal_test.go, nn/gpu_backward_test.go.
+
+// permute_copy: generic N-D permute as a gather over the destination
+// index space — the GPU version of the permute.go walk. meta layout:
+// [nd, dstShape[0..nd-1], srcStrideForDstDim[0..nd-1]] where
+// srcStrideForDstDim[i] = srcStride[perm[i]]. One thread per output
+// element; rank ≤ 8 (driver-enforced).
+kernel void permute_copy(device const float* src  [[buffer(0)]],
+                         device const uint*  meta [[buffer(1)]],
+                         device float*       dst  [[buffer(2)]],
+                         uint id [[thread_position_in_grid]]) {
+    const uint nd = meta[0];
+    uint rem = id;
+    uint srcOff = 0;
+    for (uint i = nd; i > 0; i--) {
+        const uint d = i - 1;
+        const uint dim = meta[1 + d];
+        srcOff += (rem % dim) * meta[1 + nd + d];
+        rem /= dim;
+    }
+    dst[id] = src[srcOff];
+}
+
+// rope_apply: elementwise pair rotation with precomputed cos/sin
+// tables (uploaded once per RoPE module). dims = [outer, seqLen, half,
+// startPos, neox]; sign[0] = +1 for forward, −1 for backward (the
+// inverse rotation is the same rotation with sin negated, per
+// nn/rope.go). One thread per (outer, seq, half-lane) pair — each
+// thread writes both halves of its pair.
+kernel void rope_apply(device const float* x    [[buffer(0)]],
+                       device const float* cosT [[buffer(1)]],
+                       device const float* sinT [[buffer(2)]],
+                       device const uint*  dims [[buffer(3)]],
+                       device const float* sign [[buffer(4)]],
+                       device float*       out  [[buffer(5)]],
+                       uint id [[thread_position_in_grid]]) {
+    const uint seqLen   = dims[1];
+    const uint halfDim  = dims[2]; // "half" is a reserved MSL type name
+    const uint startPos = dims[3];
+    const uint neox     = dims[4];
+    const uint i = id % halfDim;
+    const uint t = id / halfDim;
+    const uint s = t % seqLen;
+    const uint rowOff = t * halfDim * 2;
+    const uint cs = (startPos + s) * halfDim + i;
+    const float c  = cosT[cs];
+    const float si = sinT[cs] * sign[0];
+    uint ia, ib;
+    if (neox == 0) { // Llama: pair x[i] with x[i + halfDim]
+        ia = rowOff + i;
+        ib = rowOff + halfDim + i;
+    } else {         // GPT-NeoX: interleaved pair (x[2i], x[2i+1])
+        ia = rowOff + 2 * i;
+        ib = rowOff + 2 * i + 1;
+    }
+    const float a = x[ia];
+    const float b = x[ib];
+    out[ia] = a * c - b * si;
+    out[ib] = a * si + b * c;
+}
+
+// repeat_interleave_fwd: (outer, K, inner) → (outer, K·n, inner) with
+// each of the K rows repeated n consecutive times (GQA KV-head
+// expansion). dims = [K, inner, n]. One thread per output element.
+kernel void repeat_interleave_fwd(device const float* src  [[buffer(0)]],
+                                  device const uint*  dims [[buffer(1)]],
+                                  device float*       dst  [[buffer(2)]],
+                                  uint id [[thread_position_in_grid]]) {
+    const uint K     = dims[0];
+    const uint inner = dims[1];
+    const uint n     = dims[2];
+    const uint i  = id % inner;
+    const uint t  = id / inner;   // (o, k, r) row index
+    const uint kn = t % (K * n);
+    const uint o  = t / (K * n);
+    const uint k  = kn / n;
+    dst[id] = src[(o * K + k) * inner + i];
+}
+
+// repeat_interleave_bwd: dx[o,k,i] = Σ_r grad[o, k·n+r, i] — sum the n
+// repeated rows back into the source row. One thread per source
+// element (n ≤ a few dozen in practice; the loop is tiny).
+kernel void repeat_interleave_bwd(device const float* grad [[buffer(0)]],
+                                  device const uint*  dims [[buffer(1)]],
+                                  device float*       dx   [[buffer(2)]],
+                                  uint id [[thread_position_in_grid]]) {
+    const uint K     = dims[0];
+    const uint inner = dims[1];
+    const uint n     = dims[2];
+    const uint i = id % inner;
+    const uint t = id / inner;   // (o, k) row index
+    const uint k = t % K;
+    const uint o = t / K;
+    const uint base = (o * K * n + k * n) * inner + i;
+    float acc = 0.0f;
+    for (uint r = 0; r < n; r++) {
+        acc += grad[base + r * inner];
+    }
+    dx[id] = acc;
+}
+
+// rmsnorm_dgamma: per-COLUMN reduction over rows (plan 0009 K5) —
+// dW[j] = Σ_i grad[i,j]·x[i,j]·invRMS[i]. One threadgroup of 256 per
+// column, lanes stride the rows, tree reduction in threadgroup memory.
+// Removes the host dW loop in RMSNormBackwardDXMetal.
+kernel void rmsnorm_dgamma(device const float* x      [[buffer(0)]],
+                           device const float* grad   [[buffer(1)]],
+                           device const float* invRMS [[buffer(2)]],
+                           device const uint*  dims   [[buffer(3)]],
+                           device float*       dw     [[buffer(4)]],
+                           uint tid    [[thread_index_in_threadgroup]],
+                           uint group  [[threadgroup_position_in_grid]],
+                           uint tgSize [[threads_per_threadgroup]])
+{
+    const uint M = dims[0];
+    const uint N = dims[1];
+    if (group >= N) return;
+
+    threadgroup float scratch[256];
+
+    float partial = 0.0f;
+    for (uint i = tid; i < M; i += tgSize) {
+        partial += grad[i * N + group] * x[i * N + group] * invRMS[i];
+    }
+    scratch[tid] = partial;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (uint stride = tgSize >> 1; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            scratch[tid] += scratch[tid + stride];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    if (tid == 0) {
+        dw[group] = scratch[0];
+    }
+}
+
+// col_sum: out[j] = Σ_i a[i,j] over an (M, N) matrix — the Linear db
+// reduction (plan 0009 X2b bias/db item). Same per-column threadgroup
+// template as rmsnorm_dgamma.
+kernel void col_sum(device const float* a    [[buffer(0)]],
+                    device const uint*  dims [[buffer(1)]],
+                    device float*       out  [[buffer(2)]],
+                    uint tid    [[thread_index_in_threadgroup]],
+                    uint group  [[threadgroup_position_in_grid]],
+                    uint tgSize [[threads_per_threadgroup]])
+{
+    const uint M = dims[0];
+    const uint N = dims[1];
+    if (group >= N) return;
+
+    threadgroup float scratch[256];
+
+    float partial = 0.0f;
+    for (uint i = tid; i < M; i += tgSize) {
+        partial += a[i * N + group];
+    }
+    scratch[tid] = partial;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (uint stride = tgSize >> 1; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            scratch[tid] += scratch[tid + stride];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    if (tid == 0) {
+        out[group] = scratch[0];
+    }
+}
+
 kernel void softmax_backward(device const float* y      [[buffer(0)]],
                              device const float* grad   [[buffer(1)]],
                              device const uint*  dims   [[buffer(2)]],

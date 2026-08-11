@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"math/rand"
 	"sort"
+
+	"github.com/vinq1911/gorch/metal"
 )
 
 // Gather selects rows from a 2-D tensor by integer indices.
@@ -273,14 +275,22 @@ func RepeatInterleave(src *Tensor, n int) *Tensor {
 		inner *= srcShape[i]
 	}
 
-	out := ZerosLike(src, dstShape...)
-	syncForCPU(src)
-	for o := 0; o < outer; o++ {
-		for k := 0; k < K; k++ {
-			srcOff := (o*K + k) * inner
-			for r := 0; r < n; r++ {
-				dstOff := (o*K*n + k*n + r) * inner
-				copy(out.data[dstOff:dstOff+inner], src.data[srcOff:srcOff+inner])
+	var out *Tensor
+	if src.buf != nil && repeatPipelinesReady() {
+		// Metal path (plan 0009 X2b): expand on GPU, chain stays
+		// resident — the GQA KV expansion no longer forces a host sync.
+		out = repeatInterleaveMetal(src, dstShape, K, inner, n, "repeat_interleave_fwd",
+			numElements(dstShape))
+	} else {
+		out = ZerosLike(src, dstShape...)
+		syncForCPU(src)
+		for o := 0; o < outer; o++ {
+			for k := 0; k < K; k++ {
+				srcOff := (o*K + k) * inner
+				for r := 0; r < n; r++ {
+					dstOff := (o*K*n + k*n + r) * inner
+					copy(out.data[dstOff:dstOff+inner], src.data[srcOff:srcOff+inner])
+				}
 			}
 		}
 	}
@@ -291,6 +301,10 @@ func RepeatInterleave(src *Tensor, n int) *Tensor {
 			name:   "RepeatInterleave",
 			inputs: []*Tensor{src},
 			backward: func(grad *Tensor) []*Tensor {
+				if grad.buf != nil && repeatPipelinesReady() {
+					return []*Tensor{repeatInterleaveMetal(grad, srcShape, K, inner, n,
+						"repeat_interleave_bwd", numElements(srcShape))}
+				}
 				dx := zerosLikeEither(srcShape, grad, src)
 				syncForCPU(grad)
 				for o := 0; o < outer; o++ {
@@ -308,5 +322,38 @@ func RepeatInterleave(src *Tensor, n int) *Tensor {
 			},
 		}
 	}
+	return out
+}
+
+// repeatPipelinesReady reports whether the repeat_interleave kernels
+// were compiled by InitMetal.
+func repeatPipelinesReady() bool {
+	if gpu == nil {
+		return false
+	}
+	if _, ok := gpu.pipelines["repeat_interleave_fwd"]; !ok {
+		return false
+	}
+	_, ok := gpu.pipelines["repeat_interleave_bwd"]
+	return ok
+}
+
+// repeatInterleaveMetal dispatches the fwd (expand) or bwd (sum-back)
+// repeat kernel over a Metal-resident tensor; threads = one per output
+// element.
+func repeatInterleaveMetal(src *Tensor, outShape []int, K, inner, n int, kernel string, threads int) *Tensor {
+	dev := gpu.Dev
+	out := ZerosOnMetal(dev, outShape...)
+
+	dimsBuf := dev.NewBuffer(3 * 4)
+	dims := dimsBuf.Uint32Slice()
+	dims[0] = uint32(K)
+	dims[1] = uint32(inner)
+	dims[2] = uint32(n)
+
+	gpu.Queue.Dispatch1D(gpu.pipe(kernel),
+		[]*metal.Buffer{src.buf, dimsBuf, out.buf}, threads)
+	metalRepeatDispatches.Add(1)
+	dimsBuf.Release()
 	return out
 }

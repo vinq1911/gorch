@@ -67,12 +67,16 @@ func (l *Linear) Forward(x *g.Tensor) *g.Tensor {
 		// GPU path: x @ W^T via MPS MatMulTransB
 		// x is (batch, in), W is (out, in), result is (batch, out)
 		out = g.MatMulTransB(x, l.Weight)
-		// Add bias — data is in unified memory, so CPU loop works on Metal buffer data
-		bData := l.Bias.Data()
-		outData := out.Data()
-		for i := 0; i < batch; i++ {
-			for j := 0; j < l.out; j++ {
-				outData[i*l.out+j] += bData[j]
+		// Bias add via the vec_bias_add kernel (plan 0009 X2b): the
+		// previous CPU loop read out.Data(), forcing a GPU sync per
+		// Linear forward. Fallback: vectorized vDSP through unified
+		// memory (Data() performs the required sync).
+		if !g.BiasAddInPlaceMetal(out, l.Bias) {
+			bData := l.Bias.Data()
+			outData := out.Data()
+			for i := 0; i < batch; i++ {
+				row := outData[i*l.out : (i+1)*l.out]
+				accelerate.VAdd(row, bData, row)
 			}
 		}
 	} else {

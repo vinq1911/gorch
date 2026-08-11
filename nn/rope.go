@@ -44,6 +44,11 @@ type RoPE struct {
 	// Precomputed (maxSeq, headDim/2) tables.
 	cos []float32
 	sin []float32
+
+	// Metal-resident copies of the tables, uploaded lazily on the
+	// first GPU apply (plan 0009 K6: "cos/sin uploaded once").
+	cosT *g.Tensor
+	sinT *g.Tensor
 }
 
 // RopeStyle selects the half-rotation convention.
@@ -137,12 +142,46 @@ func (r *RoPE) Apply(x *g.Tensor, startPos int) *g.Tensor {
 	}
 	half := headDim / 2
 
-	out := g.ZerosLike(x, shape...)
-	xData := x.Data()
+	out := r.rotate(x, outer, seqLen, half, startPos, +1, shape)
+
+	if g.GradEnabled() && x.RequiresGrad() {
+		out.SetRequiresGrad(true)
+		out.SetGradFn("RoPE", []*g.Tensor{x}, func(grad *g.Tensor) []*g.Tensor {
+			// Inverse rotation = forward rotation with sin negated.
+			return []*g.Tensor{r.rotate(grad, outer, seqLen, half, startPos, -1, shape)}
+		})
+	}
+	return out
+}
+
+// metalTables lazily uploads the cos/sin tables to Metal (once per
+// RoPE module — plan 0009 K6).
+func (r *RoPE) metalTables() (cosT, sinT *g.Tensor) {
+	if r.cosT == nil {
+		dev := g.MetalDev()
+		r.cosT = g.NewTensorOnMetal(dev, r.cos, len(r.cos))
+		r.sinT = g.NewTensorOnMetal(dev, r.sin, len(r.sin))
+	}
+	return r.cosT, r.sinT
+}
+
+// rotate applies the pair rotation to src (no autograd wiring): sign
+// +1 is the forward rotation, −1 the inverse (backward on the upstream
+// grad). Dispatches the rope_apply Metal kernel when src is Metal-
+// resident (plan 0009 K6), otherwise runs the CPU loops.
+func (r *RoPE) rotate(src *g.Tensor, outer, seqLen, half, startPos int, sign float32, shape []int) *g.Tensor {
+	if src.IsOnMetal() && g.RoPEMetalReady() {
+		cosT, sinT := r.metalTables()
+		return g.RoPEApplyMetal(src, cosT, sinT, outer, seqLen, half, startPos,
+			r.Style == RopeGPTNeoX, sign)
+	}
+
+	out := g.ZerosLike(src, shape...)
+	srcData := src.Data()
 	outData := out.Data()
 	cos := r.cos
 	sin := r.sin
-
+	headDim := half * 2
 	rowStride := headDim
 	seqStride := seqLen * headDim
 
@@ -154,10 +193,10 @@ func (r *RoPE) Apply(x *g.Tensor, startPos int) *g.Tensor {
 				rowOff := outerOff + s*rowStride
 				cs := (startPos + s) * half
 				for i := 0; i < half; i++ {
-					a := xData[rowOff+i]
-					b := xData[rowOff+half+i]
+					a := srcData[rowOff+i]
+					b := srcData[rowOff+half+i]
 					c := cos[cs+i]
-					si := sin[cs+i]
+					si := sin[cs+i] * sign
 					outData[rowOff+i] = a*c - b*si
 					outData[rowOff+half+i] = a*si + b*c
 				}
@@ -170,60 +209,15 @@ func (r *RoPE) Apply(x *g.Tensor, startPos int) *g.Tensor {
 				rowOff := outerOff + s*rowStride
 				cs := (startPos + s) * half
 				for i := 0; i < half; i++ {
-					a := xData[rowOff+2*i]
-					b := xData[rowOff+2*i+1]
+					a := srcData[rowOff+2*i]
+					b := srcData[rowOff+2*i+1]
 					c := cos[cs+i]
-					si := sin[cs+i]
+					si := sin[cs+i] * sign
 					outData[rowOff+2*i] = a*c - b*si
 					outData[rowOff+2*i+1] = a*si + b*c
 				}
 			}
 		}
-	}
-
-	if g.GradEnabled() && x.RequiresGrad() {
-		out.SetRequiresGrad(true)
-		out.SetGradFn("RoPE", []*g.Tensor{x}, func(grad *g.Tensor) []*g.Tensor {
-			dx := g.ZerosLike(x, shape...)
-			gData := grad.Data()
-			dxData := dx.Data()
-			switch r.Style {
-			case RopeLlama:
-				for o := 0; o < outer; o++ {
-					outerOff := o * seqStride
-					for s := 0; s < seqLen; s++ {
-						rowOff := outerOff + s*rowStride
-						cs := (startPos + s) * half
-						for i := 0; i < half; i++ {
-							ga := gData[rowOff+i]
-							gb := gData[rowOff+half+i]
-							c := cos[cs+i]
-							si := sin[cs+i]
-							// inverse rotation: sin → -sin
-							dxData[rowOff+i] = ga*c + gb*si
-							dxData[rowOff+half+i] = -ga*si + gb*c
-						}
-					}
-				}
-			case RopeGPTNeoX:
-				for o := 0; o < outer; o++ {
-					outerOff := o * seqStride
-					for s := 0; s < seqLen; s++ {
-						rowOff := outerOff + s*rowStride
-						cs := (startPos + s) * half
-						for i := 0; i < half; i++ {
-							ga := gData[rowOff+2*i]
-							gb := gData[rowOff+2*i+1]
-							c := cos[cs+i]
-							si := sin[cs+i]
-							dxData[rowOff+2*i] = ga*c + gb*si
-							dxData[rowOff+2*i+1] = -ga*si + gb*c
-						}
-					}
-				}
-			}
-			return []*g.Tensor{dx}
-		})
 	}
 	return out
 }

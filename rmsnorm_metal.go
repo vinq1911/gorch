@@ -102,14 +102,12 @@ func RMSNormForwardMetal(x, weight *Tensor, eps float32) (y, invRMS *Tensor) {
 }
 
 // RMSNormBackwardDXMetal runs rmsnorm_dx on (x, weight, grad, invRMS)
-// → dx of shape (M, N). Companion to RMSNormForwardMetal — invRMS
-// must come from the matching forward call. dW (the gradient with
-// respect to the per-feature weight) is computed on the host: the
-// reduction is across rows and doesn't fit the per-row threadgroup
-// template; folding it into a second per-column kernel is the
-// follow-up plan-0004 work.
+// → dx of shape (M, N), and rmsnorm_dgamma (plan 0009 K5, one
+// threadgroup per column) → dW of shape (N,). The pre-K5 host dW loop
+// forced a full GPU sync in every RMSNorm backward; both grads are now
+// Metal-backed and the chain stays resident.
 //
-// Returns a Metal-backed dx tensor and a CPU-resident dW tensor.
+// Returns Metal-backed dx and dW tensors.
 func RMSNormBackwardDXMetal(x, weight, grad, invRMS *Tensor) (dx, dw *Tensor) {
 	if !rmsnormPipelinesReady() {
 		panic("gorch: RMSNormBackwardDXMetal called before InitMetal compiled rmsnorm pipelines")
@@ -142,8 +140,6 @@ func RMSNormBackwardDXMetal(x, weight, grad, invRMS *Tensor) (dx, dw *Tensor) {
 		M,
 		rmsnormThreadgroupSize,
 	)
-	dimsBuf.Release()
-
 	dx = &Tensor{
 		dtype: Float32,
 		data:  dxBuf.FloatSlice(),
@@ -151,20 +147,16 @@ func RMSNormBackwardDXMetal(x, weight, grad, invRMS *Tensor) (dx, dw *Tensor) {
 		buf:   dxBuf,
 	}
 
-	// dW = sum over i of grad[i,j] * x[i,j] * invRMS[i] for each j.
-	// Read from unified memory; no copy — but wait for pending async
-	// GPU work (incl. the rmsnorm_dx dispatch above) first.
-	syncForCPU(x, grad, invRMS)
-	dwData := make([]float32, N)
-	xData := x.data
-	gData := grad.data
-	invData := invRMS.data
-	for i := 0; i < M; i++ {
-		inv := invData[i]
-		for j := 0; j < N; j++ {
-			dwData[j] += gData[i*N+j] * xData[i*N+j] * inv
-		}
-	}
-	dw = NewTensor(dwData, N)
+	// dW[j] = Σ_i grad[i,j] * x[i,j] * invRMS[i] — the K5 per-column
+	// kernel (one threadgroup of 256 per column, rows strided).
+	dw = ZerosOnMetal(dev, N)
+	gpu.Queue.Dispatch1DThreadgroups(
+		gpu.Pipe("rmsnorm_dgamma"),
+		[]*metal.Buffer{x.buf, grad.buf, invRMS.buf, dimsBuf, dw.buf},
+		N,
+		rmsnormThreadgroupSize,
+	)
+	metalColReduceDispatches.Add(1)
+	dimsBuf.Release()
 	return dx, dw
 }

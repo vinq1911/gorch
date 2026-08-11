@@ -4,6 +4,7 @@ package nn
 
 import (
 	g "github.com/vinq1911/gorch"
+	"github.com/vinq1911/gorch/accelerate"
 )
 
 // gpuLinearDx computes dL/dx = grad @ W on Metal.
@@ -27,17 +28,20 @@ func gpuLinearDw(grad, x *g.Tensor, batch, in, out int) *g.Tensor {
 	return g.MatMulTransA(grad, x)
 }
 
-// linearDb sums grad along the batch dimension to give dL/db.
-// Always runs on CPU — the bias has at most a few thousand elements,
-// dispatching to GPU for that is pure overhead.
+// linearDb sums grad along the batch dimension to give dL/db. When
+// grad is Metal-resident the col_sum kernel runs on GPU (plan 0009
+// X2b: the CPU db loop forced a full GPU sync per Linear backward —
+// the cost was never the few thousand output floats, it was the
+// waitUntilCompleted round trip its Data() read implied). CPU fallback
+// is a vectorized vDSP row accumulation.
 func linearDb(grad *g.Tensor, batch, out int) *g.Tensor {
+	if db := g.ColSumMetal(grad, batch, out); db != nil {
+		return db
+	}
 	gData := grad.Data()
 	dbData := make([]float32, out)
 	for i := 0; i < batch; i++ {
-		row := gData[i*out : (i+1)*out]
-		for j, v := range row {
-			dbData[j] += v
-		}
+		accelerate.VAdd(dbData, gData[i*out:(i+1)*out], dbData)
 	}
 	return g.NewTensor(dbData, 1, out)
 }

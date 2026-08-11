@@ -1654,6 +1654,349 @@ func taX2BlocksPart(t *testing.T, phase *taPhase, seqs []int, warm, runs, maxSeq
 	}
 }
 
+// ==================== Phase X2b (plan 0009 §3.3 K5/K6 + permute/repeat/bias residue) ====================
+//
+// Third X2 wave: the block-step CPU residue identified by the X2
+// profile — permute_copy Metal kernel (Permute was 25% of residual CPU
+// samples), K6 rope_apply fwd+bwd kernels with once-uploaded cos/sin
+// tables, repeat_interleave fwd/bwd kernels (GQA KV expansion), K5
+// rmsnorm_dgamma (removes the RMSNorm backward host loop), col_sum for
+// Linear db + vec_bias_add for the Linear forward bias, and GPU-
+// resident grad accumulation (vec_add in place). Together these retire
+// nearly all of the ~21 residual host sync points per async block
+// step. Bench structure mirrors X2 (canary, sync/async block rows,
+// dispatch gates, tails, full-step estimates, X2 gate verdicts) plus
+// Metal-resident per-op rows for the three newly-kerneled classes so
+// per-item deltas vs the X0 per-op table are direct.
+
+func TestTrainAccelBenchX2b(t *testing.T) {
+	if _, err := g.InitMetal(); err != nil {
+		t.Skipf("metal not available: %v", err)
+	}
+	smoke := os.Getenv("TA_SMOKE") != ""
+	part := os.Getenv("TA_X2_PART") // "", "blocks", "tails"
+	seqs := []int{512, 1024, 1500}
+	warm, runs := taWarmups, taRuns
+	if smoke {
+		seqs = []int{64}
+		warm, runs = 1, 2
+	}
+	maxSeq := seqs[len(seqs)-1] + 1
+
+	machine := taSysctl("machdep.cpu.brand_string")
+	loadAvg := taSysctl("vm.loadavg")
+	t.Logf("machine=%s load=%s", machine, loadAvg)
+
+	outPath := "../doc/training_accel_results.json"
+	x0 := taX0Phase(t, outPath)
+	if x0 == nil && !smoke {
+		t.Fatal("X0-baseline phase not found in results JSON — X2b speedups need the baseline")
+	}
+	x0Block := func(seq int) *taBlockRow {
+		if x0 == nil {
+			return nil
+		}
+		for i := range x0.BlockStepResults {
+			if x0.BlockStepResults[i].Seq == seq {
+				return &x0.BlockStepResults[i]
+			}
+		}
+		return nil
+	}
+	x0Full := func(seq int) *taFullStepRow {
+		if x0 == nil {
+			return nil
+		}
+		for i := range x0.FullStepEstimate {
+			if x0.FullStepEstimate[i].Seq == seq {
+				return &x0.FullStepEstimate[i]
+			}
+		}
+		return nil
+	}
+
+	phase := taPhase{
+		Phase:            "X2b",
+		Date:             time.Now().Format("2006-01-02"),
+		Machine:          machine,
+		MemoryGB:         24,
+		GoVersion:        runtime.Version(),
+		LoadAvgAtStart:   loadAvg,
+		MetalInitialized: true,
+		Geometry: map[string]any{
+			"hidden": taHidden, "q_heads": taQHeads, "kv_heads": taKVHeads,
+			"head_dim": taHeadDim, "q_dim": taQDim, "kv_dim": taKVDim,
+			"ffn_inter": taInter, "layers": taLayers,
+			"vocab": taVocab, "base_vocab": taBaseVocab, "mimi_vocab": taMimiVocab,
+			"rope_theta": taRopeTheta, "rms_norm_eps": 1e-6,
+		},
+		Notes: []string{
+			"X2b third wave: permute_copy kernel (generic N-D gather), K6 rope_apply fwd+bwd (cos/sin uploaded once per module), repeat_interleave_fwd/bwd (GQA KV expansion), K5 rmsnorm_dgamma per-column reduction, col_sum Linear db + vec_bias_add Linear forward bias, and GPU-resident grad accumulation (in-place vec_add)",
+			"block_step_results carry TWO rows per seq: per-op sync dispatch and async dispatch; the X2b configuration (and full_step_estimate) uses the better of the two per seq — async wins at seq <=1024 (~1 residual host wait/step), sync wins at seq 1500 where async reproducibly regresses (fresh-buffer zero-fill traffic vs saturated GPU memory bandwidth)",
+			"canary caveat: the CPU canary chain is NOT byte-identical to X0's code — X2b also sped up the CPU Permute (contiguous run copies when the innermost dim is unpermuted) and the CPU linearDb (vDSP row accumulation), on top of X2's vectorized SwiGLU/CE; the canary forces scalar AdamW but cannot un-vectorize those. Treat the canary as approximate load calibration",
+			"per_op_results here are Metal-resident micro-benches of the three newly-kerneled classes (permute_reshape, rope, rmsnorm) at exact workload shapes — compare directly against the X0 per-op rows of the same names",
+		},
+	}
+
+	rng := rand.New(rand.NewSource(taSeed))
+	asyncRows := map[int]taBlockRow{}
+
+	if part != "tails" {
+		taX2bBlocksPart(t, &phase, seqs, warm, runs, maxSeq, smoke, x0Block, asyncRows)
+	}
+
+	if part == "blocks" && !smoke {
+		raw, err := json.MarshalIndent(phase, "", "  ")
+		if err != nil {
+			t.Fatalf("marshal partial phase: %v", err)
+		}
+		if err := os.WriteFile(taX2PartialPath(), append(raw, '\n'), 0o644); err != nil {
+			t.Fatalf("write partial phase: %v", err)
+		}
+		t.Logf("TA_X2_PART=blocks: partial phase written to %s — run again with TA_X2_PART=tails", taX2PartialPath())
+		return
+	}
+	if part == "tails" && !smoke {
+		raw, err := os.ReadFile(taX2PartialPath())
+		if err != nil {
+			t.Fatalf("TA_X2_PART=tails needs the blocks part first: %v", err)
+		}
+		if err := json.Unmarshal(raw, &phase); err != nil {
+			t.Fatalf("partial phase unmarshal: %v", err)
+		}
+		// Reconstruct the per-seq winner (better of sync/async — the
+		// X2b configuration, see taX2bBlocksPart).
+		for _, r := range phase.BlockStepResults {
+			if best, ok := asyncRows[r.Seq]; !ok || r.TotalMs < best.TotalMs {
+				asyncRows[r.Seq] = r
+			}
+		}
+		if len(asyncRows) == 0 {
+			t.Fatal("partial phase has no block rows")
+		}
+	}
+
+	taX2TailsPart(t, &phase, rng, seqs, warm, runs, smoke, x0Block, x0Full, asyncRows, outPath, machine)
+}
+
+// taX2bBlocksPart: canary, sync/async Metal block steps, the extended
+// dispatch-counter gate (incl. the X2b kernels), and Metal-resident
+// per-op rows for the newly-kerneled classes.
+func taX2bBlocksPart(t *testing.T, phase *taPhase, seqs []int, warm, runs, maxSeq int, smoke bool, x0Block func(int) *taBlockRow, asyncRows map[int]taBlockRow) {
+	t.Helper()
+	// ---- (a) baseline canary: CPU, X0 op chain (scalar AdamW forced) ----
+	rngC := rand.New(rand.NewSource(taSeed))
+	blockC := newTABlock(rngC, maxSeq)
+	optim.UseScalarAdamW = true
+	for _, seq := range seqs {
+		row := taBlockStepBench(t, blockC, rngC, seq, warm, runs)
+		row.Note = "CPU f32 canary (X0 op chain re-run under this session's load; scalar AdamW forced; CPU Permute/SwiGLU/CE are wave-vectorized — see notes)"
+		phase.CanaryResults = append(phase.CanaryResults, row)
+		if base := x0Block(seq); base != nil {
+			drift := (row.TotalMs - base.TotalMs) / base.TotalMs * 100
+			note := fmt.Sprintf("canary seq=%d: %.0fms vs X0 %.0fms (drift %+.1f%%)", seq, row.TotalMs, base.TotalMs, drift)
+			t.Log(note)
+			phase.Notes = append(phase.Notes, note)
+			if drift > 10 || drift < -10 {
+				phase.Notes = append(phase.Notes, fmt.Sprintf("WARNING: canary drift at seq %d exceeds 10%% — cross-session comparison degraded per plan §2.1", seq))
+			}
+		}
+	}
+	optim.UseScalarAdamW = false
+
+	// ---- (b) X2b Metal block step: sync dispatch, then async ----
+	rng := rand.New(rand.NewSource(taSeed))
+	block := newTABlock(rng, maxSeq)
+	block.toMetal(g.MetalDev())
+	for _, seq := range seqs {
+		rowSync := taBlockStepBenchMetal(t, block, rng, seq, warm, runs)
+		rowSync.Note = "X2b kernels (K1+K4+K5+K6+permute/repeat/bias GPU, K7 vectorized AdamW), per-op sync dispatch"
+		phase.BlockStepResults = append(phase.BlockStepResults, rowSync)
+
+		g.SetMetalAsync(true)
+		w0 := metal.SyncWaits.Load()
+		rowAsync := taBlockStepBenchMetal(t, block, rng, seq, warm, runs)
+		w1 := metal.SyncWaits.Load()
+		g.SetMetalAsync(false)
+		stepsRun := int64(warm + runs + 1) // +1: the live-graph forward
+		rowAsync.Note = fmt.Sprintf("X2b kernels, R6 async dispatch (commit-without-wait); ~%d host sync waits per step", (w1-w0)/stepsRun)
+		phase.BlockStepResults = append(phase.BlockStepResults, rowAsync)
+		// The X2b configuration picks the better dispatch mode per seq
+		// (async wins at seq <=1024; at seq 1500 async reproducibly
+		// regresses — large fresh-buffer zero-fill traffic competes with
+		// saturated GPU memory bandwidth — so sync wins there). Both
+		// rows are recorded; the full-step estimate uses the winner.
+		if rowSync.TotalMs < rowAsync.TotalMs {
+			asyncRows[seq] = rowSync
+		} else {
+			asyncRows[seq] = rowAsync
+		}
+
+		t.Logf("X2b block step seq=%d: sync=%.1fms async=%.1fms (delta %.1fms; ~%d waits/step in async)",
+			seq, rowSync.TotalMs, rowAsync.TotalMs, rowSync.TotalMs-rowAsync.TotalMs, (w1-w0)/stepsRun)
+		if base := x0Block(seq); base != nil {
+			note := fmt.Sprintf("block-step speedup vs X0 at seq %d: sync %.2fx, async %.2fx (%.0fms -> %.0fms/%.0fms)",
+				seq, base.TotalMs/rowSync.TotalMs, base.TotalMs/rowAsync.TotalMs, base.TotalMs, rowSync.TotalMs, rowAsync.TotalMs)
+			t.Log(note)
+			phase.Notes = append(phase.Notes, note)
+		}
+		for _, cn := range phase.CanaryResults {
+			if cn.Seq == seq {
+				note := fmt.Sprintf("same-session speedup vs CPU canary at seq %d: sync %.2fx, async %.2fx",
+					seq, cn.TotalMs/rowSync.TotalMs, cn.TotalMs/rowAsync.TotalMs)
+				t.Log(note)
+				phase.Notes = append(phase.Notes, note)
+			}
+		}
+
+		liveGB := rowAsync.LiveGraphAfterFwdMB / 1024
+		blockParams := 0
+		for _, p := range block.parameters() {
+			blockParams += p.Size()
+		}
+		weightsGB := float64(taVocab)*taHidden*4/1e9 + float64(taLayers*blockParams)*4/1e9
+		extrap := liveGB*taLayers + weightsGB
+		phase.MemoryResults = append(phase.MemoryResults, taMemoryRow{
+			Seq: seq, LiveGraphBlockGB: liveGB, Extrapolated28GB: extrap,
+			WeightsF32GB: weightsGB, FitsIn24GBUnifiedMem: extrap < 22,
+			Note: "as X2 (live graph includes Metal buffer bytes)",
+		})
+	}
+
+	// ---- (b2) Metal-resident per-op rows for the newly-kerneled classes ----
+	perOpSeqs := []int{1024, 1500}
+	if smoke {
+		perOpSeqs = seqs
+	}
+	for _, seq := range perOpSeqs {
+		rows := taPerOpBenchMetalX2b(t, block, rng, seq, warm, runs)
+		phase.PerOpResults = append(phase.PerOpResults, rows...)
+		for _, o := range rows {
+			t.Logf("per-op(metal) seq=%d %-18s %8.1f ms/step  [fwd %.1f + bwd %.1f ms x%d]",
+				seq, o.Op, o.PerStepMs, o.FwdMs, o.BwdMs, o.CountPerStep)
+		}
+	}
+
+	// ---- (c) dispatch-counter gate ----
+	if !smoke {
+		seq := 1024
+		x := taSeedTensor(rng, 1.0, seq, taHidden).ToMetal(g.MetalDev())
+		x.SetRequiresGrad(true)
+		opt := optim.NewAdamW(block.parameters(), 1e-4, 0.01)
+		opt.ZeroGrad()
+		x.ZeroGrad()
+		g.ResetMetalDispatchCounts()
+		g.Sum(block.forward(x, true)).Backward()
+		c := g.ReadMetalDispatchCounts()
+		t.Logf("dispatch counts (1 block fwd+bwd, seq %d): matmul=%d batched=%d softmax=%d silu=%d permute=%d rope=%d repeat=%d colreduce=%d biasadd=%d",
+			seq, c.MatMul, c.BatchedMatMul, c.SoftmaxKernel, c.SiluKernel, c.PermuteKernel, c.RopeKernel, c.RepeatKernel, c.ColReduce, c.BiasAdd)
+		if c.MatMul < 21 {
+			t.Errorf("X2b gate: expected >=21 MPS matmul dispatches, got %d", c.MatMul)
+		}
+		if c.BatchedMatMul < 6 {
+			t.Errorf("X2b gate: expected >=6 MPS batched-matmul dispatches, got %d", c.BatchedMatMul)
+		}
+		if c.SoftmaxKernel < 2 {
+			t.Errorf("X2b gate: expected >=2 fused-softmax dispatches, got %d", c.SoftmaxKernel)
+		}
+		if c.SiluKernel < 2 {
+			t.Errorf("X2b gate (K4): expected >=2 SwiGLU kernel dispatches, got %d", c.SiluKernel)
+		}
+		// X2b kernels: 4 fwd + 4 bwd permutes, 2+2 RoPE, 2+2 repeats,
+		// 4 dgamma + 7 db col_sums, 7 forward bias adds.
+		if c.PermuteKernel < 8 {
+			t.Errorf("X2b gate: expected >=8 permute_copy dispatches, got %d", c.PermuteKernel)
+		}
+		if c.RopeKernel < 4 {
+			t.Errorf("X2b gate (K6): expected >=4 rope_apply dispatches, got %d", c.RopeKernel)
+		}
+		if c.RepeatKernel < 4 {
+			t.Errorf("X2b gate: expected >=4 repeat_interleave dispatches, got %d", c.RepeatKernel)
+		}
+		if c.ColReduce < 11 {
+			t.Errorf("X2b gate (K5+db): expected >=11 col-reduction dispatches (4 dgamma + 7 db), got %d", c.ColReduce)
+		}
+		if c.BiasAdd < 7 {
+			t.Errorf("X2b gate: expected >=7 vec_bias_add dispatches, got %d", c.BiasAdd)
+		}
+		phase.DispatchCounts = map[string]int64{
+			"block_fwd_bwd_seq1024_mps_matmul":         c.MatMul,
+			"block_fwd_bwd_seq1024_mps_batched_matmul": c.BatchedMatMul,
+			"block_fwd_bwd_seq1024_softmax_kernel":     c.SoftmaxKernel,
+			"block_fwd_bwd_seq1024_silu_kernel":        c.SiluKernel,
+			"block_fwd_bwd_seq1024_permute_kernel":     c.PermuteKernel,
+			"block_fwd_bwd_seq1024_rope_kernel":        c.RopeKernel,
+			"block_fwd_bwd_seq1024_repeat_kernel":      c.RepeatKernel,
+			"block_fwd_bwd_seq1024_colreduce_kernel":   c.ColReduce,
+			"block_fwd_bwd_seq1024_biasadd_kernel":     c.BiasAdd,
+		}
+		g.ResetMetalDispatchCounts()
+		taFlushGC()
+	}
+}
+
+// taPerOpBenchMetalX2b measures the three newly-kerneled op classes
+// with Metal-resident inputs at exact workload shapes — rows named to
+// match the X0 per-op table for direct per-item deltas.
+func taPerOpBenchMetalX2b(t *testing.T, block *taBlock, rng *rand.Rand, seq, warm, runs int) []taOpRow {
+	t.Helper()
+	dev := g.MetalDev()
+	var rows []taOpRow
+	add := func(op, shape string, fwd, bwd float64) {
+		rows = append(rows, taOpRow{Op: op, Seq: seq, Shape: shape,
+			FwdMs: fwd, BwdMs: bwd, CountPerStep: taLayers, PerStepMs: (fwd + bwd) * taLayers})
+	}
+
+	// permute_reshape (Metal): the block's full permute/repeat traffic.
+	q2 := taSeedTensor(rng, 1.0, seq, taQDim).ToMetal(dev)
+	q2.SetRequiresGrad(true)
+	k2 := taSeedTensor(rng, 1.0, seq, taKVDim).ToMetal(dev)
+	k2.SetRequiresGrad(true)
+	v2 := taSeedTensor(rng, 1.0, seq, taKVDim).ToMetal(dev)
+	v2.SetRequiresGrad(true)
+	ao := taSeedTensor(rng, 1.0, taQHeads, seq, taHeadDim).ToMetal(dev)
+	ao.SetRequiresGrad(true)
+	group := taQHeads / taKVHeads
+	fwd, bwd := taBenchOp(warm, runs, []*g.Tensor{q2, k2, v2, ao}, func() *g.Tensor {
+		qh := g.Permute(q2.Reshape(seq, taQHeads, taHeadDim), []int{1, 0, 2})
+		kh := g.Permute(k2.Reshape(seq, taKVHeads, taHeadDim), []int{1, 0, 2})
+		vh := g.Permute(v2.Reshape(seq, taKVHeads, taHeadDim), []int{1, 0, 2})
+		kr := g.RepeatInterleave(kh.Reshape(taKVHeads, 1, seq*taHeadDim), group)
+		vr := g.RepeatInterleave(vh.Reshape(taKVHeads, 1, seq*taHeadDim), group)
+		cc := g.Permute(ao, []int{1, 0, 2}).Reshape(seq, taQDim)
+		return taSumScalars(g.Sum(qh), g.Sum(kr), g.Sum(vr), g.Sum(cc))
+	})
+	add("permute_reshape", fmt.Sprintf("3 head-splits + 2 kv-repeats + 1 concat at seq %d (Metal)", seq), fwd, bwd)
+
+	// rope (Metal): Q (16,seq,128) + K (8,seq,128).
+	rq := taSeedTensor(rng, 1.0, taQHeads, seq, taHeadDim).ToMetal(dev)
+	rq.SetRequiresGrad(true)
+	rk := taSeedTensor(rng, 1.0, taKVHeads, seq, taHeadDim).ToMetal(dev)
+	rk.SetRequiresGrad(true)
+	fwd, bwd = taBenchOp(warm, runs, []*g.Tensor{rq, rk}, func() *g.Tensor {
+		return taSumScalars(g.Sum(block.rope.Apply(rq, 0)), g.Sum(block.rope.Apply(rk, 0)))
+	})
+	add("rope", fmt.Sprintf("(16,%d,128) + (8,%d,128) (Metal)", seq, seq), fwd, bwd)
+
+	// rmsnorm (Metal): 2 block norms + q_norm + k_norm — dgamma now on GPU.
+	nx := taSeedTensor(rng, 1.0, seq, taHidden).ToMetal(dev)
+	nx.SetRequiresGrad(true)
+	nq := taSeedTensor(rng, 1.0, taQHeads*seq, taHeadDim).ToMetal(dev)
+	nq.SetRequiresGrad(true)
+	nk := taSeedTensor(rng, 1.0, taKVHeads*seq, taHeadDim).ToMetal(dev)
+	nk.SetRequiresGrad(true)
+	leaves := append([]*g.Tensor{nx, nq, nk}, block.parameters()...)
+	fwd, bwd = taBenchOp(warm, runs, leaves, func() *g.Tensor {
+		return taSumScalars(
+			g.Sum(block.attnNorm.Forward(nx)), g.Sum(block.ffnNorm.Forward(nx)),
+			g.Sum(block.qNorm.Forward(nq)), g.Sum(block.kNorm.Forward(nk)))
+	})
+	add("rmsnorm", fmt.Sprintf("2x(%d,1024) + (%d,128) + (%d,128) (Metal, K5 dgamma)", seq, taQHeads*seq, taKVHeads*seq), fwd, bwd)
+
+	taFlushGC()
+	return rows
+}
+
 // taX2TailsPart runs the tail benches, full-step estimates, gate
 // verdicts, and the results-JSON append (sections d–g of the X2
 // bench).

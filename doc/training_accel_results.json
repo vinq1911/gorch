@@ -1208,6 +1208,453 @@
         "bench executed as two processes (TA_X2_PART=blocks then TA_X2_PART=tails, temp-file phase handoff): the single full-length process was reproducibly SIGKILLed at ~110s wall in this session's environment (no jetsam/log trace, 74% memory free at kill time; isolated tails and a 150s CPU burner both survive) \u2014 see the harness comment",
         "async block rows: the fwd/bwd segment split is approximate (the forward timestamp is taken before pending GPU work completes; the optimizer's Data() read fences the total, which is exact)"
       ]
+    },
+    {
+      "phase": "X2b",
+      "date": "2026-08-11",
+      "machine": "Apple M4",
+      "memory_gb": 24,
+      "go_version": "go1.26.0",
+      "load_avg_at_start": "{ 6.23 4.64 7.67 }",
+      "metal_initialized": true,
+      "geometry": {
+        "base_vocab": 151936,
+        "ffn_inter": 3072,
+        "head_dim": 128,
+        "hidden": 1024,
+        "kv_dim": 1024,
+        "kv_heads": 8,
+        "layers": 28,
+        "mimi_vocab": 16384,
+        "q_dim": 2048,
+        "q_heads": 16,
+        "rms_norm_eps": 1e-06,
+        "rope_theta": 1000000,
+        "vocab": 168320
+      },
+      "block_step_results": [
+        {
+          "seq": 512,
+          "warmups": 2,
+          "runs": 5,
+          "fwd_ms": 28.754791,
+          "bwd_ms": 51.345542,
+          "opt_ms": 9.33875,
+          "total_ms": 90.730292,
+          "total_min_ms": 81.537292,
+          "total_max_ms": 103.08325,
+          "alloc_per_step_mb": 0.02808,
+          "live_graph_after_fwd_mb": 111.212928,
+          "note": "X2b kernels (K1+K4+K5+K6+permute/repeat/bias GPU, K7 vectorized AdamW), per-op sync dispatch"
+        },
+        {
+          "seq": 512,
+          "warmups": 2,
+          "runs": 5,
+          "fwd_ms": 1.944708,
+          "bwd_ms": 11.0505,
+          "opt_ms": 21.506875,
+          "total_ms": 34.994583,
+          "total_min_ms": 33.895667,
+          "total_max_ms": 70.5435,
+          "alloc_per_step_mb": 0.02808,
+          "live_graph_after_fwd_mb": 111.212592,
+          "note": "X2b kernels, R6 async dispatch (commit-without-wait); ~1 host sync waits per step"
+        },
+        {
+          "seq": 1024,
+          "warmups": 2,
+          "runs": 5,
+          "fwd_ms": 47.665291,
+          "bwd_ms": 83.408917,
+          "opt_ms": 9.398542,
+          "total_ms": 141.739208,
+          "total_min_ms": 113.133625,
+          "total_max_ms": 204.776,
+          "alloc_per_step_mb": 0.02808,
+          "live_graph_after_fwd_mb": 289.523776,
+          "note": "X2b kernels (K1+K4+K5+K6+permute/repeat/bias GPU, K7 vectorized AdamW), per-op sync dispatch"
+        },
+        {
+          "seq": 1024,
+          "warmups": 2,
+          "runs": 5,
+          "fwd_ms": 3.744041,
+          "bwd_ms": 84.008708,
+          "opt_ms": 55.508791,
+          "total_ms": 142.0795,
+          "total_min_ms": 85.998917,
+          "total_max_ms": 406.797291,
+          "alloc_per_step_mb": 0.02808,
+          "live_graph_after_fwd_mb": 289.52376,
+          "note": "X2b kernels, R6 async dispatch (commit-without-wait); ~1 host sync waits per step"
+        },
+        {
+          "seq": 1500,
+          "warmups": 2,
+          "runs": 5,
+          "fwd_ms": 129.738792,
+          "bwd_ms": 153.609375,
+          "opt_ms": 12.318042,
+          "total_ms": 297.123875,
+          "total_min_ms": 224.2425,
+          "total_max_ms": 408.26775,
+          "alloc_per_step_mb": 0.028096,
+          "live_graph_after_fwd_mb": 515.494288,
+          "note": "X2b kernels (K1+K4+K5+K6+permute/repeat/bias GPU, K7 vectorized AdamW), per-op sync dispatch"
+        },
+        {
+          "seq": 1500,
+          "warmups": 2,
+          "runs": 5,
+          "fwd_ms": 72.796041,
+          "bwd_ms": 173.533458,
+          "opt_ms": 448.845666,
+          "total_ms": 759.392041,
+          "total_min_ms": 356.512125,
+          "total_max_ms": 894.172083,
+          "alloc_per_step_mb": 0.02808,
+          "live_graph_after_fwd_mb": 515.494288,
+          "note": "X2b kernels, R6 async dispatch (commit-without-wait); ~1 host sync waits per step"
+        }
+      ],
+      "baseline_canary_results": [
+        {
+          "seq": 512,
+          "warmups": 2,
+          "runs": 5,
+          "fwd_ms": 48.694083,
+          "bwd_ms": 49.261208,
+          "opt_ms": 37.078958,
+          "total_ms": 134.601,
+          "total_min_ms": 133.715375,
+          "total_max_ms": 139.204584,
+          "alloc_per_step_mb": 394.712944,
+          "live_graph_after_fwd_mb": 165.739016,
+          "note": "CPU f32 canary (X0 op chain re-run under this session's load; scalar AdamW forced; CPU Permute/SwiGLU/CE are wave-vectorized \u2014 see notes)"
+        },
+        {
+          "seq": 1024,
+          "warmups": 2,
+          "runs": 5,
+          "fwd_ms": 155.561375,
+          "bwd_ms": 122.662333,
+          "opt_ms": 36.77075,
+          "total_ms": 316.794083,
+          "total_min_ms": 313.690042,
+          "total_max_ms": 322.554333,
+          "alloc_per_step_mb": 1070.835568,
+          "live_graph_after_fwd_mb": 507.628024,
+          "note": "CPU f32 canary (X0 op chain re-run under this session's load; scalar AdamW forced; CPU Permute/SwiGLU/CE are wave-vectorized \u2014 see notes)"
+        },
+        {
+          "seq": 1500,
+          "warmups": 2,
+          "runs": 5,
+          "fwd_ms": 299.605542,
+          "bwd_ms": 216.834958,
+          "opt_ms": 37.096125,
+          "total_ms": 553.772167,
+          "total_min_ms": 552.399292,
+          "total_max_ms": 556.437083,
+          "alloc_per_step_mb": 2008.4796,
+          "live_graph_after_fwd_mb": 983.538184,
+          "note": "CPU f32 canary (X0 op chain re-run under this session's load; scalar AdamW forced; CPU Permute/SwiGLU/CE are wave-vectorized \u2014 see notes)"
+        }
+      ],
+      "tail_results": [
+        {
+          "name": "embedding_fwd_bwd",
+          "seq": 512,
+          "shape": "(512 ids) into (168320,1024)",
+          "fwd_ms": 0.158083,
+          "bwd_ms": 14.045375,
+          "total_ms": 14.203458,
+          "note": "backward allocates + scatters a dense (vocab, hidden) f32 grad (~690 MB)"
+        },
+        {
+          "name": "lm_head_matmul_fwd_bwd",
+          "seq": 512,
+          "shape": "(512,1024)@(1024,168320)",
+          "fwd_ms": 85.984083,
+          "bwd_ms": 301.583708,
+          "total_ms": 387.567791,
+          "note": "x and W Metal-resident: fwd + both grads on MPS (Sum seed grad Metal-resident via fullLike)"
+        },
+        {
+          "name": "cross_entropy_fwd_bwd_cpu_vectorized",
+          "seq": 512,
+          "shape": "(512,168320)",
+          "fwd_ms": 46.71675,
+          "bwd_ms": 53.227042,
+          "total_ms": 99.943792,
+          "note": "K2 CPU fallback: Accelerate acc_vexp path with saved logsumexp (no double softmax)"
+        },
+        {
+          "name": "cross_entropy_fwd_bwd",
+          "seq": 512,
+          "shape": "(512,168320)",
+          "fwd_ms": 6.902875,
+          "bwd_ms": 31.13875,
+          "total_ms": 38.041625,
+          "note": "K2 fused Metal kernels (logits Metal-resident): fwd logsumexp+target pick, bwd softmax-onehot from saved lse"
+        },
+        {
+          "name": "embedding_fwd_bwd",
+          "seq": 1024,
+          "shape": "(1024 ids) into (168320,1024)",
+          "fwd_ms": 0.520417,
+          "bwd_ms": 8.337,
+          "total_ms": 8.857417,
+          "note": "backward allocates + scatters a dense (vocab, hidden) f32 grad (~690 MB)"
+        },
+        {
+          "name": "lm_head_matmul_fwd_bwd",
+          "seq": 1024,
+          "shape": "(1024,1024)@(1024,168320)",
+          "fwd_ms": 216.177334,
+          "bwd_ms": 741.931791,
+          "total_ms": 958.109125,
+          "note": "x and W Metal-resident: fwd + both grads on MPS (Sum seed grad Metal-resident via fullLike)"
+        },
+        {
+          "name": "cross_entropy_fwd_bwd_cpu_vectorized",
+          "seq": 1024,
+          "shape": "(1024,168320)",
+          "fwd_ms": 92.006916,
+          "bwd_ms": 106.166834,
+          "total_ms": 198.17374999999998,
+          "note": "K2 CPU fallback: Accelerate acc_vexp path with saved logsumexp (no double softmax)"
+        },
+        {
+          "name": "cross_entropy_fwd_bwd",
+          "seq": 1024,
+          "shape": "(1024,168320)",
+          "fwd_ms": 16.711416,
+          "bwd_ms": 71.116084,
+          "total_ms": 87.8275,
+          "note": "K2 fused Metal kernels (logits Metal-resident): fwd logsumexp+target pick, bwd softmax-onehot from saved lse"
+        },
+        {
+          "name": "embedding_fwd_bwd",
+          "seq": 1500,
+          "shape": "(1500 ids) into (168320,1024)",
+          "fwd_ms": 1.273791,
+          "bwd_ms": 14.224208,
+          "total_ms": 15.497999,
+          "note": "backward allocates + scatters a dense (vocab, hidden) f32 grad (~690 MB)"
+        },
+        {
+          "name": "lm_head_matmul_fwd_bwd",
+          "seq": 1500,
+          "shape": "(1500,1024)@(1024,168320)",
+          "fwd_ms": 476.909792,
+          "bwd_ms": 839.14325,
+          "total_ms": 1316.053042,
+          "note": "x and W Metal-resident: fwd + both grads on MPS (Sum seed grad Metal-resident via fullLike)"
+        },
+        {
+          "name": "cross_entropy_fwd_bwd_cpu_vectorized",
+          "seq": 1500,
+          "shape": "(1500,168320)",
+          "fwd_ms": 135.391,
+          "bwd_ms": 162.772875,
+          "total_ms": 298.16387499999996,
+          "note": "K2 CPU fallback: Accelerate acc_vexp path with saved logsumexp (no double softmax)"
+        },
+        {
+          "name": "cross_entropy_fwd_bwd",
+          "seq": 1500,
+          "shape": "(1500,168320)",
+          "fwd_ms": 25.341333,
+          "bwd_ms": 146.512708,
+          "total_ms": 171.854041,
+          "note": "K2 fused Metal kernels (logits Metal-resident): fwd logsumexp+target pick, bwd softmax-onehot from saved lse"
+        },
+        {
+          "name": "adamw_172m_table_scalar",
+          "seq": 0,
+          "shape": "(168320,1024) = 172M params",
+          "fwd_ms": 0,
+          "bwd_ms": 0,
+          "total_ms": 396.095875,
+          "note": "pre-K7 scalar Go loop forced via optim.UseScalarAdamW (K7 gate baseline)"
+        },
+        {
+          "name": "adamw_172m_table",
+          "seq": 0,
+          "shape": "(168320,1024) = 172M params",
+          "fwd_ms": 0,
+          "bwd_ms": 0,
+          "total_ms": 68.606042,
+          "note": "K7 vectorized Accelerate step (acc_adamw_step)"
+        }
+      ],
+      "full_step_estimate": [
+        {
+          "seq": 512,
+          "block_ms": 34.994583,
+          "blocks_28_ms": 979.8483239999999,
+          "embedding_ms": 14.203458,
+          "lm_head_ms": 387.567791,
+          "loss_ms": 38.041625,
+          "optimizer_table_ms": 68.606042,
+          "total_ms": 1488.2672400000001,
+          "total_s": 1.48826724
+        },
+        {
+          "seq": 1024,
+          "block_ms": 141.739208,
+          "blocks_28_ms": 3968.697824,
+          "embedding_ms": 8.857417,
+          "lm_head_ms": 958.109125,
+          "loss_ms": 87.8275,
+          "optimizer_table_ms": 68.606042,
+          "total_ms": 5092.097908000001,
+          "total_s": 5.092097908
+        },
+        {
+          "seq": 1500,
+          "block_ms": 297.123875,
+          "blocks_28_ms": 8319.468499999999,
+          "embedding_ms": 15.497999,
+          "lm_head_ms": 1316.053042,
+          "loss_ms": 171.854041,
+          "optimizer_table_ms": 68.606042,
+          "total_ms": 9891.479623999998,
+          "total_s": 9.891479623999997
+        }
+      ],
+      "per_op_results": [
+        {
+          "op": "permute_reshape",
+          "seq": 1024,
+          "shape": "3 head-splits + 2 kv-repeats + 1 concat at seq 1024 (Metal)",
+          "fwd_ms": 16.289291,
+          "bwd_ms": 17.485042,
+          "count_per_step": 28,
+          "per_step_ms": 945.6813239999999,
+          "share_pct": 0
+        },
+        {
+          "op": "rope",
+          "seq": 1024,
+          "shape": "(16,1024,128) + (8,1024,128) (Metal)",
+          "fwd_ms": 4.336417,
+          "bwd_ms": 8.301583,
+          "count_per_step": 28,
+          "per_step_ms": 353.86400000000003,
+          "share_pct": 0
+        },
+        {
+          "op": "rmsnorm",
+          "seq": 1024,
+          "shape": "2x(1024,1024) + (16384,128) + (8192,128) (Metal, K5 dgamma)",
+          "fwd_ms": 8.280125,
+          "bwd_ms": 17.047042,
+          "count_per_step": 28,
+          "per_step_ms": 709.1606760000001,
+          "share_pct": 0
+        },
+        {
+          "op": "permute_reshape",
+          "seq": 1500,
+          "shape": "3 head-splits + 2 kv-repeats + 1 concat at seq 1500 (Metal)",
+          "fwd_ms": 19.142417,
+          "bwd_ms": 21.211667,
+          "count_per_step": 28,
+          "per_step_ms": 1129.914352,
+          "share_pct": 0
+        },
+        {
+          "op": "rope",
+          "seq": 1500,
+          "shape": "(16,1500,128) + (8,1500,128) (Metal)",
+          "fwd_ms": 5.966958,
+          "bwd_ms": 9.667667,
+          "count_per_step": 28,
+          "per_step_ms": 437.7695,
+          "share_pct": 0
+        },
+        {
+          "op": "rmsnorm",
+          "seq": 1500,
+          "shape": "2x(1500,1024) + (24000,128) + (12000,128) (Metal, K5 dgamma)",
+          "fwd_ms": 11.073291,
+          "bwd_ms": 35.419375,
+          "count_per_step": 28,
+          "per_step_ms": 1301.794648,
+          "share_pct": 0
+        }
+      ],
+      "memory_results": [
+        {
+          "seq": 512,
+          "live_graph_after_fwd_gb_one_block": 0.108606046875,
+          "extrapolated_28_layer_graph_gb": 5.4936500165,
+          "weights_f32_gb": 2.452680704,
+          "fits_24_gb": true,
+          "note": "as X2 (live graph includes Metal buffer bytes)"
+        },
+        {
+          "seq": 1024,
+          "live_graph_after_fwd_gb_one_block": 0.282738046875,
+          "extrapolated_28_layer_graph_gb": 10.3693460165,
+          "weights_f32_gb": 2.452680704,
+          "fits_24_gb": true,
+          "note": "as X2 (live graph includes Metal buffer bytes)"
+        },
+        {
+          "seq": 1500,
+          "live_graph_after_fwd_gb_one_block": 0.503412390625,
+          "extrapolated_28_layer_graph_gb": 16.5482276415,
+          "weights_f32_gb": 2.452680704,
+          "fits_24_gb": true,
+          "note": "as X2 (live graph includes Metal buffer bytes)"
+        }
+      ],
+      "dispatch_counts": {
+        "block_fwd_bwd_seq1024_biasadd_kernel": 7,
+        "block_fwd_bwd_seq1024_colreduce_kernel": 11,
+        "block_fwd_bwd_seq1024_mps_batched_matmul": 6,
+        "block_fwd_bwd_seq1024_mps_matmul": 21,
+        "block_fwd_bwd_seq1024_permute_kernel": 8,
+        "block_fwd_bwd_seq1024_repeat_kernel": 4,
+        "block_fwd_bwd_seq1024_rope_kernel": 4,
+        "block_fwd_bwd_seq1024_silu_kernel": 2,
+        "block_fwd_bwd_seq1024_softmax_kernel": 2
+      },
+      "pprof_top10": null,
+      "measured_ranking_seq1500": null,
+      "notes": [
+        "X2b third wave: permute_copy kernel (generic N-D gather), K6 rope_apply fwd+bwd (cos/sin uploaded once per module), repeat_interleave_fwd/bwd (GQA KV expansion), K5 rmsnorm_dgamma per-column reduction, col_sum Linear db + vec_bias_add Linear forward bias, and GPU-resident grad accumulation (in-place vec_add)",
+        "block_step_results carry TWO rows per seq: per-op sync dispatch and async dispatch; the X2b configuration (and full_step_estimate) uses the better of the two per seq \u2014 async wins at seq <=1024 (~1 residual host wait/step), sync wins at seq 1500 where async reproducibly regresses (fresh-buffer zero-fill traffic vs saturated GPU memory bandwidth)",
+        "canary caveat: the CPU canary chain is NOT byte-identical to X0's code \u2014 X2b also sped up the CPU Permute (contiguous run copies when the innermost dim is unpermuted) and the CPU linearDb (vDSP row accumulation), on top of X2's vectorized SwiGLU/CE; the canary forces scalar AdamW but cannot un-vectorize those. Treat the canary as approximate load calibration",
+        "per_op_results here are Metal-resident micro-benches of the three newly-kerneled classes (permute_reshape, rope, rmsnorm) at exact workload shapes \u2014 compare directly against the X0 per-op rows of the same names",
+        "canary seq=512: 135ms vs X0 201ms (drift -33.1%)",
+        "WARNING: canary drift at seq 512 exceeds 10% \u2014 cross-session comparison degraded per plan \u00a72.1",
+        "canary seq=1024: 317ms vs X0 463ms (drift -31.5%)",
+        "WARNING: canary drift at seq 1024 exceeds 10% \u2014 cross-session comparison degraded per plan \u00a72.1",
+        "canary seq=1500: 554ms vs X0 1163ms (drift -52.4%)",
+        "WARNING: canary drift at seq 1500 exceeds 10% \u2014 cross-session comparison degraded per plan \u00a72.1",
+        "block-step speedup vs X0 at seq 512: sync 2.22x, async 5.75x (201ms -> 91ms/35ms)",
+        "same-session speedup vs CPU canary at seq 512: sync 1.48x, async 3.85x",
+        "block-step speedup vs X0 at seq 1024: sync 3.26x, async 3.26x (463ms -> 142ms/142ms)",
+        "same-session speedup vs CPU canary at seq 1024: sync 2.24x, async 2.23x",
+        "block-step speedup vs X0 at seq 1500: sync 3.91x, async 1.53x (1163ms -> 297ms/759ms)",
+        "same-session speedup vs CPU canary at seq 1500: sync 1.86x, async 0.73x",
+        "K7 gate: 172M-param AdamW step 396ms (scalar) -> 69ms (vectorized), 5.77x",
+        "full-step speedup vs X0 at seq 512: 5.71x (8.5s -> 1.5s)",
+        "full-step speedup vs X0 at seq 1024: 3.56x (18.1s -> 5.1s)",
+        "full-step speedup vs X0 at seq 1500: 3.93x (38.9s -> 9.9s)",
+        "GATE (plan X2, block >=3.5x at seq 1024 vs X0): NOT MET (3.26x)",
+        "GATE (plan X2, full-step >=4x at seq 1024 vs X0): NOT MET (3.56x)",
+        "session validity: loadavg 4-8 with intermittent external agent load; canary drift vs X0 was -33/-31/-52% (i.e. today's machine runs the X0 chain FASTER than the recorded X0 rows, confirming X0/X1K1/X2's conclusion that the X0 baseline is load-inflated); vs-X0 ratios are therefore optimistic and the same-session canary is the honest basis",
+        "cross-run variance: the blocks part was run 3x during this session (loadavg 11->13->5); block step async at seq 1024 measured 120/146/142 ms (3.86x/3.17x/3.26x vs X0), sync at seq 1500 532/363/297 ms; the recorded rows are the quietest-load run; the seq-1500 async regression reproduced in all 3 runs (1274/582/759 ms vs sync 532/363/297)",
+        "seq-1500 async regression hypothesis: commit-without-wait lets the host allocate+zero-fill the next ops' large fresh buffers (144MB-class at seq 1500) while MPS saturates unified-memory bandwidth; at seq <=1024 the same overlap wins. Not further investigated this wave; the training loop should pick dispatch mode per seq (both rows recorded)",
+        "per_op_results caveat: the Metal micro-bench rows inherit the harness's Sum-loss + fullLike-seed overhead (CPU reductions over multi-MB Metal tensors), which dominates once the op itself is a ~free GPU kernel; the clean X2b signal is the block-step delta (X2 async 267ms -> X2b 142ms at seq 1024) plus the waits/step drop 21 -> 1",
+        "residual attribution at seq 1024 (block 142ms): the fwd+bwd chain is now fully GPU-dispatched (56 kernel/MPS dispatches, ~1 host wait); the remaining cost is MPS matmul compute at 1-5 GFMA shapes plus ~50 per-dispatch commits in sync sections - the next levers are X3 bf16 matmul and command-buffer batching, not more CPU-op kernels"
+      ]
     }
   ]
 }

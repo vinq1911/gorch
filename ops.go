@@ -20,6 +20,11 @@ var (
 	metalSoftmaxDispatches     atomic.Int64
 	metalSiluDispatches        atomic.Int64 // K4: vec_silu/vec_swiglu fwd+bwd
 	metalCEDispatches          atomic.Int64 // K2: cross_entropy fwd+bwd
+	metalPermuteDispatches     atomic.Int64 // X2b: permute_copy fwd+bwd
+	metalRopeDispatches        atomic.Int64 // X2b/K6: rope_apply fwd+bwd
+	metalRepeatDispatches      atomic.Int64 // X2b: repeat_interleave fwd+bwd
+	metalColReduceDispatches   atomic.Int64 // X2b/K5: rmsnorm_dgamma + col_sum
+	metalBiasAddDispatches     atomic.Int64 // X2b: vec_bias_add (Linear fwd bias)
 )
 
 // MetalDispatchCounts is a snapshot of how many times each GPU dispatch
@@ -31,6 +36,11 @@ type MetalDispatchCounts struct {
 	SoftmaxKernel int64 // fused causal-softmax fwd + softmax bwd kernel dispatches
 	SiluKernel    int64 // K4 SiLU/SwiGLU fwd + bwd kernel dispatches
 	CEKernel      int64 // K2 fused cross-entropy fwd + bwd kernel dispatches
+	PermuteKernel int64 // X2b permute_copy dispatches (fwd + grad)
+	RopeKernel    int64 // X2b/K6 rope_apply dispatches (fwd + grad)
+	RepeatKernel  int64 // X2b repeat_interleave fwd + bwd dispatches
+	ColReduce     int64 // X2b/K5 rmsnorm_dgamma + col_sum dispatches
+	BiasAdd       int64 // X2b vec_bias_add dispatches (Linear GPU forward)
 }
 
 // ReadMetalDispatchCounts returns the current dispatch counters.
@@ -41,6 +51,11 @@ func ReadMetalDispatchCounts() MetalDispatchCounts {
 		SoftmaxKernel: metalSoftmaxDispatches.Load(),
 		SiluKernel:    metalSiluDispatches.Load(),
 		CEKernel:      metalCEDispatches.Load(),
+		PermuteKernel: metalPermuteDispatches.Load(),
+		RopeKernel:    metalRopeDispatches.Load(),
+		RepeatKernel:  metalRepeatDispatches.Load(),
+		ColReduce:     metalColReduceDispatches.Load(),
+		BiasAdd:       metalBiasAddDispatches.Load(),
 	}
 }
 
@@ -51,6 +66,11 @@ func ResetMetalDispatchCounts() {
 	metalSoftmaxDispatches.Store(0)
 	metalSiluDispatches.Store(0)
 	metalCEDispatches.Store(0)
+	metalPermuteDispatches.Store(0)
+	metalRopeDispatches.Store(0)
+	metalRepeatDispatches.Store(0)
+	metalColReduceDispatches.Store(0)
+	metalBiasAddDispatches.Store(0)
 }
 
 // GPU holds the shared Metal device, command queue, and compiled kernels.
@@ -89,7 +109,12 @@ func InitMetal() (*GPU, error) {
 		// Plan 0009 K4 — SiLU/SwiGLU fwd + bwd.
 		"vec_silu", "vec_silu_bwd", "vec_swiglu", "vec_swiglu_bwd",
 		// Plan 0009 K2 — fused cross-entropy fwd + bwd.
-		"cross_entropy_forward", "cross_entropy_backward"} {
+		"cross_entropy_forward", "cross_entropy_backward",
+		// Plan 0009 X2b — block-step CPU residue: permute, RoPE (K6),
+		// GQA KV expansion, RMSNorm dgamma (K5), Linear db column sum.
+		"permute_copy", "rope_apply",
+		"repeat_interleave_fwd", "repeat_interleave_bwd",
+		"rmsnorm_dgamma", "col_sum"} {
 		pipe, err := dev.CompileKernel(metal.KernelSource, name)
 		if err != nil {
 			return nil, fmt.Errorf("gorch: compile %s: %w", name, err)

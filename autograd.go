@@ -2,7 +2,10 @@
 
 package gorch
 
-import "github.com/vinq1911/gorch/accelerate"
+import (
+	"github.com/vinq1911/gorch/accelerate"
+	"github.com/vinq1911/gorch/metal"
+)
 
 // Backward computes gradients for all tensors in the computation graph
 // that require gradients, starting from this tensor (typically a scalar loss).
@@ -79,6 +82,16 @@ func accumulateGrad(dst, add *Tensor) {
 			dst.data16[k] = f32ToBF16(sum)
 		}
 		return
+	}
+	// Both grads Metal-resident → in-place vec_add on GPU (plan 0009
+	// X2b): grad accumulation was one of the residual host sync points
+	// in async dispatch mode; each lane reads and writes only its own
+	// element, so dst-aliasing is safe.
+	if dst.buf != nil && add.buf != nil && gpu != nil {
+		if p, ok := gpu.pipelines["vec_add"]; ok {
+			gpu.Queue.Dispatch1D(p, []*metal.Buffer{dst.buf, add.buf, dst.buf}, dst.Size())
+			return
+		}
 	}
 	// CPU read-modify-write of possibly-GPU-written grads — wait for
 	// pending async GPU work first (plan 0009 R6).
