@@ -1,0 +1,541 @@
+{
+  "hardware": "Apple M4",
+  "phases": [
+    {
+      "phase": "X0-baseline",
+      "date": "2026-08-11",
+      "machine": "Apple M4",
+      "memory_gb": 24,
+      "go_version": "go1.26.0",
+      "load_avg_at_start": "{ 6.81 5.88 5.13 }",
+      "metal_initialized": false,
+      "geometry": {
+        "base_vocab": 151936,
+        "block_params": 15743232,
+        "embedding_params": 172359680,
+        "ffn_inter": 3072,
+        "head_dim": 128,
+        "hidden": 1024,
+        "kv_dim": 1024,
+        "kv_heads": 8,
+        "layers": 28,
+        "mimi_vocab": 16384,
+        "note": "head_dim 128 != hidden/q_heads (64); q/k/v/o projection dims follow the head config per Qwen3-0.6B config.json: q 1024-\u003e2048, k/v 1024-\u003e1024, o 2048-\u003e1024",
+        "q_dim": 2048,
+        "q_heads": 16,
+        "rms_norm_eps": 0.000001,
+        "rope_theta": 1000000,
+        "vocab": 168320
+      },
+      "block_step_results": [
+        {
+          "seq": 512,
+          "warmups": 2,
+          "runs": 5,
+          "fwd_ms": 74.71,
+          "bwd_ms": 79.347042,
+          "opt_ms": 46.745917,
+          "total_ms": 201.235125,
+          "total_min_ms": 198.659417,
+          "total_max_ms": 262.291917,
+          "alloc_per_step_mb": 484.890664,
+          "live_graph_after_fwd_mb": 172.030416
+        },
+        {
+          "seq": 1024,
+          "warmups": 2,
+          "runs": 5,
+          "fwd_ms": 219.385,
+          "bwd_ms": 196.407667,
+          "opt_ms": 46.887875,
+          "total_ms": 462.680542,
+          "total_min_ms": 450.457166,
+          "total_max_ms": 571.94175,
+          "alloc_per_step_mb": 1188.276248,
+          "live_graph_after_fwd_mb": 520.210896
+        },
+        {
+          "seq": 1500,
+          "warmups": 2,
+          "runs": 5,
+          "fwd_ms": 459.198917,
+          "bwd_ms": 395.995625,
+          "opt_ms": 67.1605,
+          "total_ms": 1163.218667,
+          "total_min_ms": 884.430125,
+          "total_max_ms": 1378.871083,
+          "alloc_per_step_mb": 2151.266328,
+          "live_graph_after_fwd_mb": 1001.970112
+        }
+      ],
+      "tail_results": [
+        {
+          "name": "embedding_fwd_bwd",
+          "seq": 512,
+          "shape": "(512 ids) into (168320,1024)",
+          "fwd_ms": 0.487458,
+          "bwd_ms": 12.656875,
+          "total_ms": 13.144333,
+          "note": "backward allocates + scatters a dense (vocab, hidden) f32 grad (~690 MB)"
+        },
+        {
+          "name": "lm_head_matmul_fwd_bwd",
+          "seq": 512,
+          "shape": "(512,1024)@(1024,168320)",
+          "fwd_ms": 282.76325,
+          "bwd_ms": 753.347625,
+          "total_ms": 1036.110875,
+          "note": "bwd includes the dense (seq, vocab) upstream-grad tensor (Sum seed), as CE backward would produce"
+        },
+        {
+          "name": "cross_entropy_fwd_bwd",
+          "seq": 512,
+          "shape": "(512,168320)",
+          "fwd_ms": 623.435458,
+          "bwd_ms": 688.005416,
+          "total_ms": 1311.440874,
+          "note": "backward recomputes Softmax over the full logits (loss.go)"
+        },
+        {
+          "name": "embedding_fwd_bwd",
+          "seq": 1024,
+          "shape": "(1024 ids) into (168320,1024)",
+          "fwd_ms": 0.740917,
+          "bwd_ms": 38.907083,
+          "total_ms": 39.648,
+          "note": "backward allocates + scatters a dense (vocab, hidden) f32 grad (~690 MB)"
+        },
+        {
+          "name": "lm_head_matmul_fwd_bwd",
+          "seq": 1024,
+          "shape": "(1024,1024)@(1024,168320)",
+          "fwd_ms": 598.965209,
+          "bwd_ms": 1178.012,
+          "total_ms": 1776.977209,
+          "note": "bwd includes the dense (seq, vocab) upstream-grad tensor (Sum seed), as CE backward would produce"
+        },
+        {
+          "name": "cross_entropy_fwd_bwd",
+          "seq": 1024,
+          "shape": "(1024,168320)",
+          "fwd_ms": 1515.39175,
+          "bwd_ms": 1356.536375,
+          "total_ms": 2871.928125,
+          "note": "backward recomputes Softmax over the full logits (loss.go)"
+        },
+        {
+          "name": "embedding_fwd_bwd",
+          "seq": 1500,
+          "shape": "(1500 ids) into (168320,1024)",
+          "fwd_ms": 1.124334,
+          "bwd_ms": 11.631167,
+          "total_ms": 12.755500999999999,
+          "note": "backward allocates + scatters a dense (vocab, hidden) f32 grad (~690 MB)"
+        },
+        {
+          "name": "lm_head_matmul_fwd_bwd",
+          "seq": 1500,
+          "shape": "(1500,1024)@(1024,168320)",
+          "fwd_ms": 552.60775,
+          "bwd_ms": 1182.956542,
+          "total_ms": 1735.564292,
+          "note": "bwd includes the dense (seq, vocab) upstream-grad tensor (Sum seed), as CE backward would produce"
+        },
+        {
+          "name": "cross_entropy_fwd_bwd",
+          "seq": 1500,
+          "shape": "(1500,168320)",
+          "fwd_ms": 2200.557958,
+          "bwd_ms": 1876.204625,
+          "total_ms": 4076.7625829999997,
+          "note": "backward recomputes Softmax over the full logits (loss.go)"
+        },
+        {
+          "name": "adamw_172m_table",
+          "seq": 0,
+          "shape": "(168320,1024) = 172M params",
+          "fwd_ms": 0,
+          "bwd_ms": 0,
+          "total_ms": 497.486334,
+          "note": "scalar Go loop with math.Sqrt per element (optim/adamw.go)"
+        }
+      ],
+      "full_step_estimate": [
+        {
+          "seq": 512,
+          "block_ms": 201.235125,
+          "blocks_28_ms": 5634.583500000001,
+          "embedding_ms": 13.144333,
+          "lm_head_ms": 1036.110875,
+          "loss_ms": 1311.440874,
+          "optimizer_table_ms": 497.486334,
+          "total_ms": 8492.765916,
+          "total_s": 8.492765916
+        },
+        {
+          "seq": 1024,
+          "block_ms": 462.680542,
+          "blocks_28_ms": 12955.055176,
+          "embedding_ms": 39.648,
+          "lm_head_ms": 1776.977209,
+          "loss_ms": 2871.928125,
+          "optimizer_table_ms": 497.486334,
+          "total_ms": 18141.094844,
+          "total_s": 18.141094843999998
+        },
+        {
+          "seq": 1500,
+          "block_ms": 1163.218667,
+          "blocks_28_ms": 32570.122676000003,
+          "embedding_ms": 12.755500999999999,
+          "lm_head_ms": 1735.564292,
+          "loss_ms": 4076.7625829999997,
+          "optimizer_table_ms": 497.486334,
+          "total_ms": 38892.691386000006,
+          "total_s": 38.892691386
+        }
+      ],
+      "per_op_results": [
+        {
+          "op": "softmax",
+          "seq": 1024,
+          "shape": "(16384,1024)",
+          "fwd_ms": 117.917333,
+          "bwd_ms": 38.578167,
+          "count_per_step": 28,
+          "per_step_ms": 4381.874,
+          "share_pct": 22.44377974166882
+        },
+        {
+          "op": "loss_cross_entropy",
+          "seq": 1024,
+          "shape": "(1024,168320)",
+          "fwd_ms": 1515.39175,
+          "bwd_ms": 1356.536375,
+          "count_per_step": 1,
+          "per_step_ms": 2871.928125,
+          "share_pct": 14.709898612192848
+        },
+        {
+          "op": "matmul_lm_head",
+          "seq": 1024,
+          "shape": "(1024,1024)@(1024,168320)",
+          "fwd_ms": 598.965209,
+          "bwd_ms": 1178.012,
+          "count_per_step": 1,
+          "per_step_ms": 1776.977209,
+          "share_pct": 9.10160472089371
+        },
+        {
+          "op": "matmul_ffn_proj",
+          "seq": 1024,
+          "shape": "gate/up (1024,1024)-\u003e3072, down (1024,3072)-\u003e1024",
+          "fwd_ms": 18.57375,
+          "bwd_ms": 43.845833,
+          "count_per_step": 28,
+          "per_step_ms": 1747.7483240000001,
+          "share_pct": 8.951895565168428
+        },
+        {
+          "op": "mask_scale",
+          "seq": 1024,
+          "shape": "Full+Mul+MaskFill on (16,1024,1024)",
+          "fwd_ms": 23.514333,
+          "bwd_ms": 29.933875,
+          "count_per_step": 28,
+          "per_step_ms": 1496.549824,
+          "share_pct": 7.665267103136521
+        },
+        {
+          "op": "matmul_attn_batched",
+          "seq": 1024,
+          "shape": "(16,1024,128)x(16,1024,128)^T + (16,1024,1024)x(16,1024,128)",
+          "fwd_ms": 16.391333,
+          "bwd_ms": 34.657583,
+          "count_per_step": 28,
+          "per_step_ms": 1429.369648,
+          "share_pct": 7.321172984238866
+        },
+        {
+          "op": "permute_reshape",
+          "seq": 1024,
+          "shape": "3 head-splits + 2 kv-repeats + 1 concat at seq 1024",
+          "fwd_ms": 22.530584,
+          "bwd_ms": 24.417875,
+          "count_per_step": 28,
+          "per_step_ms": 1314.556852,
+          "share_pct": 6.733106530262973
+        },
+        {
+          "op": "optimizer_adamw_block",
+          "seq": 1024,
+          "shape": "15743232 params x 28",
+          "fwd_ms": 0,
+          "bwd_ms": 0,
+          "count_per_step": 28,
+          "per_step_ms": 1312.8605,
+          "share_pct": 6.724417884571123
+        },
+        {
+          "op": "matmul_attn_proj",
+          "seq": 1024,
+          "shape": "q/k/v (1024,1024)-\u003e2048/1024/1024, o (1024,2048)-\u003e1024",
+          "fwd_ms": 13.312125,
+          "bwd_ms": 30.324375,
+          "count_per_step": 28,
+          "per_step_ms": 1221.822,
+          "share_pct": 6.258122404141535
+        },
+        {
+          "op": "activation_swiglu",
+          "seq": 1024,
+          "shape": "(1024,3072)",
+          "fwd_ms": 17.564875,
+          "bwd_ms": 6.041417,
+          "count_per_step": 28,
+          "per_step_ms": 660.976176,
+          "share_pct": 3.3854929896739447
+        },
+        {
+          "op": "rmsnorm",
+          "seq": 1024,
+          "shape": "2x(1024,1024) + (16384,128) + (8192,128)",
+          "fwd_ms": 9.437334,
+          "bwd_ms": 12.603667,
+          "count_per_step": 28,
+          "per_step_ms": 617.1480280000001,
+          "share_pct": 3.16100700486533
+        },
+        {
+          "op": "optimizer_adamw_table",
+          "seq": 1024,
+          "shape": "(168320,1024) = 172M params",
+          "fwd_ms": 0,
+          "bwd_ms": 0,
+          "count_per_step": 1,
+          "per_step_ms": 497.486334,
+          "share_pct": 2.5481046932856333
+        },
+        {
+          "op": "rope",
+          "seq": 1024,
+          "shape": "(16,1024,128) + (8,1024,128)",
+          "fwd_ms": 2.234292,
+          "bwd_ms": 3.2955,
+          "count_per_step": 28,
+          "per_step_ms": 154.834176,
+          "share_pct": 0.7930543284966171
+        },
+        {
+          "op": "embedding",
+          "seq": 1024,
+          "shape": "(1024 ids) into (168320,1024)",
+          "fwd_ms": 0.740917,
+          "bwd_ms": 38.907083,
+          "count_per_step": 1,
+          "per_step_ms": 39.648,
+          "share_pct": 0.20307543740365092
+        },
+        {
+          "op": "softmax",
+          "seq": 1500,
+          "shape": "(24000,1500)",
+          "fwd_ms": 289.6255,
+          "bwd_ms": 81.710167,
+          "count_per_step": 28,
+          "per_step_ms": 10397.398676,
+          "share_pct": 32.18089290173603
+        },
+        {
+          "op": "loss_cross_entropy",
+          "seq": 1500,
+          "shape": "(1500,168320)",
+          "fwd_ms": 2200.557958,
+          "bwd_ms": 1876.204625,
+          "count_per_step": 1,
+          "per_step_ms": 4076.7625829999997,
+          "share_pct": 12.61795033138034
+        },
+        {
+          "op": "mask_scale",
+          "seq": 1500,
+          "shape": "Full+Mul+MaskFill on (16,1500,1500)",
+          "fwd_ms": 51.656083,
+          "bwd_ms": 63.577792,
+          "count_per_step": 28,
+          "per_step_ms": 3226.5485000000003,
+          "share_pct": 9.986460551948642
+        },
+        {
+          "op": "matmul_ffn_proj",
+          "seq": 1500,
+          "shape": "gate/up (1500,1024)-\u003e3072, down (1500,3072)-\u003e1024",
+          "fwd_ms": 24.525417,
+          "bwd_ms": 62.664667,
+          "count_per_step": 28,
+          "per_step_ms": 2441.322352,
+          "share_pct": 7.5561143317196295
+        },
+        {
+          "op": "matmul_attn_batched",
+          "seq": 1500,
+          "shape": "(16,1500,128)x(16,1500,128)^T + (16,1500,1500)x(16,1500,128)",
+          "fwd_ms": 26.238834,
+          "bwd_ms": 57.622625,
+          "count_per_step": 28,
+          "per_step_ms": 2348.120852,
+          "share_pct": 7.2676472272789425
+        },
+        {
+          "op": "optimizer_adamw_block",
+          "seq": 1500,
+          "shape": "15743232 params x 28",
+          "fwd_ms": 0,
+          "bwd_ms": 0,
+          "count_per_step": 28,
+          "per_step_ms": 1880.494,
+          "share_pct": 5.820299663611474
+        },
+        {
+          "op": "permute_reshape",
+          "seq": 1500,
+          "shape": "3 head-splits + 2 kv-repeats + 1 concat at seq 1500",
+          "fwd_ms": 32.433084,
+          "bwd_ms": 34.523167,
+          "count_per_step": 28,
+          "per_step_ms": 1874.7750280000002,
+          "share_pct": 5.802598926035177
+        },
+        {
+          "op": "matmul_attn_proj",
+          "seq": 1500,
+          "shape": "q/k/v (1500,1024)-\u003e2048/1024/1024, o (1500,2048)-\u003e1024",
+          "fwd_ms": 18.257375,
+          "bwd_ms": 45.268875,
+          "count_per_step": 28,
+          "per_step_ms": 1778.7350000000001,
+          "share_pct": 5.505346319719157
+        },
+        {
+          "op": "matmul_lm_head",
+          "seq": 1500,
+          "shape": "(1500,1024)@(1024,168320)",
+          "fwd_ms": 552.60775,
+          "bwd_ms": 1182.956542,
+          "count_per_step": 1,
+          "per_step_ms": 1735.564292,
+          "share_pct": 5.371729058908822
+        },
+        {
+          "op": "activation_swiglu",
+          "seq": 1500,
+          "shape": "(1500,3072)",
+          "fwd_ms": 25.583958,
+          "bwd_ms": 9.063375,
+          "count_per_step": 28,
+          "per_step_ms": 970.1253240000001,
+          "share_pct": 3.002625957295356
+        },
+        {
+          "op": "rmsnorm",
+          "seq": 1500,
+          "shape": "2x(1500,1024) + (24000,128) + (12000,128)",
+          "fwd_ms": 13.257583,
+          "bwd_ms": 17.121125,
+          "count_per_step": 28,
+          "per_step_ms": 850.603824,
+          "share_pct": 2.632696063212025
+        },
+        {
+          "op": "optimizer_adamw_table",
+          "seq": 1500,
+          "shape": "(168320,1024) = 172M params",
+          "fwd_ms": 0,
+          "bwd_ms": 0,
+          "count_per_step": 1,
+          "per_step_ms": 497.486334,
+          "share_pct": 1.5397653714563861
+        },
+        {
+          "op": "rope",
+          "seq": 1500,
+          "shape": "(16,1500,128) + (8,1500,128)",
+          "fwd_ms": 3.973458,
+          "bwd_ms": 3.831458,
+          "count_per_step": 28,
+          "per_step_ms": 218.53764800000002,
+          "share_pct": 0.676393862006921
+        },
+        {
+          "op": "embedding",
+          "seq": 1500,
+          "shape": "(1500 ids) into (168320,1024)",
+          "fwd_ms": 1.124334,
+          "bwd_ms": 11.631167,
+          "count_per_step": 1,
+          "per_step_ms": 12.755500999999999,
+          "share_pct": 0.039479433691091706
+        }
+      ],
+      "memory_results": [
+        {
+          "seq": 512,
+          "live_graph_after_fwd_gb_one_block": 0.167998453125,
+          "extrapolated_28_layer_graph_gb": 7.1566373915,
+          "weights_f32_gb": 2.452680704,
+          "fits_24_gb": true,
+          "note": "extrapolated_28_layer_graph_gb = 28 x measured live autograd graph of one block (held after forward, post-GC) + f32 weights; excludes optimizer moments and backward transients"
+        },
+        {
+          "seq": 1024,
+          "live_graph_after_fwd_gb_one_block": 0.508018453125,
+          "extrapolated_28_layer_graph_gb": 16.677197391500002,
+          "weights_f32_gb": 2.452680704,
+          "fits_24_gb": true,
+          "note": "extrapolated_28_layer_graph_gb = 28 x measured live autograd graph of one block (held after forward, post-GC) + f32 weights; excludes optimizer moments and backward transients"
+        },
+        {
+          "seq": 1500,
+          "live_graph_after_fwd_gb_one_block": 0.9784864375,
+          "extrapolated_28_layer_graph_gb": 29.850300953999998,
+          "weights_f32_gb": 2.452680704,
+          "fits_24_gb": false,
+          "note": "extrapolated_28_layer_graph_gb = 28 x measured live autograd graph of one block (held after forward, post-GC) + f32 weights; excludes optimizer moments and backward transients"
+        }
+      ],
+      "pprof_top10": [
+        "File: e2e.test",
+        "Type: cpu",
+        "Time: 2026-08-11 10:50:08 EEST",
+        "Duration: 1.52s, Total samples = 1440ms (95.01%)",
+        "Showing nodes accounting for 1300ms, 90.28% of 1440ms total",
+        "Showing top 10 nodes out of 67",
+        "flat  flat%   sum%        cum   cum%",
+        "360ms 25.00% 25.00%      360ms 25.00%  runtime.cgocall",
+        "210ms 14.58% 39.58%      210ms 14.58%  \u003cunknown\u003e",
+        "140ms  9.72% 49.31%      270ms 18.75%  github.com/vinq1911/gorch.Softmax",
+        "140ms  9.72% 59.03%      140ms  9.72%  math.archExp",
+        "130ms  9.03% 68.06%      130ms  9.03%  github.com/vinq1911/gorch/optim.(*AdamW).Step",
+        "100ms  6.94% 75.00%      100ms  6.94%  github.com/vinq1911/gorch.Permute",
+        "80ms  5.56% 80.56%       80ms  5.56%  github.com/vinq1911/gorch.Softmax.func1",
+        "80ms  5.56% 86.11%       80ms  5.56%  runtime.madvise",
+        "30ms  2.08% 88.19%       40ms  2.78%  github.com/vinq1911/gorch.MaskFill",
+        "30ms  2.08% 90.28%      170ms 11.81%  math.Exp (inline)"
+      ],
+      "measured_ranking_seq1500": [
+        "1. softmax 10397 ms/step (32.2%)",
+        "2. loss_cross_entropy 4077 ms/step (12.6%)",
+        "3. mask_scale 3227 ms/step (10.0%)",
+        "4. matmul_ffn_proj 2441 ms/step (7.6%)",
+        "5. matmul_attn_batched 2348 ms/step (7.3%)"
+      ],
+      "notes": [
+        "single-sequence step (no batching), matching model/finetune.go's one-sequence-at-a-time loop",
+        "block includes Qwen3 q_norm/k_norm; nn.Linear biases included (Qwen3 has none) — see harness file comment for divergences",
+        "per-op rows are isolated fwd+bwd micro-benches at exact workload shapes; bwd segment includes the Sum-loss seed (representative of the upstream grad tensor in the real chain)",
+        "full_step_estimate = 28*block_total + embedding + lm_head + cross_entropy + adamw_172m_table (per plan §2.1)",
+        "share_pct is relative to the sum of per_op per_step_ms at that seq"
+      ]
+    }
+  ]
+}
