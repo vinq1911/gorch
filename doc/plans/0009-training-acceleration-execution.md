@@ -75,6 +75,40 @@ FLOPs per step at seq 1500: per layer ≈ 65.6 GF forward (projections 18.9 + FF
 
 **Gate X0:** harness merged; JSON baseline recorded at seq 512/1024/1500 (1500 expected to OOM or swap — record that fact); per-op table published; ranking below confirmed or corrected. Effort: 2–3 days.
 
+### 2.3 X0 measured results (2026-08-11, Apple M4, CPU f32 baseline)
+
+Harness: `e2e/train_accel_bench_test.go` (`TestTrainAccelBench`, tags `darwin && e2e`); full data in `doc/training_accel_results.json`, phase `X0-baseline`. Geometry corrected against the real Qwen3-0.6B config: head_dim **128** with 16 Q heads means q_proj is 1024→**2048** (heads×head_dim ≠ hidden — projection dims follow the head config; o_proj 2048→1024, k/v 1024→1024). Median of 5 after 2 warmups. Caveat: recorded 1-min load average at start was 6.8 (Spotlight indexing + unrelated apps); numbers carry some contention noise (block-step spread min/max at seq 1500: 884–1379 ms) — treat as an upper-bound-ish baseline and re-run the canary per §2.1 before cross-session comparisons.
+
+**Block training step** (fwd + Sum + Backward + AdamW over 15.8M block params):
+
+| seq | fwd | bwd | opt | total | alloc/step | live graph after fwd |
+| --- | --- | --- | --- | --- | --- | --- |
+| 512 | 75 ms | 79 ms | 47 ms | **201 ms** | 485 MB | 172 MB |
+| 1024 | 219 ms | 196 ms | 47 ms | **463 ms** | 1.19 GB | 520 MB |
+| 1500 | 459 ms | 396 ms | 67 ms | **1163 ms** | 2.15 GB | 1.00 GB |
+
+**Full-step estimate** (28×block + measured tails): seq 512 ≈ **8.5 s**, seq 1024 ≈ **18.1 s**, seq 1500 ≈ **38.9 s** — confirming §2.2's "tens of seconds per step / multi-day run" motivation. Tails at seq 1500: CE fwd+bwd 4.08 s, lm_head matmul fwd+bwd 1.74 s, AdamW over the 172M table 0.50 s, embedding fwd+bwd 0.013 s.
+
+**Per-op wall-clock ranking at seq 1500** (isolated fwd+bwd at exact workload shapes × per-step counts; share of per-op total):
+
+1. softmax (16·1500, 1500) — **10.40 s/step, 32.2%**
+2. cross-entropy (1500, 168320) — 4.08 s, 12.6%
+3. mask/scale (Full+Mul+MaskFill) — 3.23 s, 10.0%
+4. FFN matmuls — 2.44 s, 7.6%
+5. attention batched matmuls — 2.35 s, 7.3%
+   then AdamW block 1.88 s (5.8%), permute/reshape 1.87 s (5.8%), attn projections 1.78 s (5.5%), lm_head 1.74 s (5.4%), SwiGLU 0.97 s, RMSNorm 0.85 s, AdamW table 0.50 s, RoPE 0.22 s, embedding 0.013 s.
+
+**Memory (seq-1500 fit):** the single-block bench itself fits, but the measured live autograd graph is 1.00 GB per block after forward → 28-layer extrapolation ≈ **29.9 GB** incl. f32 weights, vs 24 GB unified memory. **Confirmed: the full graph does not fit at seq 1500 f32** (§2.2's ~20 GB estimate was directionally right, slightly low). Seq 1024 extrapolates to 16.7 GB — fits, tightly.
+
+**pprof top-3 flat%** (3 block steps, seq 1024): `runtime.cgocall` (Accelerate sgemm) 25.0%, unsymbolized Accelerate frames 14.6%, `gorch.Softmax` fwd 9.7% (+9.7% `math.archExp`, 18.8% cumulative; softmax backward another 5.6%).
+
+**§3.1 ranking: partially corrected.**
+
+- **Confirmed:** K1 fused causal softmax is the single biggest lever — softmax + the mask/scale allocs it fuses away = **13.6 s/step, 42%** of per-op wall clock at seq 1500, and its 4–5 seq² intermediates drive the memory wall. K2 (CE) is the clear #2 pure-Go loop (12.6%, with the measured backward double-softmax: fwd 2.20 s / bwd 1.88 s). The seq-1500 memory wall is real (above). Step-time magnitude matches §2.2.
+- **Corrected:** X1's premise ("~85% of step FLOPs are matmuls" → wire them to GPU first for the biggest win) does **not** hold in wall-clock terms on the measured baseline: the entire matmul class (projections + batched attention + lm_head) is **8.3 s/step ≈ 26%**, vs 52% for the ops K1+K2 replace. Even a perfect 2.5× GPU matmul speedup caps X1's step-time gain at ~15%; K1 alone is worth up to ~40%. X1 stays first only as the *residency-enabling dependency* for X2 kernels (its own §3.1 text already says the kernels need resident chains), not as the biggest standalone win — set expectations for the X1 gate accordingly (≥1.8× block-step from wiring alone looks optimistic; re-check after K1).
+- **Corrected:** K3 (embedding scatter-add) is a memory/alloc concern, not a time concern — measured 13–40 ms/step total despite the 690 MB dense-grad alloc. Its wall-clock rank is last, not 4th; keep it for the sparse-grad/masked-AdamW memory win, not speed.
+- **Noted:** AdamW (block params + 172M table ≈ 2.4 s/step, 7.3%) and permute/reshape copies (1.9 s, 5.8%) both outrank several items above them in §3.1; K7 (vDSP AdamW) is cheap to do and worth pulling earlier, and X1's residency work should include the permute copies.
+
 ## 3. The two tracks, updated
 
 ### 3.1 Ranked leverage (replaces both old orderings)
