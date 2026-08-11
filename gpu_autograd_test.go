@@ -119,6 +119,132 @@ func TestMatMulTransAPublicOp(t *testing.T) {
 	checkClose(t, "MatMulTransA", cpuOut.Data(), gpuOut.Data(), 1e-3)
 }
 
+// TestGPUBatchedMatMulBackwardMatchesCPU verifies the plan-0009-X1
+// batched MPS backward (dA via batched transB, dB via the new batched
+// transA) against the CPU Accelerate loop at 1e-3 abs.
+func TestGPUBatchedMatMulBackwardMatchesCPU(t *testing.T) {
+	gpu, err := InitMetal()
+	if err != nil {
+		t.Skipf("metal not available: %v", err)
+	}
+	defer setMatMulMetalThresholdForTest(t, 0)()
+
+	batch, M, N, K := 3, 5, 4, 6
+	aData := make([]float32, batch*M*K)
+	bData := make([]float32, batch*K*N)
+	gradData := make([]float32, batch*M*N)
+	for i := range aData {
+		aData[i] = float32(i)*0.07 - 1.1
+	}
+	for i := range bData {
+		bData[i] = float32(i)*0.03 + 0.2
+	}
+	for i := range gradData {
+		gradData[i] = float32(i)*0.05 - 0.6
+	}
+
+	// CPU path.
+	aCPU := NewTensor(aData, batch, M, K).SetRequiresGrad(true)
+	bCPU := NewTensor(bData, batch, K, N).SetRequiresGrad(true)
+	outCPU := BatchedMatMul(aCPU, bCPU, batch, M, N, K)
+	gradsCPU := outCPU.gradFn.backward(NewTensor(gradData, batch, M, N))
+
+	// GPU path.
+	aGPU := NewTensorOnMetal(gpu.Dev, aData, batch, M, K).SetRequiresGrad(true)
+	bGPU := NewTensorOnMetal(gpu.Dev, bData, batch, K, N).SetRequiresGrad(true)
+	outGPU := BatchedMatMul(aGPU, bGPU, batch, M, N, K)
+	gradsGPU := outGPU.gradFn.backward(NewTensorOnMetal(gpu.Dev, gradData, batch, M, N))
+
+	if !gradsGPU[0].IsOnMetal() || !gradsGPU[1].IsOnMetal() {
+		t.Error("expected batched dA/dB on Metal")
+	}
+	checkClose(t, "batched dA", gradsCPU[0].Data(), gradsGPU[0].Data(), 1e-3)
+	checkClose(t, "batched dB", gradsCPU[1].Data(), gradsGPU[1].Data(), 1e-3)
+}
+
+// TestGPUBatchedMatMulTransBBackwardMatchesCPU is the same check for
+// BatchedMatMulTransB (dA via batched plain, dB via batched transA) —
+// the attention-scores backward.
+func TestGPUBatchedMatMulTransBBackwardMatchesCPU(t *testing.T) {
+	gpu, err := InitMetal()
+	if err != nil {
+		t.Skipf("metal not available: %v", err)
+	}
+	defer setMatMulMetalThresholdForTest(t, 0)()
+
+	batch, M, N, K := 4, 6, 5, 3
+	aData := make([]float32, batch*M*K)
+	bData := make([]float32, batch*N*K)
+	gradData := make([]float32, batch*M*N)
+	for i := range aData {
+		aData[i] = float32(i)*0.04 - 0.9
+	}
+	for i := range bData {
+		bData[i] = float32(i)*0.06 + 0.1
+	}
+	for i := range gradData {
+		gradData[i] = float32(i)*0.02 - 0.3
+	}
+
+	aCPU := NewTensor(aData, batch, M, K).SetRequiresGrad(true)
+	bCPU := NewTensor(bData, batch, N, K).SetRequiresGrad(true)
+	outCPU := BatchedMatMulTransB(aCPU, bCPU, batch, M, N, K)
+	gradsCPU := outCPU.gradFn.backward(NewTensor(gradData, batch, M, N))
+
+	aGPU := NewTensorOnMetal(gpu.Dev, aData, batch, M, K).SetRequiresGrad(true)
+	bGPU := NewTensorOnMetal(gpu.Dev, bData, batch, N, K).SetRequiresGrad(true)
+	outGPU := BatchedMatMulTransB(aGPU, bGPU, batch, M, N, K)
+	gradsGPU := outGPU.gradFn.backward(NewTensorOnMetal(gpu.Dev, gradData, batch, M, N))
+
+	if !gradsGPU[0].IsOnMetal() || !gradsGPU[1].IsOnMetal() {
+		t.Error("expected batched transB dA/dB on Metal")
+	}
+	checkClose(t, "transB dA", gradsCPU[0].Data(), gradsGPU[0].Data(), 1e-3)
+	checkClose(t, "transB dB", gradsCPU[1].Data(), gradsGPU[1].Data(), 1e-3)
+}
+
+// TestResidencyPropagation asserts the plan-0009-X1 rule: ops with a
+// Metal-resident input produce Metal-resident outputs even when the
+// compute runs on CPU (below-threshold matmul, Go-loop softmax, …),
+// and the Sum-loss backward seeds a Metal-resident grad.
+func TestResidencyPropagation(t *testing.T) {
+	gpu, err := InitMetal()
+	if err != nil {
+		t.Skipf("metal not available: %v", err)
+	}
+	data := make([]float32, 4*6)
+	for i := range data {
+		data[i] = float32(i) * 0.1
+	}
+	x := NewTensorOnMetal(gpu.Dev, data, 4, 6).SetRequiresGrad(true)
+
+	// Below-threshold matmul: CPU sgemm, output must stay resident.
+	w := NewTensorOnMetal(gpu.Dev, data, 6, 4)
+	mm := MatMul(x, w)
+	if !mm.IsOnMetal() {
+		t.Error("below-threshold MatMul output lost residency")
+	}
+	if !Softmax(mm).IsOnMetal() {
+		t.Error("Softmax output lost residency")
+	}
+	if !Permute(mm.Reshape(4, 2, 2), []int{1, 0, 2}).IsOnMetal() {
+		t.Error("Permute output lost residency")
+	}
+	if !Scale(mm, 0.5).IsOnMetal() {
+		t.Error("Scale output lost residency")
+	}
+	if !MaskFill(mm, make([]bool, mm.Size()), -1e9).IsOnMetal() {
+		t.Error("MaskFill output lost residency")
+	}
+
+	// Loss-side seeding: Sum backward must produce a Metal grad.
+	x.ZeroGrad()
+	Sum(mm).Backward()
+	if x.Grad() == nil || !x.Grad().IsOnMetal() {
+		t.Error("Sum-loss backward did not seed a Metal-resident grad chain")
+	}
+}
+
 // setMatMulMetalThresholdForTest temporarily lowers the threshold
 // so tests can exercise the GPU dispatch path on small shapes.
 // Returns a restore func to defer.

@@ -119,16 +119,15 @@ func AddB(a, b *Tensor) *Tensor {
 	}
 
 	outShape := broadcastShapes(a.shape, b.shape)
-	outSize := numElements(outShape)
 
 	aData := broadcastData(a.data, a.shape, outShape)
 	bData := broadcastData(b.data, b.shape, outShape)
 
-	outData := make([]float32, outSize)
+	out := zerosLikeEither(outShape, a, b)
+	outData := out.data
 	for i := range outData {
 		outData[i] = aData[i] + bData[i]
 	}
-	out := NewTensor(outData, outShape...)
 
 	if GradEnabled() && (a.requiresGrad || b.requiresGrad) {
 		out.requiresGrad = true
@@ -156,27 +155,26 @@ func SubB(a, b *Tensor) *Tensor {
 	}
 
 	outShape := broadcastShapes(a.shape, b.shape)
-	outSize := numElements(outShape)
 	aData := broadcastData(a.data, a.shape, outShape)
 	bData := broadcastData(b.data, b.shape, outShape)
 
-	outData := make([]float32, outSize)
+	out := zerosLikeEither(outShape, a, b)
+	outData := out.data
 	for i := range outData {
 		outData[i] = aData[i] - bData[i]
 	}
-	out := NewTensor(outData, outShape...)
 
 	if GradEnabled() && (a.requiresGrad || b.requiresGrad) {
 		out.requiresGrad = true
 		out.gradFn = &GradFn{
 			name: "SubB", inputs: []*Tensor{a, b},
 			backward: func(grad *Tensor) []*Tensor {
-				ga := NewTensor(reduceBroadcastGrad(grad.data, grad.shape, a.shape), a.shape...)
+				ga := tensorLike(reduceBroadcastGrad(grad.data, grad.shape, a.shape), a.shape, grad, a)
 				negGrad := make([]float32, len(grad.data))
 				for i, v := range grad.data {
 					negGrad[i] = -v
 				}
-				gb := NewTensor(reduceBroadcastGrad(negGrad, grad.shape, b.shape), b.shape...)
+				gb := tensorLike(reduceBroadcastGrad(negGrad, grad.shape, b.shape), b.shape, grad, b)
 				return []*Tensor{ga, gb}
 			},
 		}
@@ -199,11 +197,11 @@ func MulB(a, b *Tensor) *Tensor {
 	aData := broadcastData(a.data, a.shape, outShape)
 	bData := broadcastData(b.data, b.shape, outShape)
 
-	outData := make([]float32, outSize)
+	out := zerosLikeEither(outShape, a, b)
+	outData := out.data
 	for i := range outData {
 		outData[i] = aData[i] * bData[i]
 	}
-	out := NewTensor(outData, outShape...)
 
 	if GradEnabled() && (a.requiresGrad || b.requiresGrad) {
 		out.requiresGrad = true
@@ -241,11 +239,11 @@ func DivB(a, b *Tensor) *Tensor {
 	aData := broadcastData(a.data, a.shape, outShape)
 	bData := broadcastData(b.data, b.shape, outShape)
 
-	outData := make([]float32, outSize)
+	out := zerosLikeEither(outShape, a, b)
+	outData := out.data
 	for i := range outData {
 		outData[i] = aData[i] / bData[i]
 	}
-	out := NewTensor(outData, outShape...)
 
 	if GradEnabled() && (a.requiresGrad || b.requiresGrad) {
 		out.requiresGrad = true
@@ -270,4 +268,14 @@ func DivB(a, b *Tensor) *Tensor {
 // ScalarTensor creates a scalar (1-element) tensor for use with broadcasting ops.
 func ScalarTensor(val float32) *Tensor {
 	return NewTensor([]float32{val}, 1)
+}
+
+// tensorLike wraps already-computed data in a tensor that inherits
+// Metal residency from the first Metal-resident ref (copying the data
+// into unified memory), or a plain CPU tensor otherwise. Plan 0009 X1
+// residency propagation for the broadcast backward paths.
+func tensorLike(data []float32, shape []int, refs ...*Tensor) *Tensor {
+	out := zerosLikeEither(shape, refs...)
+	copy(out.data, data)
+	return out
 }

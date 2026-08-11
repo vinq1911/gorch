@@ -6,10 +6,44 @@ import (
 	"fmt"
 	"math"
 	"sync"
+	"sync/atomic"
 
 	"github.com/vinq1911/gorch/accelerate"
 	"github.com/vinq1911/gorch/metal"
 )
+
+// ---------- Metal dispatch counters (plan 0009 X1 gate evidence) ----------
+
+var (
+	mpsMatMulDispatches        atomic.Int64
+	mpsBatchedMatMulDispatches atomic.Int64
+	metalSoftmaxDispatches     atomic.Int64
+)
+
+// MetalDispatchCounts is a snapshot of how many times each GPU dispatch
+// class has fired since the last reset. Tests use it to assert that
+// above-threshold matmuls (forward AND backward) actually hit MPS.
+type MetalDispatchCounts struct {
+	MatMul        int64 // MPS single matmuls (plain/transA/transB), fwd+bwd
+	BatchedMatMul int64 // MPS batched matmuls (plain/transA/transB), fwd+bwd
+	SoftmaxKernel int64 // fused causal-softmax fwd + softmax bwd kernel dispatches
+}
+
+// ReadMetalDispatchCounts returns the current dispatch counters.
+func ReadMetalDispatchCounts() MetalDispatchCounts {
+	return MetalDispatchCounts{
+		MatMul:        mpsMatMulDispatches.Load(),
+		BatchedMatMul: mpsBatchedMatMulDispatches.Load(),
+		SoftmaxKernel: metalSoftmaxDispatches.Load(),
+	}
+}
+
+// ResetMetalDispatchCounts zeroes the dispatch counters.
+func ResetMetalDispatchCounts() {
+	mpsMatMulDispatches.Store(0)
+	mpsBatchedMatMulDispatches.Store(0)
+	metalSoftmaxDispatches.Store(0)
+}
 
 // GPU holds the shared Metal device, command queue, and compiled kernels.
 // Initialize once with InitMetal().
@@ -41,7 +75,9 @@ func InitMetal() (*GPU, error) {
 		"vec_relu", "vec_sigmoid", "vec_tanh_act", "vec_scale", "vec_sum",
 		"vec_gelu", "vec_bias_add",
 		// Plan 0004 part A — non-MatMul backward kernels.
-		"rmsnorm_forward", "rmsnorm_dx"} {
+		"rmsnorm_forward", "rmsnorm_dx",
+		// Plan 0009 K1 — fused causal softmax fwd + softmax bwd.
+		"softmax_causal_forward", "softmax_backward"} {
 		pipe, err := dev.CompileKernel(metal.KernelSource, name)
 		if err != nil {
 			return nil, fmt.Errorf("gorch: compile %s: %w", name, err)
@@ -181,7 +217,7 @@ func Neg(a *Tensor) *Tensor {
 	if a.dtype == BFloat16 {
 		return downcastToBF16(Neg(promoteToF32(a)))
 	}
-	out := Zeros(a.shape...)
+	out := ZerosLike(a, a.shape...)
 	for i, v := range a.data {
 		out.data[i] = -v
 	}
@@ -192,6 +228,33 @@ func Neg(a *Tensor) *Tensor {
 			inputs: []*Tensor{a},
 			backward: func(grad *Tensor) []*Tensor {
 				return []*Tensor{Neg(grad)}
+			},
+		}
+	}
+	return out
+}
+
+// Scale returns a * s element-wise for a scalar s, with autograd
+// (backward: dx = grad * s). Replaces the Full(s, shape) + Mul pattern
+// that materialized a full-size constant tensor just to scale by a
+// scalar — at GQA seq-1500 shapes that was a 144 MB allocation per
+// layer per forward (plan 0009 X1 item 5). CPU compute via vDSP
+// through unified memory; the output inherits a's Metal residency.
+func Scale(a *Tensor, s float32) *Tensor {
+	if a.dtype == BFloat16 {
+		return downcastToBF16(Scale(promoteToF32(a), s))
+	}
+	out := ZerosLike(a, a.shape...)
+	accelerate.VScale(a.data, s, out.data)
+	if GradEnabled() && a.requiresGrad {
+		out.requiresGrad = true
+		out.gradFn = &GradFn{
+			name:   "Scale",
+			inputs: []*Tensor{a},
+			backward: func(grad *Tensor) []*Tensor {
+				dx := zerosLikeEither(a.shape, grad, a)
+				accelerate.VScale(grad.data, s, dx.data)
+				return []*Tensor{dx}
 			},
 		}
 	}
@@ -215,7 +278,7 @@ func ReLU(a *Tensor) *Tensor {
 			name:   "ReLU",
 			inputs: []*Tensor{a},
 			backward: func(grad *Tensor) []*Tensor {
-				g := Zeros(a.shape...)
+				g := zerosLikeEither(a.shape, grad, a)
 				for i, v := range a.data {
 					if v > 0 {
 						g.data[i] = grad.data[i]
@@ -243,7 +306,7 @@ func Sigmoid(a *Tensor) *Tensor {
 			inputs: []*Tensor{a},
 			backward: func(grad *Tensor) []*Tensor {
 				// sigmoid'(x) = sigmoid(x) * (1 - sigmoid(x))
-				g := Zeros(a.shape...)
+				g := zerosLikeEither(a.shape, grad, a)
 				for i, v := range out.data {
 					g.data[i] = grad.data[i] * v * (1 - v)
 				}
@@ -269,7 +332,7 @@ func Tanh(a *Tensor) *Tensor {
 			inputs: []*Tensor{a},
 			backward: func(grad *Tensor) []*Tensor {
 				// tanh'(x) = 1 - tanh(x)^2
-				g := Zeros(a.shape...)
+				g := zerosLikeEither(a.shape, grad, a)
 				for i, v := range out.data {
 					g.data[i] = grad.data[i] * (1 - v*v)
 				}
@@ -293,14 +356,11 @@ func GELU(a *Tensor) *Tensor {
 	if a.dtype == BFloat16 {
 		return downcastToBF16(GELU(promoteToF32(a)))
 	}
-	out := Zeros(a.shape...)
+	out := ZerosLike(a, a.shape...)
 
-	if a.buf != nil && gpu != nil {
+	if a.buf != nil && out.buf != nil && gpu != nil {
 		// GPU: single dispatch of the precompiled vec_gelu kernel.
-		outBuf := gpu.Dev.NewBuffer(a.Size() * 4)
-		gpu.Queue.Dispatch1D(gpu.pipe("vec_gelu"), []*metal.Buffer{a.buf, outBuf}, a.Size())
-		out.data = outBuf.FloatSlice()
-		out.buf = outBuf
+		gpu.Queue.Dispatch1D(gpu.pipe("vec_gelu"), []*metal.Buffer{a.buf, out.buf}, a.Size())
 	} else {
 		// CPU: compute inner = sqrt(2/pi) * (x + 0.044715*x^3) elementwise,
 		// then one vForce vector-tanh, then 0.5 * x * (1 + tanh(inner)).
@@ -325,7 +385,7 @@ func GELU(a *Tensor) *Tensor {
 			name:   "GELU",
 			inputs: []*Tensor{a},
 			backward: func(grad *Tensor) []*Tensor {
-				dx := Zeros(a.shape...)
+				dx := zerosLikeEither(a.shape, grad, a)
 				for i, x := range a.data {
 					x3 := x * x * x
 					inner := float32(0.7978845608) * (x + 0.044715*x3)
@@ -348,7 +408,7 @@ func Exp(a *Tensor) *Tensor {
 	if a.dtype == BFloat16 {
 		return downcastToBF16(Exp(promoteToF32(a)))
 	}
-	out := Zeros(a.shape...)
+	out := ZerosLike(a, a.shape...)
 	accelerate.Exp(a.data, out.data)
 	if GradEnabled() && (a.requiresGrad) {
 		out.requiresGrad = true
@@ -357,7 +417,7 @@ func Exp(a *Tensor) *Tensor {
 			inputs: []*Tensor{a},
 			backward: func(grad *Tensor) []*Tensor {
 				// d(exp(x))/dx = exp(x)
-				g := Zeros(a.shape...)
+				g := zerosLikeEither(a.shape, grad, a)
 				for i, v := range out.data {
 					g.data[i] = grad.data[i] * v
 				}
@@ -373,7 +433,7 @@ func Log(a *Tensor) *Tensor {
 	if a.dtype == BFloat16 {
 		return downcastToBF16(Log(promoteToF32(a)))
 	}
-	out := Zeros(a.shape...)
+	out := ZerosLike(a, a.shape...)
 	accelerate.Log(a.data, out.data)
 	if GradEnabled() && (a.requiresGrad) {
 		out.requiresGrad = true
@@ -381,7 +441,7 @@ func Log(a *Tensor) *Tensor {
 			name:   "Log",
 			inputs: []*Tensor{a},
 			backward: func(grad *Tensor) []*Tensor {
-				g := Zeros(a.shape...)
+				g := zerosLikeEither(a.shape, grad, a)
 				for i, v := range a.data {
 					g.data[i] = grad.data[i] / v
 				}
@@ -404,7 +464,7 @@ func Softmax(a *Tensor) *Tensor {
 		return downcastToBF16(Softmax(promoteToF32(a)))
 	}
 	batch, classes := a.shape[0], a.shape[1]
-	out := Zeros(batch, classes)
+	out := ZerosLike(a, batch, classes)
 
 	for i := 0; i < batch; i++ {
 		// Numerical stability: subtract max
@@ -430,7 +490,7 @@ func Softmax(a *Tensor) *Tensor {
 			name:   "Softmax",
 			inputs: []*Tensor{a},
 			backward: func(grad *Tensor) []*Tensor {
-				dx := Zeros(batch, classes)
+				dx := zerosLikeEither([]int{batch, classes}, grad, out)
 				for i := 0; i < batch; i++ {
 					// For each sample: dx = s * (grad - sum(grad * s))
 					var dot float32
@@ -458,7 +518,7 @@ func LogSoftmax(a *Tensor) *Tensor {
 		return downcastToBF16(LogSoftmax(promoteToF32(a)))
 	}
 	batch, classes := a.shape[0], a.shape[1]
-	out := Zeros(batch, classes)
+	out := ZerosLike(a, batch, classes)
 
 	// Also store softmax for backward
 	sm := make([]float32, batch*classes)
@@ -488,7 +548,7 @@ func LogSoftmax(a *Tensor) *Tensor {
 			name:   "LogSoftmax",
 			inputs: []*Tensor{a},
 			backward: func(grad *Tensor) []*Tensor {
-				dx := Zeros(batch, classes)
+				dx := zerosLikeEither([]int{batch, classes}, grad, out)
 				for i := 0; i < batch; i++ {
 					var sumGrad float32
 					for j := 0; j < classes; j++ {
@@ -520,8 +580,11 @@ func Sum(a *Tensor) *Tensor {
 			name:   "Sum",
 			inputs: []*Tensor{a},
 			backward: func(grad *Tensor) []*Tensor {
-				// gradient of sum is all ones scaled by upstream grad
-				return []*Tensor{Full(grad.data[0], a.shape...)}
+				// Gradient of sum is all ones scaled by upstream grad.
+				// The seed inherits a's Metal residency so the whole
+				// backward chain of a GPU-resident graph starts on
+				// Metal (plan 0009 X1 item 3: loss-side grad seeding).
+				return []*Tensor{fullLike(a, grad.data[0], a.shape...)}
 			},
 		}
 	}
@@ -542,7 +605,7 @@ func Mean(a *Tensor) *Tensor {
 			name:   "Mean",
 			inputs: []*Tensor{a},
 			backward: func(grad *Tensor) []*Tensor {
-				return []*Tensor{Full(grad.data[0]/n, a.shape...)}
+				return []*Tensor{fullLike(a, grad.data[0]/n, a.shape...)}
 			},
 		}
 	}
@@ -588,15 +651,13 @@ func MatMul(a, b *Tensor) *Tensor {
 		panic(fmt.Sprintf("gorch: MatMul shape mismatch: (%d,%d) @ (%d,%d)", M, K, K2, N))
 	}
 
-	out := Zeros(M, N)
+	out := zerosLikeEither([]int{M, N}, a, b)
 
 	if a.buf != nil && b.buf != nil && shouldUseMetalMatMul(M, N, K) {
 		// GPU path: MPS matmul. Only dispatched when M*N*K is large
 		// enough for compute to pay off the dispatch overhead.
-		outBuf := gpu.Dev.NewBuffer(M * N * 4)
-		gpu.Queue.MatMul(a.buf, b.buf, outBuf, M, N, K)
-		out.data = outBuf.FloatSlice()
-		out.buf = outBuf
+		gpu.Queue.MatMul(a.buf, b.buf, out.buf, M, N, K)
+		mpsMatMulDispatches.Add(1)
 	} else {
 		// CPU path: Accelerate BLAS sgemm. Reads through unified-
 		// memory slices when operands are Metal-backed.
@@ -619,21 +680,23 @@ func MatMul(a, b *Tensor) *Tensor {
 				// the threshold. Otherwise CPU.
 				if a.buf != nil && b.buf != nil && grad.buf != nil &&
 					shouldUseMetalMatMul(gM, bK, gN) {
-					dABuf := gpu.Dev.NewBuffer(gM * bK * 4)
-					gpu.Queue.MatMulTransB(grad.buf, b.buf, dABuf, gM, bK, gN)
-					dA := &Tensor{data: dABuf.FloatSlice(), shape: []int{gM, bK}, buf: dABuf}
+					dA := ZerosLike(a, gM, bK)
+					gpu.Queue.MatMulTransB(grad.buf, b.buf, dA.buf, gM, bK, gN)
+					mpsMatMulDispatches.Add(1)
 
-					dBBuf := gpu.Dev.NewBuffer(a.shape[1] * gN * 4)
-					gpu.Queue.MatMulTransA(a.buf, grad.buf, dBBuf, a.shape[1], gN, a.shape[0])
-					dB := &Tensor{data: dBBuf.FloatSlice(), shape: []int{a.shape[1], gN}, buf: dBBuf}
+					dB := ZerosLike(b, a.shape[1], gN)
+					gpu.Queue.MatMulTransA(a.buf, grad.buf, dB.buf, a.shape[1], gN, a.shape[0])
+					mpsMatMulDispatches.Add(1)
 					return []*Tensor{dA, dB}
 				}
 
-				// CPU path: Accelerate BLAS.
-				dA := Zeros(gM, bK)
+				// CPU path: Accelerate BLAS. Grads inherit the residency
+				// of the tensor they belong to so the backward chain
+				// stays GPU-resident below the threshold too.
+				dA := zerosLikeEither([]int{gM, bK}, a, grad)
 				accelerate.SgemmTransB(gM, bK, gN, 1.0, grad.data, b.data, 0.0, dA.data)
 
-				dB := Zeros(a.shape[1], gN)
+				dB := zerosLikeEither([]int{a.shape[1], gN}, b, grad)
 				accelerate.SgemmTransA(a.shape[1], gN, a.shape[0], 1.0, a.data, grad.data, 0.0, dB.data)
 
 				return []*Tensor{dA, dB}
@@ -659,13 +722,11 @@ func MatMulTransB(a, b *Tensor) *Tensor {
 		panic(fmt.Sprintf("gorch: MatMulTransB shape mismatch: (%d,%d) @ (%d,%d)^T", M, K, N, K2))
 	}
 
-	out := Zeros(M, N)
+	out := zerosLikeEither([]int{M, N}, a, b)
 
 	if a.buf != nil && b.buf != nil && shouldUseMetalMatMul(M, N, K) {
-		outBuf := gpu.Dev.NewBuffer(M * N * 4)
-		gpu.Queue.MatMulTransB(a.buf, b.buf, outBuf, M, N, K)
-		out.data = outBuf.FloatSlice()
-		out.buf = outBuf
+		gpu.Queue.MatMulTransB(a.buf, b.buf, out.buf, M, N, K)
+		mpsMatMulDispatches.Add(1)
 	} else {
 		accelerate.SgemmTransB(M, N, K, 1.0, a.data, b.data, 0.0, out.data)
 	}
@@ -691,12 +752,10 @@ func MatMulTransA(a, b *Tensor) *Tensor {
 		panic(fmt.Sprintf("gorch: MatMulTransA shape mismatch: (%d,%d)^T @ (%d,%d)", K, M, K2, N))
 	}
 
-	out := Zeros(M, N)
+	out := zerosLikeEither([]int{M, N}, a, b)
 	if a.buf != nil && b.buf != nil && shouldUseMetalMatMul(M, N, K) {
-		outBuf := gpu.Dev.NewBuffer(M * N * 4)
-		gpu.Queue.MatMulTransA(a.buf, b.buf, outBuf, M, N, K)
-		out.data = outBuf.FloatSlice()
-		out.buf = outBuf
+		gpu.Queue.MatMulTransA(a.buf, b.buf, out.buf, M, N, K)
+		mpsMatMulDispatches.Add(1)
 	} else {
 		accelerate.SgemmTransA(M, N, K, 1.0, a.data, b.data, 0.0, out.data)
 	}
@@ -707,22 +766,21 @@ func MatMulTransA(a, b *Tensor) *Tensor {
 // a: (batchSize, M, K), b: (batchSize, K, N), out: (batchSize, M, N).
 // Dispatches to MPS batched matmul on GPU, Accelerate BLAS loop on CPU.
 //
-// Backward (CPU-loop, no batched-MPS-transA today):
+// Backward (plan 0009 X1: residency-and-threshold-gated MPS path, CPU
+// Accelerate loop otherwise):
 //
-//	dL/dA[i] = grad[i] @ B[i]^T  (per-batch SgemmTransB)
-//	dL/dB[i] = A[i]^T @ grad[i]  (per-batch SgemmTransA)
+//	dL/dA[i] = grad[i] @ B[i]^T  (batched MPS transB / per-batch SgemmTransB)
+//	dL/dB[i] = A[i]^T @ grad[i]  (batched MPS transA / per-batch SgemmTransA)
 func BatchedMatMul(a, b *Tensor, batchSize, M, N, K int) *Tensor {
 	requireSameDtype(a, b, "BatchedMatMul")
 	if a.dtype == BFloat16 {
 		return downcastToBF16(BatchedMatMul(promoteToF32(a), promoteToF32(b), batchSize, M, N, K))
 	}
-	out := Zeros(batchSize, M, N)
+	out := zerosLikeEither([]int{batchSize, M, N}, a, b)
 
 	if a.buf != nil && b.buf != nil && shouldUseMetalMatMul(batchSize*M, N, K) {
-		outBuf := gpu.Dev.NewBuffer(batchSize * M * N * 4)
-		gpu.Queue.BatchedMatMul(a.buf, b.buf, outBuf, M, N, K, batchSize)
-		out.data = outBuf.FloatSlice()
-		out.buf = outBuf
+		gpu.Queue.BatchedMatMul(a.buf, b.buf, out.buf, M, N, K, batchSize)
+		mpsBatchedMatMulDispatches.Add(1)
 	} else {
 		for i := 0; i < batchSize; i++ {
 			aOff := i * M * K
@@ -738,8 +796,26 @@ func BatchedMatMul(a, b *Tensor, batchSize, M, N, K int) *Tensor {
 			name:   "BatchedMatMul",
 			inputs: []*Tensor{a, b},
 			backward: func(grad *Tensor) []*Tensor {
-				dA := Zeros(batchSize, M, K)
-				dB := Zeros(batchSize, K, N)
+				// GPU path: all operands Metal-resident and the grad
+				// matmuls (same FMA count as forward) clear the
+				// threshold. This moves attention backward onto MPS.
+				if a.buf != nil && b.buf != nil && grad.buf != nil &&
+					shouldUseMetalMatMul(batchSize*M, N, K) {
+					// dA[i] = grad[i] @ B[i]^T: grad (M,N) times B stored
+					// (K,N) read transposed → (M,K).
+					dA := ZerosLike(a, batchSize, M, K)
+					gpu.Queue.BatchedMatMulTransB(grad.buf, b.buf, dA.buf, M, K, N, batchSize)
+					mpsBatchedMatMulDispatches.Add(1)
+					// dB[i] = A[i]^T @ grad[i]: A stored (M,K) read
+					// transposed, times grad (M,N) → (K,N).
+					dB := ZerosLike(b, batchSize, K, N)
+					gpu.Queue.BatchedMatMulTransA(a.buf, grad.buf, dB.buf, K, N, M, batchSize)
+					mpsBatchedMatMulDispatches.Add(1)
+					return []*Tensor{dA, dB}
+				}
+
+				dA := zerosLikeEither([]int{batchSize, M, K}, a, grad)
+				dB := zerosLikeEither([]int{batchSize, K, N}, b, grad)
 				for i := 0; i < batchSize; i++ {
 					aOff := i * M * K
 					bOff := i * K * N
@@ -763,22 +839,21 @@ func BatchedMatMul(a, b *Tensor, batchSize, M, N, K int) *Tensor {
 // BatchedMatMulTransB computes out[i] = a[i] @ b[i]^T for i in 0..batchSize-1.
 // a: (batchSize, M, K), b: (batchSize, N, K), out: (batchSize, M, N).
 //
-// Backward (CPU-loop):
+// Backward (plan 0009 X1: residency-and-threshold-gated MPS path, CPU
+// Accelerate loop otherwise):
 //
-//	dL/dA[i] = grad[i] @ B[i]      (per-batch Sgemm)
-//	dL/dB[i] = grad[i]^T @ A[i]    (per-batch SgemmTransA)
+//	dL/dA[i] = grad[i] @ B[i]      (batched MPS plain / per-batch Sgemm)
+//	dL/dB[i] = grad[i]^T @ A[i]    (batched MPS transA / per-batch SgemmTransA)
 func BatchedMatMulTransB(a, b *Tensor, batchSize, M, N, K int) *Tensor {
 	requireSameDtype(a, b, "BatchedMatMulTransB")
 	if a.dtype == BFloat16 {
 		return downcastToBF16(BatchedMatMulTransB(promoteToF32(a), promoteToF32(b), batchSize, M, N, K))
 	}
-	out := Zeros(batchSize, M, N)
+	out := zerosLikeEither([]int{batchSize, M, N}, a, b)
 
 	if a.buf != nil && b.buf != nil && shouldUseMetalMatMul(batchSize*M, N, K) {
-		outBuf := gpu.Dev.NewBuffer(batchSize * M * N * 4)
-		gpu.Queue.BatchedMatMulTransB(a.buf, b.buf, outBuf, M, N, K, batchSize)
-		out.data = outBuf.FloatSlice()
-		out.buf = outBuf
+		gpu.Queue.BatchedMatMulTransB(a.buf, b.buf, out.buf, M, N, K, batchSize)
+		mpsBatchedMatMulDispatches.Add(1)
 	} else {
 		for i := 0; i < batchSize; i++ {
 			aOff := i * M * K
@@ -794,8 +869,23 @@ func BatchedMatMulTransB(a, b *Tensor, batchSize, M, N, K int) *Tensor {
 			name:   "BatchedMatMulTransB",
 			inputs: []*Tensor{a, b},
 			backward: func(grad *Tensor) []*Tensor {
-				dA := Zeros(batchSize, M, K)
-				dB := Zeros(batchSize, N, K)
+				if a.buf != nil && b.buf != nil && grad.buf != nil &&
+					shouldUseMetalMatMul(batchSize*M, N, K) {
+					// dA[i] = grad[i] @ B[i]: grad (M,N) times B (N,K)
+					// plain → (M,K).
+					dA := ZerosLike(a, batchSize, M, K)
+					gpu.Queue.BatchedMatMul(grad.buf, b.buf, dA.buf, M, K, N, batchSize)
+					mpsBatchedMatMulDispatches.Add(1)
+					// dB[i] = grad[i]^T @ A[i]: grad stored (M,N) read
+					// transposed, times A (M,K) → (N,K).
+					dB := ZerosLike(b, batchSize, N, K)
+					gpu.Queue.BatchedMatMulTransA(grad.buf, a.buf, dB.buf, N, K, M, batchSize)
+					mpsBatchedMatMulDispatches.Add(1)
+					return []*Tensor{dA, dB}
+				}
+
+				dA := zerosLikeEither([]int{batchSize, M, K}, a, grad)
+				dB := zerosLikeEither([]int{batchSize, N, K}, b, grad)
 				for i := 0; i < batchSize; i++ {
 					aOff := i * M * K
 					bOff := i * N * K
@@ -822,15 +912,15 @@ func BatchedMatMulTransB(a, b *Tensor, batchSize, M, N, K int) *Tensor {
 type accBinaryFn func(a, b, out []float32)
 type accUnaryFn func(a, out []float32)
 
-// binaryOp dispatches to Metal if both tensors are on GPU, Accelerate on CPU.
+// binaryOp dispatches to Metal if both tensors are on GPU, Accelerate
+// on CPU. The output inherits Metal residency when either input is
+// Metal-backed (plan 0009 X1) — the CPU compute paths write through
+// unified memory in that case.
 func binaryOp(a, b *Tensor, kernelName string, cpuFn func(float32, float32) float32) *Tensor {
-	out := Zeros(a.shape...)
+	out := zerosLikeEither(a.shape, a, b)
 
-	if a.buf != nil && b.buf != nil && gpu != nil {
-		outBuf := gpu.Dev.NewBuffer(a.Size() * 4)
-		gpu.Queue.Dispatch1D(gpu.pipe(kernelName), []*metal.Buffer{a.buf, b.buf, outBuf}, a.Size())
-		out.data = outBuf.FloatSlice()
-		out.buf = outBuf
+	if a.buf != nil && b.buf != nil && out.buf != nil && gpu != nil {
+		gpu.Queue.Dispatch1D(gpu.pipe(kernelName), []*metal.Buffer{a.buf, b.buf, out.buf}, a.Size())
 	} else if fn := accBinaryFor(kernelName); fn != nil {
 		fn(a.data, b.data, out.data)
 	} else {
@@ -842,14 +932,12 @@ func binaryOp(a, b *Tensor, kernelName string, cpuFn func(float32, float32) floa
 }
 
 // unaryOp dispatches to Metal if tensor is on GPU, Accelerate on CPU.
+// Output inherits the input's Metal residency.
 func unaryOp(a *Tensor, kernelName string, cpuFn func(float32) float32) *Tensor {
-	out := Zeros(a.shape...)
+	out := ZerosLike(a, a.shape...)
 
-	if a.buf != nil && gpu != nil {
-		outBuf := gpu.Dev.NewBuffer(a.Size() * 4)
-		gpu.Queue.Dispatch1D(gpu.pipe(kernelName), []*metal.Buffer{a.buf, outBuf}, a.Size())
-		out.data = outBuf.FloatSlice()
-		out.buf = outBuf
+	if a.buf != nil && out.buf != nil && gpu != nil {
+		gpu.Queue.Dispatch1D(gpu.pipe(kernelName), []*metal.Buffer{a.buf, out.buf}, a.Size())
 	} else if fn := accUnaryFor(kernelName); fn != nil {
 		fn(a.data, out.data)
 	} else {

@@ -15,6 +15,8 @@ import "C"
 
 import (
 	"fmt"
+	"runtime"
+	"sync/atomic"
 	"unsafe"
 )
 
@@ -26,7 +28,28 @@ type CommandQueue struct{ ptr C.MTLCommandQueueRef }
 
 // Buffer wraps a Metal shared-memory buffer.
 // Shared mode means Go and the GPU access the same physical memory (zero copy).
-type Buffer struct{ ptr C.MTLBufferRef }
+//
+// Lifecycle: buffers are released either explicitly via Release or by a
+// GC finalizer set at allocation time (plan 0009 X1 — residency
+// propagation makes every autograd intermediate Metal-backed, so
+// leaving release to explicit calls would leak the whole training
+// graph every step). Holders must keep the *Buffer reachable for as
+// long as any unsafe.Slice view of its contents is in use; gorch
+// Tensors do this by retaining both the slice and the *Buffer.
+type Buffer struct {
+	ptr   C.MTLBufferRef
+	bytes int64
+}
+
+// liveBufferBytes tracks the total bytes of all live (not-yet-released)
+// Metal buffers. Used by benchmarks to measure GPU-resident graph
+// memory, which Go's runtime.MemStats cannot see.
+var liveBufferBytes atomic.Int64
+
+// LiveBufferBytes returns the total bytes of Metal buffers currently
+// allocated and not released. Buffers pending finalization still
+// count — call runtime.GC() (twice, finalizers run async) to flush.
+func LiveBufferBytes() int64 { return liveBufferBytes.Load() }
 
 // Pipeline wraps a compiled Metal compute pipeline (one kernel function).
 type Pipeline struct{ ptr C.MTLComputePipelineRef }
@@ -45,9 +68,15 @@ func (d *Device) NewCommandQueue() *CommandQueue {
 	return &CommandQueue{ptr: C.metal_create_command_queue(d.ptr)}
 }
 
-// NewBuffer allocates a shared-memory GPU buffer of the given size in bytes.
+// NewBuffer allocates a shared-memory GPU buffer of the given size in
+// bytes. Contents are zero-filled (Metal's newBufferWithLength
+// contract). The buffer is released automatically when the *Buffer
+// becomes unreachable; call Release for deterministic freeing.
 func (d *Device) NewBuffer(sizeBytes int) *Buffer {
-	return &Buffer{ptr: C.metal_create_shared_buffer(d.ptr, C.uint64_t(sizeBytes))}
+	b := &Buffer{ptr: C.metal_create_shared_buffer(d.ptr, C.uint64_t(sizeBytes)), bytes: int64(sizeBytes)}
+	liveBufferBytes.Add(b.bytes)
+	runtime.SetFinalizer(b, (*Buffer).Release)
+	return b
 }
 
 // FloatSlice returns a Go float32 slice backed by the buffer's unified memory.
@@ -73,8 +102,14 @@ func (b *Buffer) Len() int {
 	return int(C.metal_buffer_length(b.ptr))
 }
 
-// Release frees the Metal buffer. The Go slice from FloatSlice becomes invalid.
+// Release frees the Metal buffer. The Go slice from FloatSlice becomes
+// invalid. Idempotent — safe to call before the GC finalizer runs.
 func (b *Buffer) Release() {
+	if b.ptr == nil {
+		return
+	}
+	runtime.SetFinalizer(b, nil)
+	liveBufferBytes.Add(-b.bytes)
 	C.metal_release_buffer(b.ptr)
 	b.ptr = nil
 }
@@ -107,6 +142,7 @@ func (q *CommandQueue) Dispatch1D(pipe *Pipeline, bufs []*Buffer, threadCount in
 	C.metal_dispatch_1d(q.ptr, pipe.ptr,
 		&cbufs[0], C.uint32_t(len(cbufs)),
 		C.uint32_t(threadCount))
+	runtime.KeepAlive(bufs)
 }
 
 // Dispatch1DThreadgroups launches groupCount threadgroups of exactly
@@ -122,6 +158,7 @@ func (q *CommandQueue) Dispatch1DThreadgroups(pipe *Pipeline, bufs []*Buffer, gr
 	C.metal_dispatch_threadgroups_1d(q.ptr, pipe.ptr,
 		&cbufs[0], C.uint32_t(len(cbufs)),
 		C.uint32_t(groupCount), C.uint32_t(groupThreads))
+	runtime.KeepAlive(bufs)
 }
 
 // MatMul computes C = A @ B using MPS (Metal Performance Shaders).
@@ -129,6 +166,15 @@ func (q *CommandQueue) Dispatch1DThreadgroups(pipe *Pipeline, bufs []*Buffer, gr
 func (q *CommandQueue) MatMul(a, b, c *Buffer, M, N, K int) {
 	C.metal_mps_matmul(q.ptr, a.ptr, b.ptr, c.ptr,
 		C.uint32_t(M), C.uint32_t(N), C.uint32_t(K))
+	keepAlive3(a, b, c)
+}
+
+// keepAlive3 pins three buffers past the preceding CGo call so the GC
+// finalizer cannot release one mid-dispatch.
+func keepAlive3(a, b, c *Buffer) {
+	runtime.KeepAlive(a)
+	runtime.KeepAlive(b)
+	runtime.KeepAlive(c)
 }
 
 // MatMulTransB computes C = A @ B^T using MPS.
@@ -136,6 +182,7 @@ func (q *CommandQueue) MatMul(a, b, c *Buffer, M, N, K int) {
 func (q *CommandQueue) MatMulTransB(a, b, c *Buffer, M, N, K int) {
 	C.metal_mps_matmul_transB(q.ptr, a.ptr, b.ptr, c.ptr,
 		C.uint32_t(M), C.uint32_t(N), C.uint32_t(K))
+	keepAlive3(a, b, c)
 }
 
 // MatMulTransA computes C = A^T @ B using MPS.
@@ -143,6 +190,7 @@ func (q *CommandQueue) MatMulTransB(a, b, c *Buffer, M, N, K int) {
 func (q *CommandQueue) MatMulTransA(a, b, c *Buffer, M, N, K int) {
 	C.metal_mps_matmul_transA(q.ptr, a.ptr, b.ptr, c.ptr,
 		C.uint32_t(M), C.uint32_t(N), C.uint32_t(K))
+	keepAlive3(a, b, c)
 }
 
 // BatchedMatMul computes C[i] = A[i] @ B[i] for i in 0..batchSize-1 using MPS.
@@ -151,6 +199,7 @@ func (q *CommandQueue) MatMulTransA(a, b, c *Buffer, M, N, K int) {
 func (q *CommandQueue) BatchedMatMul(a, b, c *Buffer, M, N, K, batchSize int) {
 	C.metal_mps_batched_matmul(q.ptr, a.ptr, b.ptr, c.ptr,
 		C.uint32_t(M), C.uint32_t(N), C.uint32_t(K), C.uint32_t(batchSize))
+	keepAlive3(a, b, c)
 }
 
 // BatchedMatMulTransB computes C[i] = A[i] @ B[i]^T for i in 0..batchSize-1.
@@ -158,6 +207,20 @@ func (q *CommandQueue) BatchedMatMul(a, b, c *Buffer, M, N, K, batchSize int) {
 func (q *CommandQueue) BatchedMatMulTransB(a, b, c *Buffer, M, N, K, batchSize int) {
 	C.metal_mps_batched_matmul_transB(q.ptr, a.ptr, b.ptr, c.ptr,
 		C.uint32_t(M), C.uint32_t(N), C.uint32_t(K), C.uint32_t(batchSize))
+	keepAlive3(a, b, c)
+}
+
+// BatchedMatMulTransA computes C[i] = A[i]^T @ B[i] for i in
+// 0..batchSize-1 using MPS. Per batch, A is stored (K, M) row-major,
+// B is (K, N), C is (M, N) — the contraction runs over the leading
+// (row) dimension of both operands, matching the unbatched
+// MatMulTransA convention. Needed by the batched-matmul backward
+// passes (plan 0009 X1): dB = A^T @ grad and dB = grad^T @ A.
+// A: (batchSize*K*M), B: (batchSize*K*N), C: (batchSize*M*N).
+func (q *CommandQueue) BatchedMatMulTransA(a, b, c *Buffer, M, N, K, batchSize int) {
+	C.metal_mps_batched_matmul_transA(q.ptr, a.ptr, b.ptr, c.ptr,
+		C.uint32_t(M), C.uint32_t(N), C.uint32_t(K), C.uint32_t(batchSize))
+	keepAlive3(a, b, c)
 }
 
 // Release frees a device.

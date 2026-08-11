@@ -127,12 +127,15 @@ func (mha *MultiHeadAttention) Forward(x *g.Tensor, seqLen int) *g.Tensor {
 			vh := extractHead(v, seqLen, dim, h, headDim)
 
 			kT := g.Transpose2D(kh)
-			scores := g.ScaledMatMul(qh, kT, float32(headDim))
+			var attnWeights *g.Tensor
 			if mha.Causal {
-				mask := g.CausalMask(seqLen)
-				scores = g.MaskFill(scores, mask, -1e9)
+				// Fused scale + causal mask + softmax (plan 0009 K1) —
+				// same chain as nn/gqa.go, single-head 2-D view.
+				invScale := float32(1.0 / math.Sqrt(float64(headDim)))
+				attnWeights = g.CausalSoftmax(g.MatMul(qh, kT), 1, seqLen, invScale)
+			} else {
+				attnWeights = g.Softmax(g.ScaledMatMul(qh, kT, float32(headDim)))
 			}
-			attnWeights := g.Softmax(scores)
 			headOutputs[h] = g.MatMul(attnWeights, vh)
 		}
 		concat = concatHeadsLoop(headOutputs, seqLen, numHeads, headDim)

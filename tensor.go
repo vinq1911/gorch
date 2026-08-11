@@ -248,6 +248,58 @@ func Full(val float32, shape ...int) *Tensor {
 	return &Tensor{data: data, shape: copyShape(shape)}
 }
 
+// ---------- Residency-inheriting allocation (plan 0009 X1) ----------
+//
+// The residency-propagation rule: an op whose input is Metal-backed
+// must allocate its output in a Metal buffer even when the compute
+// runs on CPU through unified memory (Accelerate below the matmul
+// threshold, plain Go loops). On unified memory this is nearly free —
+// same physical pages, just tagged with a buffer — and it is what
+// keeps downstream ops eligible for GPU dispatch. Allocating with
+// plain Zeros permanently breaks GPU dispatch for the rest of the
+// chain.
+
+// ZerosLike allocates a zero tensor of the given shape (default: ref's
+// shape) that inherits Metal residency from ref: Metal-backed when ref
+// is Metal-backed and the global GPU is initialized, plain CPU
+// otherwise. Metal buffers arrive zero-filled (Metal's
+// newBufferWithLength contract), so no explicit clear is needed.
+func ZerosLike(ref *Tensor, shape ...int) *Tensor {
+	if len(shape) == 0 {
+		shape = ref.shape
+	}
+	if ref != nil && ref.buf != nil && gpu != nil {
+		return ZerosOnMetal(gpu.Dev, shape...)
+	}
+	return Zeros(shape...)
+}
+
+// zerosLikeEither allocates zeros of shape, inheriting Metal residency
+// from the first Metal-resident ref (or CPU if none is resident).
+func zerosLikeEither(shape []int, refs ...*Tensor) *Tensor {
+	if gpu != nil {
+		for _, r := range refs {
+			if r != nil && r.buf != nil {
+				return ZerosOnMetal(gpu.Dev, shape...)
+			}
+		}
+	}
+	return Zeros(shape...)
+}
+
+// fullLike allocates a constant-filled tensor inheriting residency
+// from ref. Used by reduction backwards (Sum/Mean) so the seed grad of
+// a Metal-resident graph starts Metal-resident — the loss-side grad
+// seeding of plan 0009 X1 item 3.
+func fullLike(ref *Tensor, val float32, shape ...int) *Tensor {
+	out := ZerosLike(ref, shape...)
+	d := out.data
+	for i := range d {
+		d[i] = val
+	}
+	return out
+}
+
 // ---------- Properties ----------
 
 // Shape returns a copy of the tensor's shape.
@@ -425,11 +477,16 @@ func (t *Tensor) Reshape(shape ...int) *Tensor {
 			name:   "Reshape",
 			inputs: []*Tensor{t},
 			backward: func(grad *Tensor) []*Tensor {
+				// Preserve the grad's Metal residency through the
+				// reshape (plan 0009 X1) — dropping buf here silently
+				// de-resided every backward chain that crossed a
+				// multi-head reshape.
 				return []*Tensor{&Tensor{
 					dtype:  dtype,
 					data:   grad.data,
 					data16: grad.data16,
 					shape:  origShape,
+					buf:    grad.buf,
 				}}
 			},
 		}
@@ -465,6 +522,7 @@ func ReshapeOp(a *Tensor, shape ...int) *Tensor {
 					data:   grad.data,
 					data16: grad.data16,
 					shape:  origShape,
+					buf:    grad.buf,
 				}}
 			},
 		}
@@ -482,7 +540,7 @@ func Transpose2D(a *Tensor) *Tensor {
 		return downcastToBF16(Transpose2D(promoteToF32(a)))
 	}
 	M, N := a.shape[0], a.shape[1]
-	out := Zeros(N, M)
+	out := ZerosLike(a, N, M)
 	for i := 0; i < M; i++ {
 		for j := 0; j < N; j++ {
 			out.data[j*M+i] = a.data[i*N+j]
@@ -517,7 +575,7 @@ func AddBias(a, bias *Tensor) *Tensor {
 		panic(fmt.Sprintf("gorch: AddBias bias length %d != feature dim %d", len(bData), N))
 	}
 
-	out := Zeros(M, N)
+	out := ZerosLike(a, M, N)
 	for i := 0; i < M; i++ {
 		for j := 0; j < N; j++ {
 			out.data[i*N+j] = a.data[i*N+j] + bData[j]

@@ -122,9 +122,17 @@ func NewGQA(dim, numQueryHeads, numKVHeads int) *GQA {
 // absolute position of x[0] for RoPE / causal masking; pass 0 for the
 // no-cache full-sequence forward.
 //
-// Inference-only path — does not build the autograd graph. Mirrors
-// the existing MultiHeadAttention.Forward batched-CPU pattern but
-// with the QHeads → KVHeads expansion folded in via RepeatInterleave.
+// Builds the full autograd graph (this is the training path; a stale
+// "inference-only" note here predated the autograd-aware
+// scale/mask/softmax rework — fixed in plan 0009 X1). Mirrors the
+// existing MultiHeadAttention.Forward batched pattern with the
+// QHeads → KVHeads expansion folded in via RepeatInterleave.
+//
+// The causal scale+mask+softmax runs as the fused g.CausalSoftmax op
+// (plan 0009 K1): one op, one output tensor, Metal kernel when the
+// scores are GPU-resident — replacing the previous Full+Mul scale
+// tensor (144 MB/layer at seq 1500), the tiled bool mask, and the
+// MaskFill intermediate.
 func (gqa *GQA) Forward(x *g.Tensor, startPos int) *g.Tensor {
 	seqLen := x.Shape()[0]
 	headDim := gqa.HeadDim
@@ -158,36 +166,20 @@ func (gqa *GQA) Forward(x *g.Tensor, startPos int) *g.Tensor {
 	// Batched scores: (numQ, seq, headDim) × (numQ, headDim, seq) → (numQ, seq, seq)
 	scores := g.BatchedMatMulTransB(qH, kH, numQ, seqLen, seqLen, headDim)
 
-	// Scale by 1/sqrt(headDim) using a broadcast multiply so the
-	// gradient flows back through scores. (Was an in-place mutation
-	// before, which broke the autograd chain.)
 	invScale := float32(1.0 / math.Sqrt(float64(headDim)))
-	scaleVec := g.Full(invScale, scores.Shape()...)
-	scoredScaled := g.Mul(scores, scaleVec)
-
-	// Apply causal mask via autograd-aware MaskFill on the
-	// (numQ*seq, seq) reshaped view. The mask has the same upper-
-	// triangular pattern repeated per (head, row) — build once and
-	// apply.
-	var masked *g.Tensor
+	var scoresOut *g.Tensor
 	if gqa.Causal {
-		flatScores := scoredScaled.Reshape(numQ*seqLen, seqLen)
-		// Mask shape matches the flat tensor; tile causal upper-tri
-		// over numQ heads.
-		baseMask := g.CausalMask(seqLen)
-		fullMask := make([]bool, numQ*seqLen*seqLen)
-		for h := 0; h < numQ; h++ {
-			copy(fullMask[h*seqLen*seqLen:(h+1)*seqLen*seqLen], baseMask)
-		}
-		masked = g.MaskFill(flatScores, fullMask, -1e9)
+		// Fused scale + causal mask + softmax (K1). The mask is a
+		// compare against the column index inside the kernel/CPU loop —
+		// no mask tensor is built at all (subsumes the per-(heads, seq)
+		// cached-mask plan item).
+		scoresOut = g.CausalSoftmax(scores, numQ, seqLen, invScale)
 	} else {
-		masked = scoredScaled.Reshape(numQ*seqLen, seqLen)
+		// Non-causal: grad-aware scalar scaling (no Full+Mul constant
+		// tensor) + plain softmax on the (numQ*seq, seq) view.
+		scaled := g.Scale(scores, invScale)
+		scoresOut = g.Softmax(scaled.Reshape(numQ*seqLen, seqLen)).Reshape(numQ, seqLen, seqLen)
 	}
-
-	// Autograd-aware softmax along the last dim of the
-	// (numQ*seq, seq) view.
-	softmaxed := g.Softmax(masked)
-	scoresOut := softmaxed.Reshape(numQ, seqLen, seqLen)
 
 	// attn @ V: (numQ, seq, seq) × (numQ, seq, headDim) → (numQ, seq, headDim)
 	attnOut := g.BatchedMatMul(scoresOut, vH, numQ, seqLen, headDim, seqLen)

@@ -17,7 +17,7 @@ func MaskFill(a *Tensor, mask []bool, val float32) *Tensor {
 	if a.dtype == BFloat16 {
 		return downcastToBF16(MaskFill(promoteToF32(a), mask, val))
 	}
-	out := Zeros(a.shape...)
+	out := ZerosLike(a, a.shape...)
 	copy(out.data, a.data)
 	for i, m := range mask {
 		if m {
@@ -30,7 +30,7 @@ func MaskFill(a *Tensor, mask []bool, val float32) *Tensor {
 			name:   "MaskFill",
 			inputs: []*Tensor{a},
 			backward: func(grad *Tensor) []*Tensor {
-				dx := Zeros(a.shape...)
+				dx := zerosLikeEither(a.shape, grad, a)
 				for i, m := range mask {
 					if !m {
 						dx.data[i] = grad.data[i]
@@ -102,7 +102,7 @@ func ScaledMatMul(a, b *Tensor, scale float32) *Tensor {
 	}
 	out := MatMul(a, b)
 	invScale := 1.0 / float32(math.Sqrt(float64(scale)))
-	result := Zeros(out.shape...)
+	result := ZerosLike(out, out.shape...)
 	accelerate.VScale(out.data, invScale, result.data)
 
 	if GradEnabled() && (out.requiresGrad) {
@@ -112,7 +112,7 @@ func ScaledMatMul(a, b *Tensor, scale float32) *Tensor {
 			inputs: out.gradFn.inputs,
 			backward: func(grad *Tensor) []*Tensor {
 				// Scale the gradient, then delegate to MatMul backward
-				scaledGrad := Zeros(grad.shape...)
+				scaledGrad := ZerosLike(grad, grad.shape...)
 				accelerate.VScale(grad.data, invScale, scaledGrad.data)
 				return out.gradFn.backward(scaledGrad)
 			},

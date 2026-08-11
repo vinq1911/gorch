@@ -84,6 +84,14 @@ void metal_mps_batched_matmul_transB(MTLCommandQueueRef queue,
                                      uint32_t M, uint32_t N, uint32_t K,
                                      uint32_t batchSize);
 
+// Batched MPS: C[i] = A[i]^T @ B[i] for i in 0..batchSize-1.
+// Per batch, A is stored (K, M) row-major, B is (K, N), C is (M, N).
+// A is (batchSize*K*M), B is (batchSize*K*N), C is (batchSize*M*N).
+void metal_mps_batched_matmul_transA(MTLCommandQueueRef queue,
+                                     MTLBufferRef A, MTLBufferRef B, MTLBufferRef C,
+                                     uint32_t M, uint32_t N, uint32_t K,
+                                     uint32_t batchSize);
+
 // Release a device or command queue.
 void metal_release(void* obj);
 
