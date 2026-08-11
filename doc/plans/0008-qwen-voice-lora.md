@@ -144,6 +144,23 @@ Not a Jinja engine. A fixed renderer for the no-tools, non-thinking subset: `<|i
 
 **Benchmark (`BenchmarkQwenDecode`, `BenchmarkQwenPrefill`)** — the demo's THE-unknown measurement, M0 exit artifact: (a) cached decode tok/s at contexts 128/512/1024/2048, (b) prefill tok/s at 512/1024, f32 CPU Accelerate. Recorded in the plan's M0 results table and fed into §5.3's budget.
 
+#### M0 measured results (2026-08-11, model half)
+
+Apple M4, f32 CPU Accelerate, `model/qwen` KV-cached path (`go test ./model/qwen -bench …`). Median of 3 runs; machine carried background load (load average ~5–6) throughout, run-to-run spread was ±2%.
+
+| Benchmark | Context / tokens | tok/s (median of 3) | runs |
+|---|---|---|---|
+| `BenchmarkQwenDecode` | 128 | **17.1** | 17.10 / 17.47 / 17.13 |
+| `BenchmarkQwenDecode` | 512 | **15.0** | 15.05 / 14.98 / 14.77 |
+| `BenchmarkQwenDecode` | 1024 | **12.1** | 11.94 / 12.36 / 12.10 |
+| `BenchmarkQwenDecode` | 2048 | **8.7** | 8.65 / 8.82 / 8.67 |
+| `BenchmarkQwenPrefill` | 512 | **351** | 348 / 354 / 351 |
+| `BenchmarkQwenPrefill` | 1024 | **280** | 285 / 277 / 280 |
+
+Reading against §7's honesty estimates: decode lands exactly in the predicted 8–15 f32 band (upper edge at short context), prefill slightly under the 400–1,000 band at 280–350 tok/s. §5.2 budget with R≈15/P≈350 at demo-typical context: TTFA ≈ 0.6 + 500/350 + 63/15 + 0.01 ≈ **6.2 s**; a 5 s answer (500 audio tokens) speaks in ~33–58 s depending on context growth — "works but patient", as §5.2 predicted; the §5.4 knob ladder plus plan 0009 remain the path to real-time.
+
+Parity measured (Go vs HF float32 eager reference, `model/testdata/qwen_fixtures.safetensors`, prompts 16/128 tokens): embeddings bit-exact; layer-0 norm ≤3e-7 rel; layer-0 q/k post-qknorm+rope ≤1.3e-4 abs (RoPE table f32-pow ulp noise, washed out by attention: layer-0 attn/block out ≤1.4e-4 rel on |ref|≥1e-2); layer-13 out ≤1.3e-3 rel, layer-27 out ≤1.5e-2 rel, final norm ≤4.2e-3 rel, last-position logits ≤3e-3 rel with exact top-5 id match on both prompts. For calibration, the HF reference against itself (eager vs sdpa backends, same weights) shows 1.4e-3 / 1.5e-2 / 3e-3 noise at layers 13 / 27 / logits — the Go port sits inside the reference's own backend-noise envelope, so the deep-stage gates in `model/qwen/qwen_test.go` were set one notch above that envelope (deviation from the §2.7 starting budgets, justification recorded in the test file). ForwardCached-vs-full-forward: ≤5e-5 abs / ≤3e-5 rel on logits (gate 5e-5 + 1e-4·|b|; the plan's 1e-5 is unattainable between two differently-ordered f32 GEMM paths).
+
 M0 effort: loader+block+cached-gen ~4-6 agent-days; tokenizer (codex-assisted) ~2-4; fixtures+bench ~2.
 
 ---

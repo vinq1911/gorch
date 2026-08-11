@@ -73,8 +73,17 @@ func NewRoPE(headDim, maxSeq int, base float32, style RopeStyle) *RoPE {
 	for pos := 0; pos < maxSeq; pos++ {
 		for i := 0; i < half; i++ {
 			// θ = pos / base^(2i/headDim) = pos * base^(-2i/headDim)
-			invFreq := math.Pow(float64(base), -float64(2*i)/float64(headDim))
-			theta := float64(pos) * invFreq
+			//
+			// Precision note: the inverse frequency and the pos·invFreq
+			// product are rounded to float32 BEFORE taking cos/sin —
+			// matching HF transformers' rotary tables (inv_freq is a
+			// float32 tensor; freqs = position_ids.float() @ inv_freq).
+			// Keeping the product in float64 diverges from the HF
+			// reference by ~|θ|·6e-8 radians, which at position ~128
+			// reads as ~1e-4 absolute error on rotated Q/K — visible in
+			// the Qwen3 golden parity gates (plan 0008 §2.7).
+			invFreq := float32(math.Pow(float64(base), -float64(2*i)/float64(headDim)))
+			theta := float64(float32(pos) * invFreq)
 			cos[pos*half+i] = float32(math.Cos(theta))
 			sin[pos*half+i] = float32(math.Sin(theta))
 		}
