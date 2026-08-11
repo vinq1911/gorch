@@ -19,6 +19,16 @@ type Module interface {
 	Parameters() []*g.Tensor
 }
 
+// AlwaysComputeLinearDW disables the frozen-weight dW/db skip in
+// Linear's backward (plan 0008 §3.6). Normally, when a Linear's
+// Weight has RequiresGrad()==false the dL/dW GEMM (and the db sum for
+// a frozen Bias) is skipped entirely — the autograd engine never
+// accumulates gradients into frozen tensors, so computing them is
+// pure waste; with a fully-frozen LoRA base model that skip removes
+// one of the three big GEMMs from every Linear backward. This switch
+// exists so trainers can measure the step-time delta.
+var AlwaysComputeLinearDW = false
+
 // ---------- Linear ----------
 
 // Linear implements a fully connected layer: y = x @ W^T + b.
@@ -96,10 +106,23 @@ func (l *Linear) Forward(x *g.Tensor) *g.Tensor {
 			// GPU path: when grad, x, and W are all on Metal, dispatch
 			// dx and dW through MPS. The bias sum is always done on
 			// CPU because it touches at most a few thousand floats.
+			// Frozen-param fast path (plan 0008 §3.6): a gradient is
+			// only accumulated into inputs with RequiresGrad()==true,
+			// so for a frozen Weight/Bias the dW GEMM / db sum would
+			// be computed and thrown away. Skip them (nil slots are
+			// never read by the autograd engine for frozen inputs).
+			needDW := capturedW.RequiresGrad() || AlwaysComputeLinearDW
+			needDB := l.Bias.RequiresGrad() || AlwaysComputeLinearDW
+
 			if grad.IsOnMetal() && capturedX.IsOnMetal() && capturedW.IsOnMetal() {
 				dx := gpuLinearDx(grad, capturedW, capturedBatch, capturedIn, capturedOut, capturedX.RequiresGrad())
-				dw := gpuLinearDw(grad, capturedX, capturedBatch, capturedIn, capturedOut)
-				db := linearDb(grad, capturedBatch, capturedOut)
+				var dw, db *g.Tensor
+				if needDW {
+					dw = gpuLinearDw(grad, capturedX, capturedBatch, capturedIn, capturedOut)
+				}
+				if needDB {
+					db = linearDb(grad, capturedBatch, capturedOut)
+				}
 				return []*g.Tensor{dx, dw, db}
 			}
 
@@ -115,11 +138,17 @@ func (l *Linear) Forward(x *g.Tensor) *g.Tensor {
 			}
 
 			// dL/dW = grad^T @ x  (out, batch) @ (batch, in) = (out, in)
-			dwData := make([]float32, capturedOut*capturedIn)
-			accelerate.SgemmTransA(capturedOut, capturedIn, capturedBatch, 1.0, gData, capturedX.Data(), 0.0, dwData)
-			dw := g.NewTensor(dwData, capturedOut, capturedIn)
+			var dw *g.Tensor
+			if needDW {
+				dwData := make([]float32, capturedOut*capturedIn)
+				accelerate.SgemmTransA(capturedOut, capturedIn, capturedBatch, 1.0, gData, capturedX.Data(), 0.0, dwData)
+				dw = g.NewTensor(dwData, capturedOut, capturedIn)
+			}
 
-			db := linearDb(grad, capturedBatch, capturedOut)
+			var db *g.Tensor
+			if needDB {
+				db = linearDb(grad, capturedBatch, capturedOut)
+			}
 
 			return []*g.Tensor{dx, dw, db}
 		})

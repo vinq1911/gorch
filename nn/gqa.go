@@ -43,6 +43,15 @@ type GQA struct {
 	// nil = disabled (Llama / mythos behaviour, unchanged).
 	QNorm *RMSNorm
 	KNorm *RMSNorm
+
+	// Optional LoRA adapters (plan 0008 §3.1). When non-nil, the
+	// corresponding projection routes through the adapter (whose Base
+	// must alias the projection's Linear); nil = plain projection,
+	// bit-identical to the unadapted module.
+	LoRAQ *LoRALinear
+	LoRAK *LoRALinear
+	LoRAV *LoRALinear
+	LoRAO *LoRALinear
 }
 
 // GQAConfig fully parametrises a GQA module. Unlike NewGQA (which pins
@@ -197,7 +206,7 @@ func (gqa *GQA) Forward(x *g.Tensor, startPos int) *g.Tensor {
 	// (Qwen3: 16·128 = 2048 ≠ 1024) feed Wo's larger input dim here.
 	concat := g.Permute(attnOut, []int{1, 0, 2}).Reshape(seqLen, innerDim)
 
-	return gqa.Wo.Forward(concat)
+	return loraForward(gqa.LoRAO, gqa.Wo, concat)
 }
 
 // ProjectQKV projects x to per-head Q/K/V with the optional per-head
@@ -215,9 +224,9 @@ func (gqa *GQA) ProjectQKV(x *g.Tensor, startPos int) (qH, kH, vH *g.Tensor) {
 	numQ := gqa.NumQueryHeads
 	numKV := gqa.NumKVHeads
 
-	q := gqa.Wq.Forward(x) // (seq, numQ*headDim)
-	k := gqa.Wk.Forward(x) // (seq, numKV*headDim)
-	v := gqa.Wv.Forward(x)
+	q := loraForward(gqa.LoRAQ, gqa.Wq, x) // (seq, numQ*headDim)
+	k := loraForward(gqa.LoRAK, gqa.Wk, x) // (seq, numKV*headDim)
+	v := loraForward(gqa.LoRAV, gqa.Wv, x)
 
 	// Per-head RMSNorm on the (seq·heads, headDim) view — row r is
 	// (token r/heads, head r%heads), and RMSNorm is per-row, so the
@@ -355,7 +364,7 @@ func (gqa *GQA) forwardCached(x *g.Tensor, cache *KVCache, layerIdx, posOffset i
 				attnOut[(h*newSeq+i)*headDim:(h*newSeq+i+1)*headDim])
 		}
 	}
-	return gqa.Wo.Forward(g.NewTensor(concat, newSeq, numQ*headDim))
+	return loraForward(gqa.LoRAO, gqa.Wo, g.NewTensor(concat, newSeq, numQ*headDim))
 }
 
 // softmaxRowsAccelerated softmaxes each row of a (rows, cols) buffer in

@@ -3,6 +3,7 @@
 package optim
 
 import (
+	"fmt"
 	"math"
 
 	g "github.com/vinq1911/gorch"
@@ -29,6 +30,7 @@ import (
 type AdamW struct {
 	params      []*g.Tensor
 	lr          float32
+	lrMul       []float32 // per-param multiplier on lr (param groups)
 	beta1       float32
 	beta2       float32
 	eps         float32
@@ -38,10 +40,40 @@ type AdamW struct {
 	t           int         // timestep
 }
 
+// ParamGroup pairs a parameter set with its own learning rate
+// (plan 0008 §4.3: LoRA factors and Ext embedding rows train at
+// different LRs). The FIRST group's LR is the base rate: a scheduler
+// driving SetLR rescales every group proportionally, keeping the
+// groups' LR ratios fixed.
+type ParamGroup struct {
+	Params []*g.Tensor
+	LR     float32
+}
+
 // NewAdamW creates an AdamW optimizer with default betas (0.9, 0.999),
 // eps 1e-8, and the supplied weight-decay coefficient. PyTorch's
 // default is 0.01.
 func NewAdamW(params []*g.Tensor, lr, weightDecay float32) *AdamW {
+	return NewAdamWGroups([]ParamGroup{{Params: params, LR: lr}}, weightDecay)
+}
+
+// NewAdamWGroups creates an AdamW over several parameter groups, each
+// with its own learning rate. groups[0].LR is the base rate (SetLR /
+// GetLR operate on it); every other group's effective rate scales
+// proportionally when a scheduler updates the base.
+func NewAdamWGroups(groups []ParamGroup, weightDecay float32) *AdamW {
+	if len(groups) == 0 || groups[0].LR == 0 {
+		panic("optim: NewAdamWGroups needs ≥1 group with a non-zero base LR")
+	}
+	base := groups[0].LR
+	var params []*g.Tensor
+	var lrMul []float32
+	for _, grp := range groups {
+		for _, p := range grp.Params {
+			params = append(params, p)
+			lrMul = append(lrMul, grp.LR/base)
+		}
+	}
 	m := make([][]float32, len(params))
 	v := make([][]float32, len(params))
 	for i, p := range params {
@@ -50,7 +82,8 @@ func NewAdamW(params []*g.Tensor, lr, weightDecay float32) *AdamW {
 	}
 	return &AdamW{
 		params:      params,
-		lr:          lr,
+		lr:          base,
+		lrMul:       lrMul,
 		beta1:       0.9,
 		beta2:       0.999,
 		eps:         1e-8,
@@ -71,6 +104,7 @@ func (o *AdamW) Step() {
 		if grad == nil {
 			continue
 		}
+		lr := o.lr * o.lrMul[i]
 		data := p.Data()
 		gData := grad.Data()
 		for j := range data {
@@ -83,7 +117,7 @@ func (o *AdamW) Step() {
 
 			// Decoupled weight decay: applied directly to the param,
 			// NOT folded into the gradient. This is the AdamW core idea.
-			data[j] -= o.lr * (mHat/(float32(math.Sqrt(float64(vHat)))+o.eps) + o.weightDecay*data[j])
+			data[j] -= lr * (mHat/(float32(math.Sqrt(float64(vHat)))+o.eps) + o.weightDecay*data[j])
 		}
 	}
 }
@@ -104,3 +138,32 @@ func (o *AdamW) GetLR() float32 { return o.lr }
 // SetWeightDecay updates the weight-decay coefficient mid-training (used
 // by some warmup-then-decay schedules).
 func (o *AdamW) SetWeightDecay(wd float32) { o.weightDecay = wd }
+
+// StateTensors exposes the optimizer state for checkpointing
+// (plan 0008 §3.4): the timestep and the live m/v moment slices, in
+// parameter order. The slices are NOT copies — checkpoint writers
+// must serialise them before the next Step.
+func (o *AdamW) StateTensors() (step int, m, v [][]float32) {
+	return o.t, o.m, o.v
+}
+
+// LoadState restores optimizer state saved via StateTensors. Lengths
+// must match the current parameter list exactly.
+func (o *AdamW) LoadState(step int, m, v [][]float32) error {
+	if len(m) != len(o.params) || len(v) != len(o.params) {
+		return fmt.Errorf("optim: AdamW.LoadState got %d/%d moment slices for %d params",
+			len(m), len(v), len(o.params))
+	}
+	for i, p := range o.params {
+		if len(m[i]) != p.Size() || len(v[i]) != p.Size() {
+			return fmt.Errorf("optim: AdamW.LoadState param %d: moment sizes %d/%d != param size %d",
+				i, len(m[i]), len(v[i]), p.Size())
+		}
+	}
+	o.t = step
+	for i := range o.m {
+		copy(o.m[i], m[i])
+		copy(o.v[i], v[i])
+	}
+	return nil
+}
