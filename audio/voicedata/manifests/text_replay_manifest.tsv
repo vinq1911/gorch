@@ -1,0 +1,501 @@
+idx	sample_tokens	answer_tokens	prompt	answer
+0	29	9	What is the capital of France?	The capital of France is **Paris**.
+1	31	11	What is the capital of Japan?	The capital of Japan is **Osaka City**.
+2	28	8	What is the capital of Brazil?	The capital of Brazil is Brasília.
+3	27	7	What is the capital of Canada?	The capital of Canada is Ottawa.
+4	30	10	What is the capital of Egypt?	The capital of Egypt is **Cairo**.
+5	27	7	What is the capital of Kenya?	The capital of Kenya is Nairobi.
+6	27	7	What is the capital of Norway?	The capital of Norway is Oslo.
+7	27	7	What is the capital of Spain?	The capital of Spain is Madrid.
+8	27	7	What is the capital of Thailand?	The capital of Thailand is Bangkok.
+9	30	10	What is the capital of Mexico?	The capital of Mexico is **Mexico City**.
+10	30	10	What is the capital of India?	The capital of India is **New Delhi**.
+11	27	7	What is the capital of Italy?	The capital of Italy is Rome.
+12	29	9	What is the capital of Germany?	The capital of Germany is **Berlin**.
+13	30	10	What is the capital of Australia?	The capital of Australia is **Canberra**.
+14	30	10	What is the capital of Peru?	The capital of Peru is **Lima**.
+15	30	10	What is the capital of Finland?	The capital of Finland is **Helsinki**.
+16	30	10	What is the capital of Greece?	The capital of Greece is **Athens**.
+17	31	11	What is the capital of Turkey?	The capital of Turkey is **Ankara**.
+18	30	10	What is the capital of Poland?	The capital of Poland is **Warsaw**.
+19	27	7	What is the capital of Chile?	The capital of Chile is Santiago.
+20	27	7	What is the capital of Portugal?	The capital of Portugal is Lisbon.
+21	30	10	What is the capital of Austria?	The capital of Austria is **Vienna**.
+22	27	7	What is the capital of Ireland?	The capital of Ireland is Dublin.
+23	30	10	What is the capital of Sweden?	The capital of Sweden is **Stockholm**.
+24	27	7	What is the capital of Denmark?	The capital of Denmark is Copenhagen.
+25	32	12	What is the capital of Argentina?	The capital of Argentina is **Buenos Aires**.
+26	30	10	What is the capital of Morocco?	The capital of Morocco is **Nador**.
+27	30	10	What is the capital of Vietnam?	The capital of Vietnam is **Hanoi**.
+28	32	11	What is the capital of South Korea?	The capital of South Korea is **Seoul**.
+29	30	10	What is the capital of Indonesia?	The capital of Indonesia is **Jakarta**.
+30	31	11	What is the capital of Netherlands?	The capital of the Netherlands is **Amsterdam**.
+31	27	7	What is the capital of Switzerland?	The capital of Switzerland is Bern.
+32	31	11	What is the capital of Hungary?	The capital of Hungary is **Budapest**.
+33	29	8	What is the capital of Czechia?	The capital of Czechia is Prague.
+34	28	8	What is the capital of Croatia?	The capital of Croatia is Zagreb.
+35	30	10	What is the capital of Iceland?	The capital of Iceland is Reykjavik.
+36	29	8	What is the capital of New Zealand?	The capital of New Zealand is Wellington.
+37	32	12	What is the capital of Colombia?	The capital of Colombia is **Bogotá**.
+38	27	7	What is the capital of Cuba?	The capital of Cuba is Havana.
+39	30	10	What is the capital of Ghana?	The capital of Ghana is **Accra**.
+40	29	8	What is 2 plus 3?	2 plus 3 equals 5.
+41	30	9	What is 4 plus 5?	4 plus 5 equals **9**.
+42	31	10	What is 6 plus 7?	6 plus 7 equals **13**.
+43	30	9	What is 8 plus 9?	8 plus 9 is 17.
+44	31	10	What is 3 plus 7?	3 plus 7 equals **10**.
+45	31	10	What is 5 plus 8?	5 plus 8 equals **13**.
+46	31	10	What is 9 plus 4?	9 plus 4 equals **13**.
+47	31	10	What is 7 plus 6?	7 plus 6 equals **13**.
+48	35	12	What is 12 plus 11?	12 plus 11 equals **23**.
+49	33	11	What is 15 plus 4?	15 plus 4 equals **19**.
+50	33	11	What is 13 plus 8?	13 plus 8 equals **21**.
+51	33	11	What is 17 plus 5?	17 plus 5 equals **22**.
+52	33	11	What is 21 plus 9?	21 plus 9 equals **30**.
+53	33	11	What is 14 plus 7?	14 plus 7 equals **21**.
+54	33	11	What is 18 plus 3?	18 plus 3 equals **21**.
+55	33	11	What is 25 plus 6?	25 plus 6 equals **31**.
+56	33	11	What is 32 plus 9?	32 plus 9 equals **41**.
+57	35	12	What is 11 plus 12?	11 plus 12 equals **23**.
+58	33	11	What is 19 plus 7?	19 plus 7 equals **26**.
+59	33	11	What is 23 plus 8?	23 plus 8 equals **31**.
+60	33	11	What is 16 plus 5?	16 plus 5 equals **21**.
+61	33	11	What is 27 plus 4?	27 plus 4 equals **31**.
+62	33	11	What is 31 plus 2?	31 plus 2 equals **33**.
+63	33	11	What is 35 plus 6?	35 plus 6 equals **41**.
+64	33	11	What is 41 plus 3?	41 plus 3 equals **44**.
+65	33	11	What is 45 plus 8?	45 plus 8 equals **53**.
+66	33	11	What is 52 plus 7?	52 plus 7 equals **59**.
+67	33	11	What is 29 plus 9?	29 plus 9 equals **38**.
+68	33	11	What is 33 plus 5?	33 plus 5 equals **38**.
+69	33	11	What is 38 plus 4?	38 plus 4 equals **42**.
+70	29	8	What is 2 times 3?	2 times 3 is 6.
+71	31	10	What is 4 times 5?	4 times 5 is **20**.
+72	31	10	What is 6 times 7?	6 times 7 is **42**.
+73	30	9	What is 8 times 9?	8 times 9 is 72.
+74	31	10	What is 3 times 7?	3 times 7 is **21**.
+75	31	10	What is 5 times 8?	5 times 8 is **40**.
+76	39	18	What is 9 times 4?	9 multiplied by 4 is:\n\n**9 × 4 = 36**.
+77	30	9	What is 7 times 6?	7 times 6 is 42.
+78	46	23	What is 12 times 11?	12 multiplied by 11 is:\n\n**12 × 11 = 132**.
+79	42	20	What is 15 times 4?	15 multiplied by 4 is:\n\n**15 × 4 = 60**.
+80	43	21	What is 13 times 8?	13 multiplied by 8 is:\n\n**13 × 8 = 104**.
+81	42	20	What is 17 times 5?	17 multiplied by 5 is:\n\n**17 × 5 = 85**.
+82	43	21	What is 21 times 9?	21 multiplied by 9 is:\n\n**21 × 9 = 189**.
+83	33	11	What is 14 times 7?	14 times 7 is **98**.
+84	42	20	What is 18 times 3?	18 multiplied by 3 is:\n\n**18 × 3 = 54**.
+85	43	21	What is 25 times 6?	25 multiplied by 6 is:\n\n**25 × 6 = 150**.
+86	33	11	What is 32 times 9?	32 × 9 = 288.
+87	46	23	What is 11 times 12?	11 multiplied by 12 is:\n\n**11 × 12 = 132**.
+88	43	21	What is 19 times 7?	19 multiplied by 7 is:\n\n**19 × 7 = 133**.
+89	43	21	What is 23 times 8?	23 multiplied by 8 is:\n\n**23 × 8 = 184**.
+90	42	20	What is 16 times 5?	16 multiplied by 5 is:\n\n**16 × 5 = 80**.
+91	43	21	What is 27 times 4?	27 multiplied by 4 is:\n\n**27 × 4 = 108**.
+92	42	20	What is 31 times 2?	31 multiplied by 2 is:\n\n**31 × 2 = 62**.
+93	43	21	What is 35 times 6?	35 multiplied by 6 is:\n\n**35 × 6 = 210**.
+94	43	21	What is 41 times 3?	41 multiplied by 3 is:\n\n**41 × 3 = 123**.
+95	43	21	What is 45 times 8?	45 multiplied by 8 is:\n\n**45 × 8 = 360**.
+96	69	47	What is 52 times 7?	To calculate **52 multiplied by 7**, we can do the following:\n\n$$\n52 \times 7 = 364\n$$\n\nSo, **52 times 7 is 364**.
+97	43	21	What is 29 times 9?	29 multiplied by 9 is:\n\n**29 × 9 = 261**.
+98	43	21	What is 33 times 5?	33 multiplied by 5 is:\n\n**33 × 5 = 165**.
+99	33	11	What is 38 times 4?	38 × 4 = 152.
+100	27	10	Name three fruits.	Three fruits are apples, bananas, and oranges.
+101	42	25	Name three animals.	Three animals are:  \n1. **Elephant**  \n2. **Lion**  \n3. **Tiger**
+102	28	11	Name three colors.	Three colors could be blue, green, and red.
+103	43	24	Name three countries in Europe.	Three countries in Europe are:  \n1. **Germany**  \n2. **France**  \n3. **Italy**
+104	32	14	Name three musical instruments.	Three musical instruments are the piano, the violin, and the guitar.
+105	27	10	Name three planets.	Three planets are Mercury, Venus, and Mars.
+106	28	11	Name three vegetables.	Three vegetables are: carrots, tomatoes, and lettuce.
+107	33	16	Name three sports.	Three sports are:  \n1. Basketball  \n2. Soccer  \n3. Tennis
+108	41	23	Name three programming languages.	Three programming languages are:\n\n1. **Python**  \n2. **Java**  \n3. **C++**
+109	36	19	Name three rivers.	Three rivers are:  \n1. Mississippi River  \n2. Amazon River  \n3. Nile River
+110	45	28	Name three mountains.	Three mountains are:  \n1. Mount Fuji (Japan)  \n2. Everest (India)  \n3. Andes (Peru)
+111	43	26	Name three birds.	Three birds could be:  \n1. **Eagle**  \n2. **Crow**  \n3. **Hummingbird**
+112	43	26	Name three fish.	Three fish are:  \n1. **Bluefin Tuna**  \n2. **Cod**  \n3. **Salmon**
+113	38	21	Name three trees.	Three trees that are commonly known and appreciated are:\n\n1. Maple  \n2. Oak  \n3. Pine
+114	44	27	Name three flowers.	Three flowers you can name are:  \n1. **Rose**  \n2. **Lily**  \n3. **Daisy**
+115	30	13	Name three metals.	Three metals are: **iron, copper, and aluminum**.
+116	69	51	Name three gemstones.	Three gemstones are:  \n1. **Diamond** – Known for its brilliance and rarity.  \n2. **Sapphire** – Often associated with love and passion.  \n3. **Ruby** – A popular gemstone with a deep red color.
+117	77	60	Name three dances.	Three dances are:  \n1. **Salsa** – A vibrant, rhythmic dance from Latin America.  \n2. **Bossa Nova** – A fusion of jazz and salsa, often performed in Brazil.  \n3. **Hip-Hop** – A fast-paced, rhythmic dance popular
+118	78	60	Name three board games.	Sure! Here are three popular board games:\n\n1. **Catan** – A strategy game where players build and trade resources to develop a kingdom.  \n2. **Monopoly** – A board game that involves buying and selling land in a fictional country.  \n3. **Risk** – A
+119	40	23	Name three professions.	Three professions are:  \n1. **Engineer**  \n2. **Doctor**  \n3. **Teacher**
+120	78	60	Name three weather phenomena.	Three common weather phenomena are:\n\n1. **Hurricanes** – These are large, rotating storm systems that form over the ocean and can cause significant damage.  \n2. **Tornadoes** – These are violent, rotating columns of air in the atmosphere.  \n3. **Thunderstorms** –
+121	44	26	Name three sea creatures.	Three sea creatures are:  \n1. **Whale**  \n2. **Seal**  \n3. **Tuna**
+122	46	28	Name three breakfast foods.	Three breakfast foods are:  \n1. **Eggs**  \n2. **Oatmeal**  \n3. **Bread**
+123	31	13	Name three farm animals.	Three examples of farm animals are cows, chickens, and pigs.
+124	34	15	Name three kitchen utensils.	Three kitchen utensils are a knife, a spoon, and a whisk.
+125	47	28	Name three items of clothing.	Sure! Here are three items of clothing:\n\n1. **T-shirt**  \n2. **Jeans**  \n3. **Hat**
+126	34	14	Name three parts of the body.	Three parts of the body are the skin, muscles, and bones.
+127	31	13	Name three school subjects.	Three school subjects could be Mathematics, Science, and Language Arts.
+128	45	26	Name three modes of transport.	Three modes of transport are:\n\n1. **Roadways**  \n2. **Railways**  \n3. **Airports**
+129	40	23	Name three shapes.	Three shapes can be:  \n1. **Triangle**  \n2. **Square**  \n3. **Circle**
+130	36	14	Explain in one sentence what gravity is.	Gravity is the force that attracts all objects with mass toward each other.
+131	55	32	Explain in one sentence what photosynthesis is.	Photosynthesis is the process by which plants, algae, and some bacteria convert light energy into chemical energy, using carbon dioxide and water to produce glucose and oxygen.
+132	49	27	Explain in one sentence what democracy is.	Democracy is a system of government where the people have the right to decide the course of government through elections and the rule of law.
+133	51	29	Explain in one sentence what inflation is.	Inflation refers to a general increase in the prices of goods and services over time, leading to a decrease in the purchasing power of a currency.
+134	49	26	Explain in one sentence what evaporation is.	Evaporation is the process by which a substance changes from a liquid to a gas, typically at a temperature above its boiling point.
+135	46	24	Explain in one sentence what friction is.	Friction is a force that opposes the relative motion of two surfaces in contact, causing them to slow down or stop.
+136	50	28	Explain in one sentence what electricity is.	Electricity is the flow of electric charge, typically carried by electrons, which can be harnessed and used to power devices and systems.
+137	43	20	Explain in one sentence what magnetism is.	Magnetism is the force that acts on magnetic fields and can be either attractive or repulsive.
+138	43	20	Explain in one sentence what an ecosystem is.	An ecosystem is a system of living organisms and their non-living environment interacting in a complex web.
+139	47	24	Explain in one sentence what a vaccine is.	A vaccine is a biological substance designed to stimulate the body's immune system to recognize and fight off a specific pathogen.
+140	45	22	Explain in one sentence what a metaphor is.	A metaphor is a figure of speech that compares two different things by using the same word or a similar concept.
+141	64	41	Explain in one sentence what an eclipse is.	An eclipse is a phenomenon where a celestial body, such as a planet or star, blocks or covers the path of another celestial body, such as a star or a planet, causing a temporary visual overlap.
+142	53	30	Explain in one sentence what a volcano is.	A volcano is a geological feature formed by the eruption of magma from the Earth's mantle, which then cools and solidifies to create a volcano.
+143	45	22	Explain in one sentence what a glacier is.	A glacier is a massive body of ice that flows over a large surface, often forming in mountainous regions.
+144	54	30	Explain in one sentence what the water cycle is.	The water cycle is the continuous movement of water between the Earth's surface and the atmosphere, involving evaporation, condensation, precipitation, and collection.
+145	47	24	Explain in one sentence what a computer is.	A computer is a device that can perform a wide range of tasks by processing information through a combination of hardware and software.
+146	50	27	Explain in one sentence what the internet is.	The internet is a global network of interconnected devices and systems that enable communication, information sharing, and access to a vast array of resources.
+147	44	21	Explain in one sentence what a recipe is.	A recipe is a set of instructions for preparing a dish, typically including ingredients, quantities, and steps.
+148	40	17	Explain in one sentence what a calendar is.	A calendar is a tool used to organize and track events, dates, and schedules.
+149	46	23	Explain in one sentence what a compass is.	A compass is a tool used to determine directions and locate objects by using a magnetic needle that points to magnetic north.
+150	46	23	Explain in one sentence what a thermometer is.	A thermometer measures the temperature of a substance by detecting the change in its physical properties, such as volume or expansion.
+151	50	27	Explain in one sentence what an island is.	An island is a landmass formed by the accumulation of land and water, typically surrounded by water, and often isolated from the mainland.
+152	52	29	Explain in one sentence what a peninsula is.	A peninsula is a landmass bounded by a single continuous landmass, typically a river or mountain range, forming a narrow, elongated shape.
+153	46	23	Explain in one sentence what a desert is.	A desert is a vast, arid region characterized by extreme temperatures, scarce water, and a lack of vegetation.
+154	59	35	Explain in one sentence what a rainforest is.	A rainforest is a vast, dense ecosystem of trees and plants that covers a large area of the Earth, home to a wide variety of species and supports a rich biodiversity.
+155	45	22	Explain in one sentence what a library is.	A library is a place where people can access information, books, and resources to help them learn and grow.
+156	44	21	Explain in one sentence what a museum is.	A museum is a place where people can learn about history, culture, and art through exhibits and collections.
+157	46	23	Explain in one sentence what an orchestra is.	An orchestra is a group of musicians who perform music together, typically in a concert hall or at a music venue.
+158	75	52	Explain in one sentence what a marathon is.	A marathon is a long-distance running event that typically lasts 26–31 miles (42–50 kilometers) and is run over a course of 1.5 to 2 miles (2.4 to 3.2 kilometers).
+159	42	19	Explain in one sentence what a telescope is.	A telescope is an instrument used to observe distant objects by focusing light from them onto a detector.
+160	52	29	Explain in one sentence what a microscope is.	A microscope is an instrument used to magnify and observe small objects, allowing scientists and researchers to study details that are invisible to the naked eye.
+161	51	28	Explain in one sentence what a satellite is.	A satellite is a small, artificial object that orbits a planet or other celestial body, often used for communication, navigation, or scientific research.
+162	43	20	Explain in one sentence what a bridge is.	A bridge is a structure that connects two different land areas, allowing for transportation or access between them.
+163	43	19	Explain in one sentence what a lighthouse is.	A lighthouse is a structure used to guide ships and other vessels safely through the night sky.
+164	47	23	Explain in one sentence what a windmill is.	A windmill is a device used to convert wind energy into mechanical energy, which can then be converted into electricity.
+165	44	21	Explain in one sentence what a habit is.	A habit is a routine behavior that is performed repeatedly, often with a certain level of consistency and purpose.
+166	52	29	Explain in one sentence what a proverb is.	A proverb is a short, often humorous, and widely understood saying that conveys a lesson or message about life, society, or the world.
+167	37	14	Explain in one sentence what a rhyme is.	A rhyme is a pair of words that share the same ending sound.
+168	58	35	Explain in one sentence what an echo is.	An echo is a sound that is heard after the original sound has traveled through a medium, such as air or water, and reflects off a surface, creating a repeating sound.
+169	39	16	Explain in one sentence what a shadow is.	A shadow is the region of darkness that appears where an object blocks the light.
+170	38	15	Give one word that means the opposite of hot.	The word that means the opposite of "hot" is **cold**.
+171	38	15	Give one word that means the opposite of fast.	The word that means the opposite of "fast" is **slow**.
+172	38	15	Give one word that means the opposite of big.	The word that means the opposite of "big" is **small**.
+173	38	15	Give one word that means the opposite of early.	The word that means the opposite of "early" is **late**.
+174	24	1	Give one word that means the opposite of happy.	sad
+175	37	14	Give one word that means the opposite of light.	The word that means the opposite of light is **darkness**.
+176	38	15	Give one word that means the opposite of loud.	The word that means the opposite of "loud" is **quiet**.
+177	38	15	Give one word that means the opposite of hard.	The word that means the opposite of "hard" is **easy**.
+178	38	15	Give one word that means the opposite of old.	The word that means the opposite of "old" is **young**.
+179	38	15	Give one word that means the opposite of clean.	The word that means the opposite of "clean" is **dirty**.
+180	39	16	Give one word that means the opposite of empty.	The word that means the opposite of "empty" is **"filled."**
+181	39	16	Give one word that means the opposite of wide.	The word that means the opposite of "wide" is **narrow**.
+182	37	14	Give one word that means the opposite of brave.	The word that means the opposite of brave is **dull**.
+183	29	6	Give one word that means the opposite of cheap.	cheap → **expensive**
+184	38	15	Give one word that means the opposite of smooth.	The word that means the opposite of "smooth" is **rough**.
+185	39	16	Give one word that means the opposite of sharp.	The word that means the opposite of "sharp" is **"flat."**
+186	39	16	Give one word that means the opposite of deep.	The word that means the opposite of "deep" is **"light."**
+187	38	15	Give one word that means the opposite of strong.	The word that means the opposite of "strong" is **weak**.
+188	39	16	Give one word that means the opposite of wet.	The word that means the opposite of "wet" is **dry**.
+189	39	16	Give one word that means the opposite of bright.	The word that means the opposite of "bright" is **dull**.
+190	39	16	Give one word that means the opposite of tall.	The word that means the opposite of "tall" is **short**.
+191	25	2	Give one word that means the opposite of thick.	thick
+192	39	16	Give one word that means the opposite of rare.	The word that means the opposite of "rare" is **common**.
+193	25	2	Give one word that means the opposite of calm.	calm
+194	37	14	Give one word that means the opposite of generous.	The word that means the opposite of generous is **吝啬**.
+195	29	9	What color is a ripe banana?	A ripe banana is typically **yellow**.
+196	83	60	What color is the sky on a clear day?	On a clear day, the sky appears blue. This is due to the way light interacts with the Earth's atmosphere. When sunlight passes through the atmosphere, it scatters in all directions, and the blue light is scattered more than the red or orange light. This phenomenon is called Rayleigh scattering,
+197	27	8	What color is fresh grass?	Fresh grass is typically **green**.
+198	29	9	What color is a ripe tomato?	A ripe tomato is typically **yellow**.
+199	78	60	What color is snow?	Snow is typically described as **white**, but it can also appear in various shades depending on the environment and conditions. Some common colors include:\n\n- **White** (the most common and standard color).\n- **Light gray** or **light blue** in certain contexts.\n- **White with a touch
+200	45	27	What color is coal?	Coal is a black, dark-colored mineral. It is often found in the Earth's crust and is used as a primary energy source.
+201	46	27	What color is a carrot?	A carrot is typically green. It is a vegetable that is green in color, often used in salads and as a vegetable for cooking.
+202	57	38	What color is a lemon?	A lemon is a citrus fruit, and its color can vary depending on the ripeness and variety. It is typically green or yellow, but it can also be red or orange when ripe.
+203	71	51	What color is an eggplant?	An eggplant is typically **green** when eaten raw. However, it can appear **yellow** when cooked, especially in dishes like tomato-based sauces or roasted vegetables. The color depends on the cooking method and the type of eggplant you're using.
+204	55	37	What color is chocolate?	Chocolate is a **dark color**, typically described as **black or dark brown**. It is a **dark chocolate** and is often associated with a **deep, rich color**.
+205	56	36	What color is a flamingo?	A flamingo is a bird that is red. It has a distinctive red coloration, especially on its feathers, and it is commonly associated with the myth of the flamingo.
+206	81	60	What color is the sun at noon?	The sun is visible at noon in the Northern Hemisphere, but its color depends on the time of year and the location. In the Northern Hemisphere, the sun is typically **yellow or orange** during the day, especially in the summer. In the Southern Hemisphere, the sun is usually **red or orange
+207	31	11	What color is a blueberry?	A blueberry is typically **blue** in color.
+208	78	60	What color is rust?	Rust is a reddish-brown color, often described as a dark, oxidized color. It is typically found on iron or steel structures, especially after corrosion. The exact color can vary depending on the type of metal and the environment, but it is commonly associated with a reddish-brown
+209	43	23	What color is an emerald?	An emerald is typically green. It is a type of gemstone that is often associated with the color green.
+210	56	36	What color is a polar bear?	A polar bear is a **black bear**. It has a **black coat** and is often described as **black and white** with a **polar bear coat**.
+211	45	25	What color is a school bus?	A school bus is typically **green**. It is a common color used in public transportation to indicate its purpose and safety.
+212	29	9	What color is a stop sign?	A stop sign is typically **red**.
+213	49	31	What color is milk?	Milk is a **colorless** liquid. It appears white or slightly yellowish when it's fresh, but it doesn't have any visible color.
+214	28	9	What color is a pumpkin?	A pumpkin is a **red pumpkin**.
+215	83	60	Which is larger, an elephant or a mouse?	The question "Which is larger, an elephant or a mouse?" is a classic example of a philosophical or anthropological dilemma. The answer depends on the perspective and context:\n\n- **From a biological standpoint**, elephants are much larger than mice. Elephants are the largest land animals on Earth, with adults
+216	83	60	Which is larger, the sun or the moon?	The sun and the moon are both celestial bodies, but they are not "larger" in the traditional sense. Here's a breakdown:\n\n1. **Size**:  \n   - The **sun** is approximately **1.39 billion kilometers** in diameter.  \n   - The **moon**
+217	83	60	Which is larger, a whale or a dolphin?	Both a whale and a dolphin are marine mammals, but they are different species. A whale is a large, deep-sea animal with a body shape similar to a dolphin, but it has a different structure. Dolphins are more streamlined and have a different type of body shape. As for size, whales
+218	83	60	Which is larger, a mountain or a hill?	Both a mountain and a hill are types of landforms, but they are distinct in terms of their characteristics and usage:\n\n- **Mountain**: A large, elevated landform that rises above the surrounding terrain, often with steep slopes and valleys. Mountains are typically associated with high elevation and can be found in
+219	83	60	Which is larger, an ocean or a lake?	Both an ocean and a lake are large bodies of water, but they differ in size and characteristics:\n\n- **Ocean**: The largest body of water on Earth, covering approximately 3.6 million square kilometers (1.3 million square miles), and is found in all major oceans (Atlantic, Pacific
+220	83	60	Which is larger, a jet or a bicycle?	The question is a bit of a trick, but in reality, **a jet is much larger than a bicycle**. Here's why:\n\n- A **bicycle** has a **length of about 1.5 meters** (about 5 feet).\n- A **jet** (like a
+221	83	60	Which is larger, a tree or a flower?	The question is a bit of a philosophical or poetic one, but in terms of **physical characteristics**, a **tree** is generally **larger** than a **flower**. Here's why:\n\n- **Tree**: A tree is a **plant with a trunk and branches**, and it grows much
+222	83	60	Which is larger, a country or a city?	The question of whether a country or a city is larger is subjective and depends on the context. Here's a breakdown:\n\n### **1. Size in terms of population:**\n- **Country**: A country is typically larger in terms of population than a city. For example, the United States has over
+223	83	60	Which is larger, a novel or a poem?	Both a novel and a poem can be considered "works of art" or "literature," and they are both significant in expressing human emotions, ideas, and experiences. However, when comparing them, there are some key differences:\n\n1. **Novel**:  \n   - A novel is a longer
+224	83	60	Which is larger, a marathon or a sprint?	Both a marathon and a sprint are types of athletic events, but they differ in distance and speed. Here's a comparison:\n\n- **Marathon**: A 26.1-mile (43.8-km) race, typically run in urban or suburban settings. It is longer and more
+225	83	60	Which is larger, a castle or a cottage?	Both a castle and a cottage are significant structures, but they are not inherently "larger" in terms of size. The comparison depends on the context:\n\n- **A castle** is typically larger in scale, built for defense, military, or royal power.\n- **A cottage** is smaller,
+226	83	60	Which is larger, a river or a stream?	A river is generally considered larger than a stream. Here's why:\n\n- **Size**: Rivers are typically larger because they flow through larger areas, have more water, and can carry more sediment and nutrients.\n- **Flow**: Rivers have longer and more continuous flows compared to streams, which are often smaller
+227	83	60	Which is larger, a planet or an asteroid?	A planet and an asteroid are both celestial bodies, but they differ in size, composition, and classification. Here's a comparison:\n\n### **1. Size:**\n- **Asteroids:** Typically smaller than planets. They are mostly rocky or metallic and are found in the asteroid belt between Mars and
+228	60	37	Which is larger, a ship or a canoe?	A ship is larger than a canoe. Both are vessels used for transportation, but ships are typically larger and more powerful. Canoes are smaller and used for navigation in rivers or lakes.
+229	83	60	Which is larger, a bear or a fox?	The question "Which is larger, a bear or a fox?" is a classic riddle and is often used to highlight the absurdity of comparing animals. In reality, bears and foxes are both animals, but they are not the same size. A bear is typically larger than a fox, depending
+230	83	60	Which is larger, a truck or a scooter?	The question "Which is larger, a truck or a scooter?" is a bit ambiguous, but based on the context, it could refer to comparing the size of a **truck** (a large vehicle) and a **scooter** (a small, electric vehicle). \n\nIn terms of **
+231	83	60	Which is larger, a cathedral or a chapel?	The question of whether a cathedral or a chapel is "larger" is subjective and depends on the context. However, in terms of **space and scale**, a cathedral is generally considered **larger** than a chapel. Here's why:\n\n- **Cathedral**: Typically built on a large
+232	84	60	Which is larger, an oak or a sapling?	Both an oak and a sapling are trees, but they are different in terms of their age and growth. Here's a comparison:\n\n- **Oak**: A mature tree, typically 100 years or older, with a strong, sturdy trunk and large, broad leaves.\n- **Sap
+233	46	22	Which is larger, a lion or a housecat?	A lion is larger than a housecat. Both are large animals, but lions are generally larger in size.
+234	84	60	Which is larger, a glacier or an icicle?	A **glacier** is much larger than an **icicle**. Here's why:\n\n- **Glaciers** are vast, slow-moving bodies of ice that form over thousands of years. They can span hundreds of kilometers and cover large areas of land or water.\n- **Icicles
+235	30	8	Is the sun a star? Answer briefly.	Yes, the sun is a star.
+236	30	8	Is a tomato a fruit? Answer briefly.	Yes, a tomato is a fruit.
+237	29	8	Can penguins fly? Answer briefly.	No, penguins do not fly.
+238	34	10	Is water made of hydrogen and oxygen? Answer briefly.	Yes, water is made of hydrogen and oxygen.
+239	50	28	Do spiders have six legs? Answer briefly.	Spiders do not have six legs. They typically have eight legs, with two pairs of legs on the front and two on the back.
+240	33	10	Is the Pacific the largest ocean? Answer briefly.	Yes, the Pacific Ocean is the largest ocean.
+241	31	11	Are dolphins fish? Answer briefly.	Dolphins are not fish. They are mammals.
+242	39	17	Is zero an even number? Answer briefly.	Zero is an even number because it is divisible by 2 without leaving a remainder.
+243	31	8	Do plants need sunlight to grow? Answer briefly.	Yes, plants need sunlight to grow.
+244	36	11	Is Mount Everest the tallest mountain on Earth? Answer briefly.	Yes, Mount Everest is the tallest mountain on Earth.
+245	52	30	Can sound travel in space? Answer briefly.	Yes, sound can travel in space, although it does not require a medium like air or water. It can propagate through vacuum or other space environments.
+246	32	9	Is a whale a mammal? Answer briefly.	Yes, a whale is a mammal.
+247	27	6	Do bees make honey? Answer briefly.	Yes, bees make honey.
+248	48	25	Is ice less dense than water? Answer briefly.	Yes, ice is less dense than water. This is why ice floats on top of water, even though it's solid.
+249	48	28	Are bats blind? Answer briefly.	Bats are not blind. They have eyes that are adapted for detecting movement and sound, but they do not see in the traditional sense.
+250	38	12	Is the Great Wall of China visible from space? Answer briefly.	Yes, the Great Wall of China is visible from space.
+251	36	15	Do all birds migrate? Answer briefly.	Yes, many birds migrate to avoid harsh weather and find better food sources.
+252	84	59	Is lightning hotter than the sun's surface? Answer briefly.	No, lightning is not hotter than the sun's surface. The sun's surface temperature is about 5,500°C (9,900°F), while lightning can reach temperatures of up to 20,000°C (35,200°F).
+253	30	8	Can ostriches fly? Answer briefly.	No, ostriches cannot fly.
+254	59	36	Is chess older than checkers? Answer briefly.	Yes, chess is older than checkers. Both are ancient games, with chess dating back over 4,000 years and checkers around 200 BCE.
+255	30	11	What day comes after Monday?	After Monday, the next day is **Tuesday**.
+256	30	11	What day comes after Tuesday?	After Tuesday, the next day is **Wednesday**.
+257	24	5	What day comes after Wednesday?	After Wednesday is Thursday.
+258	24	5	What day comes after Thursday?	After Thursday is Friday.
+259	24	5	What day comes after Friday?	After Friday is Saturday.
+260	26	7	What day comes after Saturday?	After Saturday is **Sunday**.
+261	26	7	What day comes after Sunday?	After Sunday is **Monday**.
+262	53	30	Give one short tip to stay focused while studying.	One short tip to stay focused while studying is to take short breaks every 30-60 minutes to refresh your mind and avoid burnout.
+263	34	11	Give one short tip to start learning to cook.	Start by learning a simple recipe and experimenting with ingredients.
+264	36	15	Give one short tip to sleep better.	Try to go to bed and wake up at the same time every day.
+265	44	21	Give one short tip to keep a plant alive.	One short tip to keep a plant alive is to provide it with proper sunlight, water, and nutrients.
+266	49	26	Give one short tip to remember people's names.	One short tip to remember people's names is to write them in a different font or color when you're not looking at them.
+267	52	29	Give one short tip to save money each month.	One short tip to save money each month is to set a budget and stick to it. This helps you avoid unnecessary spending and prioritize essential expenses.
+268	51	27	Give one short tip to make a good first impression.	A great first impression is built on confidence and a positive attitude. Start with a smile, be genuine, and let your personality shine.
+269	51	28	Give one short tip to learn a new language.	One short tip to learn a new language is to practice speaking and listening regularly, as these are the most effective ways to build fluency.
+270	38	14	Give one short tip to stay calm before a talk.	Stay calm before a talk by focusing on your thoughts and preparing mentally.
+271	64	41	Give one short tip to organize a small workspace.	One short tip to organize a small workspace is to use a **colorful, functional, and visually appealing desk organizer** that helps you keep things in place and make the space feel more organized and productive.
+272	51	31	Name one famous landmark in France.	One famous landmark in France is the **Eiffel Tower**. It is located in Paris, France, and is a iconic symbol of the country.
+273	60	40	Name one famous landmark in Japan.	One famous landmark in Japan is the **Tokyo Tower** (Tokyo Tower). It is a prominent skyscraper located in Shibuya, Tokyo, and is known for its height and modern design.
+274	48	28	Name one famous landmark in Brazil.	One famous landmark in Brazil is the **Amazon Rainforest**, which is home to many unique species of wildlife and is a significant natural wonder.
+275	54	34	Name one famous landmark in Canada.	One famous landmark in Canada is the **Mounties**. It is located in the **Gaspé region** and is known for its scenic beauty and historical significance.
+276	55	35	Name one famous landmark in Egypt.	One famous landmark in Egypt is the **Great Pyramid of Giza**. It is one of the most iconic structures in ancient Egypt and remains a significant cultural and historical site.
+277	54	34	Name one famous landmark in Kenya.	One famous landmark in Kenya is the **Great Rift Valley**. It is a significant geographical feature and a natural wonder, often highlighted for its dramatic landscapes and historical significance.
+278	73	53	Name one famous landmark in Norway.	One famous landmark in Norway is the **Hjarðarfjord** (Hjarðarfjord), a fjord located in the northern part of the country. It is known for its beautiful natural scenery and is a popular destination for visitors.
+279	52	32	Name one famous landmark in Spain.	One famous landmark in Spain is the **Eiffel Tower**. It is located in Paris, France, and is one of the most iconic structures globally.
+280	61	41	Name one famous landmark in Thailand.	One famous landmark in Thailand is the **Wat Phra Heo** (also known as Wat Phra Kaew), located in Bangkok. It is a significant religious site and a symbol of Thai culture.
+281	51	31	Name one famous landmark in Mexico.	One famous landmark in Mexico is the **Panama Canal**. It is located in the central region of Mexico and is a significant historical and engineering achievement.
+282	33	13	Name one famous landmark in India.	One famous landmark in India is the Taj Mahal in India.
+283	32	12	Name one famous landmark in Italy.	One famous landmark in Italy is the Colosseum.
+284	52	32	Name one famous landmark in Germany.	One famous landmark in Germany is the **Eiffel Tower**. It is located in Paris, France, but it is also a notable landmark in Germany.
+285	56	36	Name one famous landmark in Australia.	One famous landmark in Australia is the **Great Barrier Reef**. It is a natural wonder located off the coast of Queensland, Australia, and is home to a vast marine ecosystem.
+286	62	42	Name one famous landmark in Peru.	One famous landmark in Peru is the **Amazon River**. It is one of the most significant natural features in the country, flowing through many regions and playing a crucial role in the country's history and culture.
+287	80	60	Name one famous landmark in Finland.	One famous landmark in Finland is the **Katu-Katu** (also known as the **Katu-Katu** or **Katu-Katu**), a UNESCO World Heritage Site located in the southern part of the country. It is a beautiful example of traditional Finnish architecture and is known for its
+288	48	28	Name one famous landmark in Greece.	One famous landmark in Greece is the **Parthenon**. It is a symbol of ancient Greece and is located in Athens, Greece.
+289	57	37	Name one famous landmark in Turkey.	One famous landmark in Turkey is the **Eiffel Tower**. It is located in Paris, France, but Turkey has a similar structure called the **Etfal Tower**.
+290	52	32	Name one famous landmark in Poland.	One famous landmark in Poland is the **Warsaw Cathedral** (Warszawa Cathedral). It is a major religious and cultural site in the capital of Poland.
+291	67	47	Name one famous landmark in Chile.	One famous landmark in Chile is the **San Isidro Cathedral** (Catedral de San Isidro), located in the city of **Valdivia**. It is a significant religious and cultural site in the country.
+292	58	38	Name one famous landmark in Portugal.	One famous landmark in Portugal is the **Barcelona Cathedral** (Catedral de Barcelona), located in the city of Barcelona. It is a major religious and cultural site in the country.
+293	60	40	Name one famous landmark in Austria.	One famous landmark in Austria is the **Bergen Castle** (Bergen Castle). It is located in the southern part of the country and is known for its historical significance and architectural beauty.
+294	80	60	Name one famous landmark in Ireland.	One famous landmark in Ireland is the **Baalbek** (Baalbek in the Old Irish language). It is a significant religious site in the Holy Land, but it is not located in Ireland. However, if you're referring to a similar or related landmark, the **Baalbek**
+295	76	56	Name one famous landmark in Sweden.	One famous landmark in Sweden is the **Höngdalsfjärde** (Höngdalsfjord), a stunning fjord located in the northern part of Sweden. It is known for its beautiful natural scenery and is a popular destination for visitors.
+296	56	36	Name one famous landmark in Denmark.	One famous landmark in Denmark is the **Hagelholm Castle**. It is located in the central part of the country and is known for its historical significance and architectural beauty.
+297	66	46	Name one famous landmark in Argentina.	One famous landmark in Argentina is the **San Telmo** (San Telmo) in Buenos Aires. It is a significant historical and cultural site, known for its architecture and the presence of the **San Telmo Cathedral**.
+298	57	37	Name one famous landmark in Morocco.	One famous landmark in Morocco is the **Aboukir Museum**. It is located in the city of Aboukir, Morocco, and is known for its historical and cultural significance.
+299	62	42	Name one famous landmark in Vietnam.	One famous landmark in Vietnam is the **Hanoi Tower** (Hanoi Tower). It is a prominent structure located in the heart of Hanoi, Vietnam, and is known for its historical and architectural significance.
+300	54	33	Name one famous landmark in South Korea.	One famous landmark in South Korea is the **Seoul Tower**. It is located in the city of Seoul and is known for its unique design and historical significance.
+301	46	26	Name one famous landmark in Indonesia.	One famous landmark in Indonesia is the **Maluku Islands**, a UNESCO World Heritage Site known for its rich cultural and historical significance.
+302	54	34	Name one famous landmark in Netherlands.	One famous landmark in the Netherlands is the **Eiffel Tower**. It is located in Paris, France, but it is also a notable landmark in the Netherlands.
+303	56	36	Name one famous landmark in Switzerland.	One famous landmark in Switzerland is the **Schwechat**. It is a historic and strategic point on the border between Switzerland and France, known for its role in trade and communication.
+304	65	45	Name one famous landmark in Hungary.	One famous landmark in Hungary is the **Budapest Castle** (Budapesti Kastell). It is a historic fortress located in the heart of the city and is known for its medieval architecture and historical significance.
+305	63	42	Name one famous landmark in Czechia.	One famous landmark in Czechia is the **Hrad Brankov** (Brankov Castle). It is a historic fortress located in the Czech Republic and is known for its medieval architecture and historical significance.
+306	71	51	Name one famous landmark in Croatia.	One famous landmark in Croatia is the **Hajduk Fortress** (Hajduk Krajina). It is a historic fortress located in the southern part of Croatia, known for its military significance and as a symbol of the country's history and culture.
+307	60	40	Name one famous landmark in Iceland.	One famous landmark in Iceland is the **Golden Hall** (Golden Hall in Iceland). It is a stunning example of the country's architectural and cultural heritage, located in the central part of the country.
+308	56	35	Name one famous landmark in New Zealand.	One famous landmark in New Zealand is the **Great Barrier Reef**. It is a natural wonder located off the coast of New Zealand and is home to a vast marine ecosystem.
+309	63	43	Name one famous landmark in Colombia.	One famous landmark in Colombia is the **Colombian Parque Nacional de la Amazonía** (Amazon National Park). It is a protected area in the Amazon rainforest and is home to many species of wildlife.
+310	66	46	Name one famous landmark in Cuba.	One famous landmark in Cuba is the **Cerro de la Victoria** (Cerro de la Victoria), a mountain located in the central region of Cuba. It is known for its historical significance and is a popular destination for tourists.
+311	58	38	Name one famous landmark in Ghana.	One famous landmark in Ghana is the **Ghanaian National Park**, located in the **Mandera region**. It is a protected area known for its rich biodiversity and natural beauty.
+312	33	6	What is your favorite of all the fruits? Answer in one sentence.	My favorite fruit is mango.
+313	34	7	What is your favorite of all the animals? Answer in one sentence.	My favorite animal is a cat.
+314	40	13	What is your favorite of all the colors? Answer in one sentence.	My favorite color is blue, as it represents calm and clarity.
+315	37	8	What is your favorite of all the countries in Europe? Answer in one sentence.	My favorite country in Europe is Germany.
+316	33	5	What is your favorite of all the musical instruments? Answer in one sentence.	I love the guitar!
+317	44	17	What is your favorite of all the planets? Answer in one sentence.	My favorite planet is Mars, known for its red surface and potential for past life.
+318	33	6	What is your favorite of all the vegetables? Answer in one sentence.	My favorite vegetable is carrots.
+319	33	6	What is your favorite of all the sports? Answer in one sentence.	My favorite sport is basketball.
+320	44	16	What is your favorite of all the programming languages? Answer in one sentence.	I love Python because it's easy to learn and widely used in various fields.
+321	34	7	What is your favorite of all the rivers? Answer in one sentence.	My favorite river is the Nile.
+322	35	8	What is your favorite of all the mountains? Answer in one sentence.	My favorite mountain is the Himalayas.
+323	35	8	What is your favorite of all the birds? Answer in one sentence.	My favorite bird is the hummingbird.
+324	53	26	What is your favorite of all the fish? Answer in one sentence.	I don't have a favorite fish, but I can tell you that the fish that makes me feel most comfortable is the salmon.
+325	43	16	What is your favorite of all the trees? Answer in one sentence.	My favorite tree is the oak, which I admire for its resilience and beauty.
+326	35	8	What is your favorite of all the flowers? Answer in one sentence.	My favorite flower is the dais.
+327	31	4	What is your favorite of all the metals? Answer in one sentence.	I love gold!
+328	54	26	What is your favorite of all the gemstones? Answer in one sentence.	My favorite gemstone is rubies, as they are known for their deep red hues and are often associated with love and passion.
+329	34	7	What is your favorite of all the dances? Answer in one sentence.	My favorite dance is the salsa!
+330	37	9	What is your favorite of all the board games? Answer in one sentence.	My favorite board game is "Monopoly."
+331	50	23	What is your favorite of all the professions? Answer in one sentence.	My favorite profession is being a writer, as it allows me to express my thoughts and creativity in a meaningful way.
+332	56	28	What is your favorite of all the weather phenomena? Answer in one sentence.	My favorite weather phenomenon is the aurora borealis, which occurs when charged particles from the sun interact with Earth's magnetic field and atmosphere.
+333	37	9	What is your favorite of all the sea creatures? Answer in one sentence.	My favorite sea creature is the jellyfish.
+334	35	7	What is your favorite of all the breakfast foods? Answer in one sentence.	My favorite breakfast food is eggs.
+335	41	13	What is your favorite of all the farm animals? Answer in one sentence.	I love cows for their milk and the way they graze!
+336	38	9	What is your favorite of all the kitchen utensils? Answer in one sentence.	My favorite kitchen utensil is a knife.
+337	45	16	What is your favorite of all the items of clothing? Answer in one sentence.	My favorite clothing item is a cozy sweater that adds warmth to my daily routine.
+338	40	10	What is your favorite of all the parts of the body? Answer in one sentence.	My favorite part of the body is my heart.
+339	41	13	What is your favorite of all the school subjects? Answer in one sentence.	My favorite is math because it helps me understand the world better.
+340	33	4	What is your favorite of all the modes of transport? Answer in one sentence.	I love walking!
+341	44	17	What is your favorite of all the shapes? Answer in one sentence.	My favorite shape is a circle because it's symmetrical and can represent many things.
+342	38	14	Use the word "hot" in a short sentence.	The sun was hot and bright, casting long shadows over the forest.
+343	32	8	Use the word "fast" in a short sentence.	She ran fast to catch the ball.
+344	35	11	Use the word "big" in a short sentence.	The big tree in the park stood tall and proud.
+345	38	14	Use the word "early" in a short sentence.	The early morning sun painted the forest in hues of gold and green.
+346	31	7	Use the word "happy" in a short sentence.	I hope you're happy today!
+347	42	18	Use the word "light" in a short sentence.	The light inside the room was dim and warm, casting a soft glow over the furniture.
+348	35	11	Use the word "loud" in a short sentence.	The loud roar of the storm shook the entire town.
+349	36	12	Use the word "hard" in a short sentence.	The hard work of the day led to a successful outcome.
+350	40	16	Use the word "old" in a short sentence.	The old man sat in the park, watching the sun set over the trees.
+351	36	12	Use the word "clean" in a short sentence.	The clean air was filled with the scent of fresh flowers.
+352	35	11	Use the word "empty" in a short sentence.	The empty room was filled with books and scattered papers.
+353	36	12	Use the word "wide" in a short sentence.	The wide open field was filled with the sounds of nature.
+354	36	11	Use the word "brave" in a short sentence.	She was brave in her decision to take the risk.
+355	34	10	Use the word "cheap" in a short sentence.	The cheapest option is to buy a new smartphone.
+356	41	17	Use the word "smooth" in a short sentence.	The smooth transition from one section to the next is a key feature of the design.
+357	41	17	Use the word "sharp" in a short sentence.	The sharp edge of the blade cut through the wood with a precise and efficient motion.
+358	34	10	Use the word "deep" in a short sentence.	The deep ocean is home to countless marine creatures.
+359	41	17	Use the word "strong" in a short sentence.	The team's strong performance on the field was a testament to their dedication and teamwork.
+360	34	9	Use the word "wet" in a short sentence.	The wet air made the grass look wet.
+361	35	11	Use the word "bright" in a short sentence.	The bright light of the sun made the room shine.
+362	36	11	Use the word "tall" in a short sentence.	The tall trees in the park stood tall and proud.
+363	40	15	Use the word "thick" in a short sentence.	The thick air was filled with the scent of fresh pine and damp earth.
+364	38	13	Use the word "rare" in a short sentence.	The rarest species of whales are found in the deep ocean.
+365	36	11	Use the word "calm" in a short sentence.	The calmness of the evening brought a peaceful atmosphere.
+366	37	12	Use the word "generous" in a short sentence.	The generous community provides a warm and supportive environment for everyone.
+367	30	8	Is Monday a weekend day? Answer briefly.	Yes, Monday is a weekend day.
+368	30	8	Is Tuesday a weekend day? Answer briefly.	Yes, Tuesday is a weekend day.
+369	30	8	Is Wednesday a weekend day? Answer briefly.	Yes, Wednesday is a weekend day.
+370	30	8	Is Thursday a weekend day? Answer briefly.	Yes, Thursday is a weekend day.
+371	30	8	Is Friday a weekend day? Answer briefly.	Yes, Friday is a weekend day.
+372	34	12	Is Saturday a weekend day? Answer briefly.	Yes, Saturday is considered a weekend day in many countries.
+373	44	22	Is Sunday a weekend day? Answer briefly.	Yes, Sunday is considered a weekend day in many countries, especially in the United States and other Western nations.
+374	36	17	What month comes after January?	January comes before February, so the month that comes after January is **February**.
+375	36	17	What month comes after February?	February comes before March, so the month that comes after February is **March**.
+376	37	18	What month comes after March?	March comes before April. So, the month that comes after March is **April**.
+377	37	18	What month comes after April?	April comes before May. So, the month that comes after April is **May**.
+378	36	17	What month comes after May?	May comes before June, so the month that comes after May is **June**.
+379	37	18	What month comes after June?	June comes before July. So, the month that comes after June is **July**.
+380	37	18	What month comes after July?	July comes before August. So, the month that comes after July is **August**.
+381	37	18	What month comes after August?	August comes before September. So, the month that comes after August is **September**.
+382	37	18	What month comes after September?	September comes before October. So, the month that comes after September is **October**.
+383	30	11	What month comes after October?	The month that comes after October is **November**.
+384	28	9	What month comes after November?	The month that comes after November is December.
+385	37	18	What month comes after December?	December comes before January. Therefore, the month that comes after December is **January**.
+386	28	8	How many days are in January?	January has **31 days**.
+387	42	22	How many days are in February?	February has **28 days** in a common year and **29 days** in a leap year.
+388	28	8	How many days are in March?	March has **31 days**.
+389	27	7	How many days are in April?	April has 30 days.
+390	27	7	How many days are in May?	May has 31 days.
+391	28	8	How many days are in June?	June has **30 days**.
+392	27	7	How many days are in July?	July has 31 days.
+393	27	7	How many days are in August?	August has 31 days.
+394	28	8	How many days are in September?	September has **30 days**.
+395	27	7	How many days are in October?	October has 31 days.
+396	27	7	How many days are in November?	November has 30 days.
+397	27	7	How many days are in December?	December has 31 days.
+398	29	8	How many legs does a spider have?	A spider has **8 legs**.
+399	29	8	How many legs does a dog have?	A dog has **four legs**.
+400	28	7	How many legs does a chicken have?	A chicken has 2 legs.
+401	29	8	How many legs does an ant have?	An ant has **two legs**.
+402	29	8	How many legs does a horse have?	A horse has **four legs**.
+403	29	8	How many legs does a crab have?	A crab has **two legs**.
+404	29	8	How many legs does a snake have?	A snake has **four legs**.
+405	29	8	How many legs does a butterfly have?	A butterfly has **two legs**.
+406	28	7	How many legs does a cow have?	A cow has 4 legs.
+407	31	9	How many legs does an octopus have?	An octopus has **eight legs**.
+408	31	9	How many legs does a kangaroo have?	A kangaroo has **four legs**.
+409	29	8	How many legs does a bee have?	A bee has **six legs**.
+410	29	8	How many legs does a cat have?	A cat has **four legs**.
+411	30	8	How many legs does a flamingo have?	A flamingo has 2 legs.
+412	29	8	How many legs does a beetle have?	A beetle has **two legs**.
+413	29	8	How many legs does a sheep have?	A sheep has **four legs**.
+414	28	7	How many legs does a duck have?	A duck has 2 legs.
+415	29	8	How many legs does a lizard have?	A lizard has **two legs**.
+416	29	8	How many legs does a goat have?	A goat has **four legs**.
+417	28	7	How many legs does a pig have?	A pig has 4 legs.
+418	32	11	What is the plural of "child"?	The plural of "child" is **children**.
+419	33	12	What is the plural of "mouse"?	The plural of "mouse" is **mice**.
+420	33	12	What is the plural of "leaf"?	The plural of "leaf" is **leaves**.
+421	32	11	What is the plural of "box"?	The plural of "box" is **boxes**.
+422	32	11	What is the plural of "city"?	The plural of "city" is **cities**.
+423	34	13	What is the plural of "wolf"?	The plural of "wolf" is **"wolves."**
+424	35	13	What is the plural of "tooth"?	The plural of "tooth" is **teeth**.
+425	33	12	What is the plural of "foot"?	The plural of "foot" is **feet**.
+426	32	11	What is the plural of "berry"?	The plural of "berry" is **berries**.
+427	33	12	What is the plural of "knife"?	The plural of "knife" is **knives**.
+428	32	11	What is the plural of "hero"?	The plural of "hero" is **heroes**.
+429	35	13	What is the plural of "potato"?	The plural of "potato" is **potatoes**.
+430	36	14	What is the plural of "goose"?	The plural of "goose" is **"gooses."**
+431	34	13	What is the plural of "man"?	The plural of "man" is **"men"**.
+432	33	12	What is the plural of "woman"?	The plural of "woman" is **"women."**
+433	35	13	What is the plural of "sheep"?	The plural of "sheep" is **sheep**.
+434	33	12	What is the plural of "deer"?	The plural of "deer" is **deers**.
+435	32	11	What is the plural of "library"?	The plural of "library" is **libraries**.
+436	33	12	What is the plural of "party"?	The plural of "party" is **parties**.
+437	34	13	What is the plural of "wish"?	The plural of "wish" is **"wishes."**
+438	33	12	What is the plural of "brush"?	The plural of "brush" is **brushes**.
+439	33	12	What is the plural of "fox"?	The plural of "fox" is **foxes**.
+440	33	12	What is the plural of "bench"?	The plural of "bench" is **bends**.
+441	33	12	What is the plural of "story"?	The plural of "story" is **"stories."**
+442	32	11	What is the plural of "key"?	The plural of "key" is **keys**.
+443	57	38	Count from one to five.	Counting from one to five:\n\n1. One  \n2. Two  \n3. Three  \n4. Four  \n5. Five  \n\nLet me know if you need help with anything else!
+444	41	20	Say the vowels of the English alphabet.	The vowels in the English alphabet are: **A, E, I, O, U**.
+445	74	51	What is the largest planet in our solar system?	The largest planet in our solar system is **Jupiter**. It is the second-largest planet, following Saturn. Jupiter is a gas giant with a massive radius of approximately 69.6 billion kilometers, making it the largest in the solar system.
+446	69	49	What is the smallest prime number?	The smallest prime number is **2**. \n\nA prime number is a natural number greater than 1 that has no positive divisors other than 1 and itself. Since 2 is the first such number, it is the smallest prime.
+447	30	9	How many minutes are in an hour?	An hour is **60 minutes**.
+448	30	9	How many hours are in a day?	A day is 24 hours long.
+449	28	8	What language is spoken in Brazil?	The language spoken in Brazil is Portuguese.
+450	80	60	What do bees collect from flowers?	Bees collect nectar from flowers, which is a vital part of their diet. Nectar is a sweet substance produced by the flowers, and it serves as a food source for bees. Bees use their specialized beehives to collect nectar, which they then store in honeycombs.
+451	37	16	What instrument has 88 keys?	The instrument that has 88 keys is the **Bassoon**.
+452	40	18	How many sides does a hexagon have?	A hexagon is a six-sided polygon. The number of sides is **6**.
+453	74	52	What gas do plants absorb from the air?	Plants absorb **carbon dioxide (CO₂)** from the air through their stomata, which are small openings on the leaves. This process is part of the **carbon cycle**, where CO₂ is released back into the atmosphere when plants die or are burned.
+454	73	54	What is frozen water called?	Frosted water is also known as **frozen water** or **ice water**. It refers to the state of water that is frozen, typically in a liquid form. In some contexts, it might be called **ice** or **frozen liquid**.
+455	67	48	How many continents are there?	There are **14 continents** on Earth. These include the continents of Africa, Asia, Europe, North America, South America, Oceania, and the Americas. The continents are also known as the **Continental Divide**.
+456	31	10	What is the chemical symbol for gold?	The chemical symbol for gold is **Au**.
+457	81	60	How many strings does a violin have?	The question "How many strings does a violin have?" is a bit ambiguous and can be interpreted in different ways. However, based on standard knowledge:\n\n- A **violin** typically has **one string**.\n- It is a **string instrument** made of **wood**, and the **string
+458	28	9	What continent is France on?	France is located on the continent of Europe.
+459	28	9	What continent is Japan on?	Japan is located on the continent of Asia.
+460	78	59	What continent is Brazil on?	Brazil is located on the **Amazon Basin**. It is a **Brazilian continent**, but it is also a **country** in **South America**. The continent is known for its **Amazon rainforest**, which is one of the largest and most biodiverse rainforests on Earth.
+461	44	25	What continent is Canada on?	Canada is located on the **North American continent**. It is a country in North America, part of the United States.
+462	29	10	What continent is Egypt on?	Egypt is located on the **Middle East**.
+463	28	9	What continent is Kenya on?	Kenya is located on the African continent.
+464	29	10	What continent is Norway on?	Norway is located on the continent of Europe.
+465	29	10	What continent is Spain on?	Spain is located on the **European continent**.
+466	62	43	What continent is Thailand on?	Thailand is located on the island of Southeast Asia, specifically in the region of the Pacific Ocean. It is a country in the South East Asia region, and its main landmass is the island of Thailand itself.
+467	52	33	What continent is Mexico on?	Mexico is located on the **North American continent**. It is a country in the Americas, and its main geographical location is in the central part of the continent.
+468	29	10	What continent is India on?	India is located on the **Indian Ocean**.
+469	28	9	What continent is Italy on?	Italy is located on the continent of Europe.
+470	38	19	What continent is Germany on?	Germany is located in **Europe**. It is a country in the **European Union**.
+471	30	11	What continent is Australia on?	Australia is located on the continent of **Australia**.
+472	30	11	What continent is Peru on?	Peru is located on the **Pacific Ocean**.
+473	29	10	What continent is Finland on?	Finland is located on the continent of Europe.
+474	28	9	What continent is Greece on?	Greece is located on the European continent.
+475	29	10	What continent is Turkey on?	Turkey is located on the **European continent**.
+476	28	9	What continent is Poland on?	Poland is located on the European continent.
+477	29	10	What continent is Chile on?	Chile is located on the South American continent.
+478	74	55	What continent is Portugal on?	Portugal is located on the **Atlantic Ocean**. It is a country in **Europe**, but it is also part of the **Iberian Peninsula**. The Iberian Peninsula is a region in **Europe**, and Portugal is a country in **Europe**.
+479	28	9	What continent is Austria on?	Austria is located on the European continent.
+480	31	12	What continent is Ireland on?	Ireland is located on the continent of **Europe**.
+481	40	21	What continent is Sweden on?	Sweden is located in **North America**. It is a country in the **North American continent**.
+482	29	10	What continent is Denmark on?	Denmark is located on the continent of Europe.
+483	29	10	What continent is Argentina on?	Argentina is located on the continent of South America.
+484	28	9	What continent is Morocco on?	Morocco is located on the African continent.
+485	70	51	What continent is Vietnam on?	Vietnam is located on the **Southeast Asia** region. It is part of the **Indochina Peninsula** and is bordered by China to the north, the Mekong River to the south, and the Gulf of Thailand to the east.
+486	30	10	What continent is South Korea on?	South Korea is located on the continent of Asia.
+487	58	39	What continent is Indonesia on?	Indonesia is located on the **Pacific Ocean**. It is a country in Southeast Asia, and its main landmass is in the region of the **Indonesian Archipelago**.
+488	29	10	What continent is Netherlands on?	The Netherlands is located on the continent of Europe.
+489	29	10	What continent is Switzerland on?	Switzerland is located on the continent of Europe.
+490	44	25	What continent is Hungary on?	Hungary is located in **Europe**. It is a country in the Balkans region, part of the European Union.
+491	54	34	What continent is Czechia on?	Czechia is located on the **European continent**. It is a country in the **Central European** region, and its borders are with several countries in Europe.
+492	29	10	What continent is Croatia on?	Croatia is located on the European continent.
+493	52	33	What continent is Iceland on?	Iceland is located on the **North Atlantic Ocean**. It is situated in the **North Atlantic Ocean**, and it is part of the **European continent**.
+494	32	12	What continent is New Zealand on?	New Zealand is located on the island of Oceania.
+495	53	34	What continent is Colombia on?	Colombia is located on the **Amazon Basin**. It is a country in South America, and the Amazon River is one of the largest rivers in the world.
+496	64	45	What continent is Cuba on?	Cuba is located on the **Central American continent**. It is part of the **Caribbean Sea** and is bordered by the **United States** on the west and the **Central American continent** on the east.
+497	29	10	What continent is Ghana on?	Ghana is located on the continent of Africa.
+498	43	20	Why is gravity useful? Answer in one sentence.	Gravity is useful because it allows objects to fall toward the Earth and enables the formation of celestial bodies.
+499	47	23	Why is photosynthesis useful? Answer in one sentence.	Photosynthesis is useful because it provides energy to life on Earth by converting light energy into chemical energy stored in glucose.

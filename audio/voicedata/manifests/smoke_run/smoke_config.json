@@ -1,0 +1,18 @@
+{
+ "purpose": "plan 0008 M2a pipeline-validation smoke run (NOT the Stage-A training run)",
+ "command": "go run ./cmd/qwenvoice-train -mode train -data ~/speech-corpora/shards/stageA -out ~/speech-corpora/shards/smoke-run -steps 200 -accum 8 -lora-r 16 -lora-alpha 32 -max-seq 1024 -task-ratios listen=0.45,speak=0.45,text=0.10 -warmup 20 -gen-every 25 -save-every 100 -resume none -layers 8",
+ "model": "Qwen3-0.6B LoadTruncated to 8 layers (wall-clock decision: full 28-layer depth measured ~335 s/optimizer-step under shared-machine load and >40 s/step unloaded, vs ~11-15 s/step at 8 layers; plan gates full-depth runs on plan 0009 throughput)",
+ "lora": {"r": 16, "alpha": 32, "targets": "q/k/v/o + gate/up/down, all 8 loaded layers", "trainable_params": 19677184},
+ "shards": ["listen_librispeech.bin", "speak_ljspeech.bin", "text_replay.bin"],
+ "result": {
+  "steps": 200,
+  "wall_clock": "51m6s",
+  "avg_tok_per_s": 314.4,
+  "peak_rss_mb": 14065,
+  "loss_first": 19.96,
+  "loss_trajectory_steps_1_25_50_75_100_150_175_200": [19.96, 12.21, 9.67, 7.71, 6.98, 7.55, 6.93, 6.0],
+  "per_task_first_to_last": {"listen": [19.1, 6.21], "speak": [22.0, 8.98], "text": [8.62, 5.65]},
+  "note": "descends monotonically-ish to a cosine-LR plateau ~7; per-task losses all descend; regen telemetry at gen-every=25 matched 0-1/8 target tokens (expected: 200 steps on a truncated 8-layer brain validates mechanics, not quality)"
+ },
+ "machine_note": "Apple M4, f32 CPU Accelerate, machine shared with a concurrent plan-0009 kernel agent throughout"
+}
