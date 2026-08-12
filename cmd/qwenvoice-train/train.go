@@ -6,8 +6,12 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -75,7 +79,16 @@ func loadVoiceModel(c cliConfig) (*qwen.VoiceModel, error) {
 		// enter the loop at its steady-state footprint, not its load
 		// peak — under external memory pressure the difference is what
 		// jetsam kills (plan 0009 §2.5 SIGKILL class).
+		//
+		// runtime.GC() alone is NOT enough here: it collects the
+		// garbage but leaves the freed spans in the Go heap, so RSS
+		// stays at the load peak (the scavenger returns pages to the
+		// OS only lazily). debug.FreeOSMemory() forces that return.
+		// Load transients are large — the safetensors decode buffers
+		// plus the pre-ToMetal CPU copy of every tensor — so this is
+		// worth its one-off STW cost exactly once, before the loop.
 		flushMetalGraph()
+		debug.FreeOSMemory()
 	}
 	return vm, nil
 }
@@ -139,9 +152,10 @@ func lrAt(step, warmup, total int, minFrac float64) float64 {
 // async win is preserved where it matters (the ~420 chained GPU ops
 // inside a micro-step still queue without host stalls); only the
 // micro-step boundary is serialized.
+
 // unsafeNoFence disables the micro-step GPU fence. DIAGNOSTIC ONLY —
-// it reproduces the unbounded-retention failure above. Never set it
-// for a real run.
+// it reproduces the unbounded-retention failure described above.
+// Never set it for a real run.
 var unsafeNoFence = false
 
 func flushMetalGraph() {
@@ -153,12 +167,33 @@ func flushMetalGraph() {
 	runtime.GC()
 }
 
+// rssMB is the process PEAK resident size. Useful as a high-water
+// report, but NOT as a guard input: it can only rise, so a large load
+// transient would trip a steady-state ceiling forever after (and it
+// cannot show a reclaim working).
 func rssMB() float64 {
 	var ru syscall.Rusage
 	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &ru); err != nil {
 		return 0
 	}
 	return float64(ru.Maxrss) / (1 << 20) // darwin reports bytes
+}
+
+// currentRSSMB is the process's CURRENT resident size — what the
+// ceiling guard must test, and the only way to observe
+// debug.FreeOSMemory returning pages. macOS exposes no /proc, and
+// mach task_basic_info needs cgo, so shell out: a few ms once per
+// optimizer step against a step measured in seconds.
+func currentRSSMB() float64 {
+	out, err := exec.Command("ps", "-o", "rss=", "-p", strconv.Itoa(os.Getpid())).Output()
+	if err != nil {
+		return rssMB() // fall back to peak rather than failing open
+	}
+	kb, err := strconv.ParseFloat(strings.TrimSpace(string(out)), 64)
+	if err != nil {
+		return rssMB()
+	}
+	return kb / 1024
 }
 
 func train(c cliConfig) error {
@@ -305,11 +340,11 @@ func train(c cliConfig) error {
 		// (which on a saturated 24 GB machine takes the desktop with
 		// it — 2026-08-12 post-mortem). Checkpoints already on disk
 		// stay valid; the operator lowers accum/max-seq and resumes.
-		if c.rssLimitMB > 0 && rssMB() > float64(c.rssLimitMB) {
+		if cur := currentRSSMB(); c.rssLimitMB > 0 && cur > float64(c.rssLimitMB) {
 			lossLog.Sync()
-			return fmt.Errorf("RSS ceiling exceeded: peak %.0f MB > limit %d MB at step %d "+
+			return fmt.Errorf("RSS ceiling exceeded: current %.0f MB > limit %d MB at step %d (peak %.0f MB) "+
 				"(lower -accum / -max-seq, or raise -rss-limit-mb if the machine really has the headroom)",
-				rssMB(), c.rssLimitMB, step)
+				cur, c.rssLimitMB, step, rssMB())
 		}
 
 		if c.genEvery > 0 && step%c.genEvery == 0 {
