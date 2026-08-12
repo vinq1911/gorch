@@ -1,0 +1,30 @@
+step  175/200 loss 6.9256 lr 1.42e-05 listen=6.2325(5) speak=9.1854(2) text=5.8709(1)  441 tok/s rss 14065 MB 8.6s
+  regen[0,listen]: 1/8 target tokens matched
+step  176/200 loss 7.9528 lr 1.39e-05 listen=6.7969(4) speak=9.1088(4)  523 tok/s rss 14065 MB 5.3s
+step  177/200 loss 7.4453 lr 1.36e-05 listen=6.5015(4) speak=9.1978(3) text=5.9625(1)  359 tok/s rss 14065 MB 14.0s
+step  178/200 loss 7.7220 lr 1.33e-05 listen=6.9337(4) speak=9.1996(3) text=6.4426(1)  514 tok/s rss 14065 MB 7.8s
+step  179/200 loss 7.6089 lr 1.30e-05 listen=6.4025(4) speak=8.8153(4)  411 tok/s rss 14065 MB 14.9s
+step  180/200 loss 7.3770 lr 1.27e-05 listen=6.3539(3) speak=9.0963(4) text=3.5691(1)  373 tok/s rss 14065 MB 13.2s
+step  181/200 loss 8.0985 lr 1.25e-05 listen=6.2870(3) speak=9.1855(5)  413 tok/s rss 14065 MB 11.9s
+step  182/200 loss 7.2882 lr 1.22e-05 listen=6.1669(5) speak=9.1571(3)  255 tok/s rss 14065 MB 23.7s
+step  183/200 loss 7.3182 lr 1.20e-05 listen=6.4434(3) speak=9.2304(3) text=5.7622(2)  363 tok/s rss 14065 MB 10.5s
+step  184/200 loss 7.3692 lr 1.17e-05 listen=6.2951(5) speak=9.1592(3)  296 tok/s rss 14065 MB 20.6s
+step  185/200 loss 7.5514 lr 1.15e-05 listen=6.0915(4) speak=9.0112(4)  337 tok/s rss 14065 MB 18.6s
+step  186/200 loss 8.3926 lr 1.13e-05 listen=6.1051(2) speak=9.1551(6)  300 tok/s rss 14065 MB 20.5s
+step  187/200 loss 8.5795 lr 1.12e-05 listen=6.0167(1) speak=8.9456(7)  382 tok/s rss 14065 MB 13.2s
+step  188/200 loss 6.9973 lr 1.10e-05 listen=6.3821(5) speak=8.9686(2) text=6.1309(1)  340 tok/s rss 14065 MB 13.5s
+step  189/200 loss 7.4220 lr 1.08e-05 listen=6.5432(4) speak=8.9691(3) text=6.2959(1)  476 tok/s rss 14065 MB 9.5s
+step  190/200 loss 7.5676 lr 1.07e-05 listen=6.0409(4) speak=9.0942(4)  351 tok/s rss 14065 MB 15.0s
+step  191/200 loss 7.5610 lr 1.06e-05 listen=5.9685(2) speak=9.0619(5) text=3.2416(1)  426 tok/s rss 14065 MB 10.8s
+step  192/200 loss 7.0523 lr 1.04e-05 listen=6.2097(4) speak=9.1357(3) text=4.1725(1)  372 tok/s rss 14065 MB 11.8s
+step  193/200 loss 7.2549 lr 1.03e-05 listen=6.3103(3) speak=9.1164(3) text=5.8794(2)  297 tok/s rss 14065 MB 16.0s
+step  194/200 loss 7.9597 lr 1.02e-05 listen=6.2751(3) speak=8.9705(5)  311 tok/s rss 14065 MB 18.3s
+step  195/200 loss 7.8789 lr 1.02e-05 listen=6.7436(4) speak=9.0141(4)  289 tok/s rss 14065 MB 16.6s
+step  196/200 loss 7.7007 lr 1.01e-05 listen=5.8287(2) speak=9.0170(5) text=4.8636(1)  313 tok/s rss 14065 MB 18.3s
+step  197/200 loss 8.1661 lr 1.01e-05 listen=6.8961(2) speak=9.0743(5) text=6.1647(1)  374 tok/s rss 14065 MB 12.2s
+step  198/200 loss 7.6996 lr 1.00e-05 listen=6.3546(3) speak=9.1900(4) text=5.7725(1)  403 tok/s rss 14065 MB 12.8s
+step  199/200 loss 8.0326 lr 1.00e-05 listen=6.4531(3) speak=8.9802(5)  323 tok/s rss 14065 MB 17.7s
+step  200/200 loss 5.9989 lr 1.00e-05 listen=6.2086(5) text=5.6492(3)  427 tok/s rss 14065 MB 7.8s
+  regen[0,listen]: 0/8 target tokens matched
+saved /Users/tuomas/speech-corpora/shards/smoke-run/ckpt-000200.safetensors
+done: 200 steps in 51m6s (314.4 tok/s avg, peak rss 14065 MB)

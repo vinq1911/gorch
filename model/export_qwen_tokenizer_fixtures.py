@@ -13,12 +13,16 @@ Outputs (committed):
     model/testdata/qwen_tokenizer_fixtures.json
     model/testdata/qwen_chat_template_fixtures.json
 
-Note: plan §2.5 calls for 1k random LibriSpeech transcript lines; the corpus
-was not present at ~/speech-corpora/LibriSpeech at export time, so the script
-substitutes 1,000 deterministically generated varied English sentences
-(seeded RNG over word/phrase banks with numbers, punctuation, contractions).
+Corpus cases (plan §2.5: 1k random LibriSpeech transcript lines): when the
+corpus is present at ~/speech-corpora/LibriSpeech/train-clean-100 the script
+samples 1,000 transcript lines from the *.trans.txt files with a fixed seed
+(cases named libri_%04d). If the corpus is absent it falls back to 1,000
+deterministically generated varied English sentences (cases named
+sentence_%04d; seeded RNG over word/phrase banks with numbers, punctuation,
+contractions) — the state of the originally committed fixture set.
 """
 
+import glob
 import json
 import os
 import random
@@ -217,6 +221,32 @@ def synthetic_sentences(n=1000, seed=8):
     return out
 
 
+LIBRISPEECH_DIR = os.path.expanduser("~/speech-corpora/LibriSpeech/train-clean-100")
+
+
+def librispeech_sentences(n=1000, seed=8):
+    """Sample n transcript lines from LibriSpeech train-clean-100 with a
+    fixed seed. Returns [] when the corpus is not on disk."""
+    trans_files = sorted(
+        glob.glob(os.path.join(LIBRISPEECH_DIR, "*", "*", "*.trans.txt"))
+    )
+    if not trans_files:
+        return []
+    lines = []
+    for tf in trans_files:
+        with open(tf, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                _, _, text = line.partition(" ")
+                if text:
+                    lines.append(text)
+    rng = random.Random(seed)
+    picked = rng.sample(lines, min(n, len(lines)))
+    return [("libri_%04d" % i, s) for i, s in enumerate(picked)]
+
+
 def chat_conversations():
     return [
         (
@@ -276,7 +306,13 @@ def main():
     tok = AutoTokenizer.from_pretrained(MODEL_DIR)
     os.makedirs(OUT_DIR, exist_ok=True)
 
-    cases = adversarial_cases() + synthetic_sentences()
+    corpus = librispeech_sentences()
+    if corpus:
+        note = "libri_* cases are 1,000 seeded-random LibriSpeech train-clean-100 transcript lines (plan §2.5)."
+    else:
+        corpus = synthetic_sentences()
+        note = "LibriSpeech absent at export time; sentence_* cases are seeded synthetic English sentences."
+    cases = adversarial_cases() + corpus
     fixture_cases = []
     for name, text in cases:
         ids = tok.encode(text, add_special_tokens=False)
@@ -285,7 +321,7 @@ def main():
     tok_out = {
         "model": "Qwen/Qwen3-0.6B",
         "transformers_version": __import__("transformers").__version__,
-        "note": "LibriSpeech absent at export time; sentence_* cases are seeded synthetic English sentences.",
+        "note": note,
         "cases": fixture_cases,
     }
     tok_path = os.path.join(OUT_DIR, "qwen_tokenizer_fixtures.json")

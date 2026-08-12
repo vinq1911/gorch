@@ -1,0 +1,16 @@
+{
+ "empty_skipped": 0,
+ "generator": "Qwen3-0.6B frozen base, greedy, ChatML enable_thinking=False",
+ "max_new": 60,
+ "prompts": 500,
+ "shard": "/Users/tuomas/speech-corpora/shards/stageA/text_replay.bin",
+ "tokens": {
+  "samples": 500,
+  "total_tokens": 20784,
+  "audio_tokens": 0,
+  "text_tokens": 20784,
+  "supervised_positions": 10549,
+  "max_len": 84,
+  "bin_bytes": 83136
+ }
+}

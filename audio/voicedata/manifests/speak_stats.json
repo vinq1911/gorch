@@ -1,0 +1,23 @@
+{
+ "corpus": "LJSpeech-1.1",
+ "dropped_est_seq": 341,
+ "dropped_post_seq": 0,
+ "encode_errors": 0,
+ "eval_count": 50,
+ "eval_stride": 131,
+ "kept_hours": 10.963004446963962,
+ "max_seq": 1024,
+ "selection": "metadata.csv order; even indices train (~12 h half), odd indices held out; eval strided over held-out half",
+ "shard": "/Users/tuomas/speech-corpora/shards/stageA/speak_ljspeech.bin",
+ "tokens": {
+  "samples": 6209,
+  "total_tokens": 4169289,
+  "audio_tokens": 3971240,
+  "text_tokens": 179422,
+  "supervised_positions": 3983658,
+  "max_len": 1016,
+  "bin_bytes": 16677156
+ },
+ "train_half_clips": 6550,
+ "voice_token": "\u003c|voice:lj|\u003e"
+}
