@@ -69,7 +69,7 @@ func (l *LoRALinear) Forward(x *g.Tensor) *g.Tensor {
 	}
 	xa := g.MatMul(x, g.Transpose2D(l.A))   // (batch, r)
 	xab := g.MatMul(xa, g.Transpose2D(l.B)) // (batch, out)
-	delta := scaleTensor(xab, l.Alpha/float32(l.R))
+	delta := g.Scale(xab, l.Alpha/float32(l.R))
 	return g.Add(base, delta)
 }
 
@@ -100,6 +100,9 @@ func (l *LoRALinear) Unmerge() {
 
 // applyDelta does Base.Weight += sign · B·A·(Alpha/R).
 func (l *LoRALinear) applyDelta(sign float32) {
+	if l.Base.Weight.Dtype() != g.Float32 {
+		panic("gorch/nn: LoRA Merge/Unmerge requires an f32 base weight — the bf16 frozen path (plan 0009 X4) trains unmerged; export by merging into an f32 copy of the base")
+	}
 	out := l.Base.Weight.Shape()[0]
 	in := l.Base.Weight.Shape()[1]
 	// delta = B (out, r) @ A (r, in) → (out, in)
@@ -126,21 +129,4 @@ func loraForward(l *LoRALinear, base *Linear, x *g.Tensor) *g.Tensor {
 		panic("gorch/nn: LoRA adapter does not wrap this projection's base Linear")
 	}
 	return l.Forward(x)
-}
-
-// scaleTensor multiplies every element by a compile-time-constant
-// scalar with a single-node autograd backward (grad·s). Equivalent to
-// g.Mul(x, g.Full(s, …)) without materialising the constant tensor.
-func scaleTensor(x *g.Tensor, s float32) *g.Tensor {
-	out := g.Zeros(x.Shape()...)
-	accelerate.VScale(x.Data(), s, out.Data())
-	if g.GradEnabled() && x.RequiresGrad() {
-		out.SetRequiresGrad(true)
-		out.SetGradFn("ScaleTensor", []*g.Tensor{x}, func(grad *g.Tensor) []*g.Tensor {
-			dx := g.Zeros(x.Shape()...)
-			accelerate.VScale(grad.Data(), s, dx.Data())
-			return []*g.Tensor{dx}
-		})
-	}
-	return out
 }

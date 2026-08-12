@@ -49,6 +49,8 @@ type cliConfig struct {
 	taskRatios string
 	dwSkip     bool
 	counts     string
+	accel      string
+	metalMinMM int
 }
 
 func main() {
@@ -79,6 +81,8 @@ func main() {
 	flag.StringVar(&c.taskRatios, "task-ratios", "", "task sampling weights, e.g. listen=0.4,speak=0.4,chain=0.2")
 	flag.BoolVar(&c.dwSkip, "dw-skip", true, "skip dW GEMMs for frozen Linear weights (measurement toggle)")
 	flag.StringVar(&c.counts, "counts", "40,40,20", "make-overfit sample counts: listen,speak,chain")
+	flag.StringVar(&c.accel, "accel", "async", "GPU+bf16 path (plan 0009 X4): async | sync | off (off = the plain CPU f32 path)")
+	flag.IntVar(&c.metalMinMM, "metal-min-matmul", 8_000_000, "MatMulMetalThreshold (FMA count) used when -accel is on; keeps short-sequence and LoRA matmuls on the resident GPU path")
 	flag.Parse()
 
 	var err error

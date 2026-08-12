@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"syscall"
 	"time"
 
@@ -18,28 +19,65 @@ import (
 )
 
 // loadVoiceModel loads the real Qwen3-0.6B checkpoint (optionally
-// depth-truncated) and applies the M1 trainable surgery.
+// depth-truncated) and applies the M1 trainable surgery. With -accel
+// != off it configures the plan 0009 X4 GPU+bf16 path: Metal init +
+// ADR-012 probe, native-bf16 frozen weights, everything Metal-resident,
+// a lowered matmul threshold (short sequences and LoRA-rank matmuls
+// must stay on the resident GPU path instead of the widen-per-call
+// fallback), and async command-buffer dispatch unless -accel=sync
+// (the X2b/X3 finding: async wins at seq ≤1024 — the trainer's cap —
+// and regresses at 1500).
 func loadVoiceModel(c cliConfig) (*qwen.VoiceModel, error) {
+	accel := c.accel != "off"
+	if c.accel != "off" && c.accel != "sync" && c.accel != "async" {
+		return nil, fmt.Errorf("unknown -accel %q (want async | sync | off)", c.accel)
+	}
+	if accel {
+		if _, err := g.InitMetal(); err != nil {
+			return nil, fmt.Errorf("-accel=%s needs Metal (use -accel=off for the CPU f32 path): %w", c.accel, err)
+		}
+		if !qwen.AccelSupported() {
+			return nil, fmt.Errorf("MPS bf16 matmul unsupported on this machine (ADR-012 probe failed) — use -accel=off")
+		}
+		g.MatMulMetalThreshold = c.metalMinMM
+		g.SetMetalAsync(c.accel == "async")
+	}
+
 	path, err := qwen.FindCheckpoint()
 	if err != nil {
 		return nil, err
 	}
 	cfg := qwen.Qwen3_0_6B()
+	loadFull, loadTrunc := qwen.Load, qwen.LoadTruncated
+	if accel {
+		loadFull, loadTrunc = qwen.LoadNative, qwen.LoadTruncatedNative
+	}
 	var m *qwen.Model
 	if c.layers > 0 && c.layers < cfg.NumLayers {
 		cfg.NumLayers = c.layers
-		m, err = qwen.LoadTruncated(path, cfg)
+		m, err = loadTrunc(path, cfg)
 	} else {
-		m, err = qwen.Load(path, cfg)
+		m, err = loadFull(path, cfg)
 	}
 	if err != nil {
 		return nil, err
 	}
-	return qwen.NewVoiceModel(m, qwen.VoiceConfig{
+	vm := qwen.NewVoiceModel(m, qwen.VoiceConfig{
 		LoRARank:   c.loraR,
 		LoRAAlpha:  float32(c.loraAlpha),
 		LoRALayers: c.loraLayers,
-	}), nil
+	})
+	if accel {
+		vm.ToMetal(g.MetalDev())
+		// Drop the load-time transients (the pre-load random f32 init,
+		// the safetensors decode buffers, and the pre-ToMetal CPU
+		// slices) before the first step: the training process must
+		// enter the loop at its steady-state footprint, not its load
+		// peak — under external memory pressure the difference is what
+		// jetsam kills (plan 0009 §2.5 SIGKILL class).
+		flushMetalGraph()
+	}
+	return vm, nil
 }
 
 func loadDataset(c cliConfig) (*data.TokenDataset, map[string]float64, error) {
@@ -78,6 +116,19 @@ func lrAt(step, warmup, total int, minFrac float64) float64 {
 	return minFrac + (1-minFrac)*0.5*(1+math.Cos(math.Pi*prog))
 }
 
+// flushMetalGraph frees the dead autograd graph's Metal buffers
+// between accum micro-steps. Metal-backed activations exert no
+// Go-heap pressure, and MTLBuffer release runs via finalizers — which
+// need a GC to be queued and a beat to actually run (the e2e bench's
+// taFlushGC lesson; a single GC leaves the release lagging the
+// allocation rate and the process jetsams under accum 8 at seq 1024).
+// Cost ~25 ms vs a ~1.5 s micro-step.
+func flushMetalGraph() {
+	runtime.GC()
+	time.Sleep(10 * time.Millisecond)
+	runtime.GC()
+}
+
 func rssMB() float64 {
 	var ru syscall.Rusage
 	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &ru); err != nil {
@@ -95,13 +146,21 @@ func train(c cliConfig) error {
 	}
 	nn.AlwaysComputeLinearDW = !c.dwSkip
 
+	if c.accel != "off" && c.genEvery > 0 {
+		// The KV-cached greedy decode is a CPU path; per-token single-row
+		// matmuls against bf16 Metal weights would take the widen-per-call
+		// fallback. Regeneration telemetry belongs to eval (-accel=off).
+		fmt.Println("warning: -gen-every disabled under -accel (decode path is CPU; run -mode eval separately)")
+		c.genEvery = 0
+	}
+
 	t0 := time.Now()
 	vm, err := loadVoiceModel(c)
 	if err != nil {
 		return err
 	}
-	fmt.Printf("model loaded in %.1fs (layers=%d lora-r=%d lora-layers=%d dw-skip=%v)\n",
-		time.Since(t0).Seconds(), vm.Base.Cfg.NumLayers, c.loraR, c.loraLayers, c.dwSkip)
+	fmt.Printf("model loaded in %.1fs (layers=%d lora-r=%d lora-layers=%d dw-skip=%v accel=%s)\n",
+		time.Since(t0).Seconds(), vm.Base.Cfg.NumLayers, c.loraR, c.loraLayers, c.dwSkip, c.accel)
 
 	ds, ratios, err := loadDataset(c)
 	if err != nil {
@@ -189,6 +248,9 @@ func train(c cliConfig) error {
 			taskLoss[task] += raw
 			taskCount[task]++
 			stepTokens += int64(len(tokens))
+			if c.accel != "off" {
+				flushMetalGraph()
+			}
 		}
 		if c.clip > 0 {
 			optim.ClipGradNorm(params, float32(c.clip))

@@ -7,6 +7,7 @@ import (
 
 	g "github.com/vinq1911/gorch"
 	"github.com/vinq1911/gorch/accelerate"
+	"github.com/vinq1911/gorch/metal"
 )
 
 // ExtendedEmbedding — vocab-extension surgery for a frozen pretrained
@@ -24,6 +25,19 @@ type ExtendedEmbedding struct {
 	Base *g.Tensor // (baseVocab, dim) — frozen pretrained rows
 	Ext  *g.Tensor // (numExt, dim) — trainable appended rows
 	Dim  int
+}
+
+// ToMetal moves Base and Ext into unified memory (plan 0009 X4). The
+// lookup and interleave loops stay on the CPU (Data() is the read
+// barrier), but (1) the lookup output becomes Metal-resident, so the
+// whole transformer chain downstream starts resident instead of being
+// stripped of GPU dispatch at the very first op, and (2) the tied-head
+// GEMMs in Logits dispatch MPS instead of Accelerate when they clear
+// the matmul threshold. Both tensors stay f32: Base rows are read by
+// the CPU lookup, Ext is a trainable param (optimizer contract).
+func (e *ExtendedEmbedding) ToMetal(dev *metal.Device) {
+	e.Base.ToMetal(dev)
+	e.Ext.ToMetal(dev)
 }
 
 // NewExtendedEmbedding wraps the frozen base embedding matrix and
@@ -81,7 +95,11 @@ func (e *ExtendedEmbedding) Forward(ids []int) *g.Tensor {
 	vocab := baseVocab + numExt
 	dim := e.Dim
 
-	out := g.Zeros(len(ids), dim)
+	// Residency-inheriting output (plan 0009 X4): when the embedding
+	// tables live on Metal the hidden-state chain starts Metal-resident,
+	// which is what lets every block op downstream dispatch its GPU
+	// path. The row copies below run on the CPU through unified memory.
+	out := g.ZerosLike(e.Ext, len(ids), dim)
 	od := out.Data()
 	bd, ed := e.Base.Data(), e.Ext.Data()
 	for i, id := range ids {
@@ -100,7 +118,7 @@ func (e *ExtendedEmbedding) Forward(ids []int) *g.Tensor {
 		out.SetRequiresGrad(true)
 		idsCopy := append([]int{}, ids...)
 		out.SetGradFn("ExtEmbedLookup", []*g.Tensor{e.Ext}, func(grad *g.Tensor) []*g.Tensor {
-			dExt := g.Zeros(numExt, dim)
+			dExt := g.ZerosLike(e.Ext, numExt, dim)
 			dd := dExt.Data()
 			gd := grad.Data()
 			for i, id := range idsCopy {
@@ -147,15 +165,33 @@ func (e *ExtendedEmbedding) Logits(h *g.Tensor) *g.Tensor {
 	out := g.ZerosLike(h, M, v0+v1)
 	od := out.Data()
 	// Two GEMMs into scratch blocks, then row-interleave into the
-	// concatenated layout (SgemmTransB writes a contiguous (M, N)
+	// concatenated layout (a TransB GEMM writes a contiguous (M, N)
 	// result, so it cannot target the strided column block directly).
-	lb := make([]float32, M*v0)
-	le := make([]float32, M*v1)
-	accelerate.SgemmTransB(M, v0, dim, 1.0, h.Data(), e.Base.Data(), 0.0, lb)
-	accelerate.SgemmTransB(M, v1, dim, 1.0, h.Data(), e.Ext.Data(), 0.0, le)
-	for i := 0; i < M; i++ {
-		copy(od[i*(v0+v1):i*(v0+v1)+v0], lb[i*v0:(i+1)*v0])
-		copy(od[i*(v0+v1)+v0:(i+1)*(v0+v1)], le[i*v1:(i+1)*v1])
+	//
+	// GPU path (plan 0009 X4): with h and the tables Metal-resident,
+	// g.MatMulTransB (no autograd — this node's fused GradFn below is
+	// the autograd) dispatches the head GEMMs on MPS above the matmul
+	// threshold; the base-side GEMM at (M, 151936, 1024) is the single
+	// biggest matmul in the training step after the blocks themselves.
+	// Below threshold or CPU-resident it is the same Accelerate call as
+	// before, through unified memory.
+	if h.IsOnMetal() && e.Base.IsOnMetal() && e.Ext.IsOnMetal() {
+		lb := g.MatMulTransB(h.Detach(), e.Base.Detach())
+		le := g.MatMulTransB(h.Detach(), e.Ext.Detach())
+		lbd, led := lb.Data(), le.Data()
+		for i := 0; i < M; i++ {
+			copy(od[i*(v0+v1):i*(v0+v1)+v0], lbd[i*v0:(i+1)*v0])
+			copy(od[i*(v0+v1)+v0:(i+1)*(v0+v1)], led[i*v1:(i+1)*v1])
+		}
+	} else {
+		lb := make([]float32, M*v0)
+		le := make([]float32, M*v1)
+		accelerate.SgemmTransB(M, v0, dim, 1.0, h.Data(), e.Base.Data(), 0.0, lb)
+		accelerate.SgemmTransB(M, v1, dim, 1.0, h.Data(), e.Ext.Data(), 0.0, le)
+		for i := 0; i < M; i++ {
+			copy(od[i*(v0+v1):i*(v0+v1)+v0], lb[i*v0:(i+1)*v0])
+			copy(od[i*(v0+v1)+v0:(i+1)*(v0+v1)], le[i*v1:(i+1)*v1])
+		}
 	}
 
 	if g.GradEnabled() && (h.RequiresGrad() || e.Ext.RequiresGrad()) {
@@ -163,6 +199,31 @@ func (e *ExtendedEmbedding) Logits(h *g.Tensor) *g.Tensor {
 		base := e.Base
 		ext := e.Ext
 		out.SetGradFn("ExtEmbedLogits", []*g.Tensor{h, ext}, func(grad *g.Tensor) []*g.Tensor {
+			// GPU path (plan 0009 X4): split the (M, v0+v1) grad into
+			// resident column blocks on the CPU (one sync + memcpy),
+			// then run the three grad GEMMs — dh's two contributions and
+			// dExt — through the MPS-dispatching no-autograd matmuls.
+			// The base-side dW GEMM stays structurally absent.
+			if grad.IsOnMetal() && base.IsOnMetal() && ext.IsOnMetal() {
+				gd := grad.Data()
+				gb := g.ZerosLike(grad, M, v0)
+				ge := g.ZerosLike(grad, M, v1)
+				gbd, ged := gb.Data(), ge.Data()
+				for i := 0; i < M; i++ {
+					copy(gbd[i*v0:(i+1)*v0], gd[i*(v0+v1):i*(v0+v1)+v0])
+					copy(ged[i*v1:(i+1)*v1], gd[i*(v0+v1)+v0:(i+1)*(v0+v1)])
+				}
+				var dh *g.Tensor
+				if h.RequiresGrad() {
+					dh = g.Add(g.MatMul(gb, base.Detach()), g.MatMul(ge, ext.Detach()))
+				}
+				var dExt *g.Tensor
+				if ext.RequiresGrad() {
+					dExt = g.MatMulTransA(ge, h.Detach())
+				}
+				return []*g.Tensor{dh, dExt}
+			}
+
 			gd := grad.Data()
 			// Split the (M, v0+v1) grad into its column blocks.
 			gb := make([]float32, M*v0)
