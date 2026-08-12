@@ -51,6 +51,7 @@ type cliConfig struct {
 	counts     string
 	accel      string
 	metalMinMM int
+	rssLimitMB int
 }
 
 func main() {
@@ -82,6 +83,8 @@ func main() {
 	flag.BoolVar(&c.dwSkip, "dw-skip", true, "skip dW GEMMs for frozen Linear weights (measurement toggle)")
 	flag.StringVar(&c.counts, "counts", "40,40,20", "make-overfit sample counts: listen,speak,chain")
 	flag.StringVar(&c.accel, "accel", "async", "GPU+bf16 path (plan 0009 X4): async | sync | off (off = the plain CPU f32 path)")
+	flag.BoolVar(&unsafeNoFence, "unsafe-no-fence", false, "DIAGNOSTIC ONLY: disable the micro-step GPU fence. Reproduces unbounded MTLBuffer retention (57+ GB). Never use for a real run")
+	flag.IntVar(&c.rssLimitMB, "rss-limit-mb", 12000, "abort the run if peak RSS exceeds this (0 = no limit). Self-guard: on a 24 GB machine an over-budget config must fail loudly, not get jetsam-killed (2026-08-12 post-mortem)")
 	flag.IntVar(&c.metalMinMM, "metal-min-matmul", 8_000_000, "MatMulMetalThreshold (FMA count) used when -accel is on; keeps short-sequence and LoRA matmuls on the resident GPU path")
 	flag.Parse()
 

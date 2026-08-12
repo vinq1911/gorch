@@ -121,9 +121,33 @@ func lrAt(step, warmup, total int, minFrac float64) float64 {
 // Go-heap pressure, and MTLBuffer release runs via finalizers — which
 // need a GC to be queued and a beat to actually run (the e2e bench's
 // taFlushGC lesson; a single GC leaves the release lagging the
-// allocation rate and the process jetsams under accum 8 at seq 1024).
-// Cost ~25 ms vs a ~1.5 s micro-step.
+// allocation rate). Cost ~25 ms vs a ~1.5 s micro-step.
+//
+// THE FENCE IS NOT OPTIONAL IN ASYNC MODE (2026-08-12 post-mortem).
+// A command buffer retains every MTLBuffer it encoded until it
+// completes. Async dispatch (plan 0009 X2) never blocks the host, so
+// the CPU queues an entire micro-step of backward work — 28 layers ×
+// ~15 ops — and moves straight on to the next micro-step, allocating
+// again while nothing has retired. GC cannot release those buffers:
+// they are owned by the Metal command queue, not by Go references.
+// Unfenced accum-8 @ seq-1024 reached 57-61 GB RSS on a 24 GB machine
+// and was jetsam-killed three times, taking the desktop down with it.
+//
+// SyncMetal blocks on the last committed command buffer; a single
+// queue completes in commit order, so that one wait drains every
+// earlier buffer and bounds live GPU memory to ONE micro-step. The
+// async win is preserved where it matters (the ~420 chained GPU ops
+// inside a micro-step still queue without host stalls); only the
+// micro-step boundary is serialized.
+// unsafeNoFence disables the micro-step GPU fence. DIAGNOSTIC ONLY —
+// it reproduces the unbounded-retention failure above. Never set it
+// for a real run.
+var unsafeNoFence = false
+
 func flushMetalGraph() {
+	if !unsafeNoFence {
+		g.SyncMetal() // retire in-flight command buffers → release their MTLBuffers
+	}
 	runtime.GC()
 	time.Sleep(10 * time.Millisecond)
 	runtime.GC()
@@ -216,7 +240,11 @@ func train(c cliConfig) error {
 		return err
 	}
 	defer lossLog.Close()
-	if startStep == 0 {
+	// Header only when the log is genuinely empty. Keying on
+	// startStep==0 appended a fresh header on every relaunch of a run
+	// that died before its first checkpoint, which then broke naive
+	// "tail -1 | cut -f1" progress parsing (2026-08-12 post-mortem).
+	if fi, err := lossLog.Stat(); err == nil && fi.Size() == 0 {
 		fmt.Fprintln(lossLog, "step\tloss\tlr\ttok_per_s\trss_mb\tper_task")
 	}
 
@@ -272,6 +300,17 @@ func train(c cliConfig) error {
 			rssMB(), time.Since(stepStart).Seconds())
 		fmt.Fprintf(lossLog, "%d\t%.6f\t%.4e\t%.1f\t%.0f\t%s\n",
 			step, stepLoss, c.lrLoRA*lr, tokPerS, rssMB(), perTask)
+
+		// Self-guard: fail loudly rather than letting the OS jetsam us
+		// (which on a saturated 24 GB machine takes the desktop with
+		// it — 2026-08-12 post-mortem). Checkpoints already on disk
+		// stay valid; the operator lowers accum/max-seq and resumes.
+		if c.rssLimitMB > 0 && rssMB() > float64(c.rssLimitMB) {
+			lossLog.Sync()
+			return fmt.Errorf("RSS ceiling exceeded: peak %.0f MB > limit %d MB at step %d "+
+				"(lower -accum / -max-seq, or raise -rss-limit-mb if the machine really has the headroom)",
+				rssMB(), c.rssLimitMB, step)
+		}
 
 		if c.genEvery > 0 && step%c.genEvery == 0 {
 			logRegen(vm, ds, 0, c.evalMaxNew)
