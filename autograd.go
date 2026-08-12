@@ -22,46 +22,81 @@ func (t *Tensor) Backward() {
 		panic("gorch: Backward() only supported on scalar tensors (call Sum or Mean first)")
 	}
 
-	// Seed gradient: dL/dL = 1, in the loss's dtype.
-	t.grad = onesLike(t)
+	// THE WHOLE BACKWARD PASS RUNS UNTRACKED (2026-08-12 post-mortem).
+	//
+	// Backward closures compute with ordinary graph-building ops —
+	// gpuLinearDx does g.MatMul(grad, W), the LoRA path uses Scale and
+	// Transpose2D, and so on. With tracking left on, each of those
+	// attaches a GradFn to the gradient it produces, and that GradFn
+	// references the forward tensors it consumed (x, W, activations).
+	// The gradient is then stored in inp.grad — and for a PARAMETER
+	// that field lives until the optimizer's ZeroGrad, which runs once
+	// per optimizer step, after all accumulation micro-steps.
+	//
+	// So every parameter's .grad became a root pinning that micro-
+	// step's entire forward+backward graph. With accumulation, N
+	// micro-step graphs were pinned at once: measured ~5 GB per
+	// micro-step, 19.9 GB after four, unbounded thereafter. GC could
+	// not help — the graphs were genuinely reachable. This reproduced
+	// with the GPU path disabled entirely, which is what ruled out the
+	// Metal command-buffer theory.
+	//
+	// PyTorch has the same rule: backward does not record unless you
+	// ask for create_graph. Nothing here reads grad.gradFn, so first-
+	// order semantics are the whole contract.
+	NoGrad(func() {
+		// Seed gradient: dL/dL = 1, in the loss's dtype.
+		t.grad = onesLike(t)
 
-	// Topological sort: collect all nodes in reverse order.
-	visited := make(map[*Tensor]bool)
-	var order []*Tensor
-	var topo func(n *Tensor)
-	topo = func(n *Tensor) {
-		if visited[n] {
-			return
-		}
-		visited[n] = true
-		if n.gradFn != nil {
-			for _, inp := range n.gradFn.inputs {
-				topo(inp)
+		// Topological sort: collect all nodes in reverse order.
+		visited := make(map[*Tensor]bool)
+		var order []*Tensor
+		var topo func(n *Tensor)
+		topo = func(n *Tensor) {
+			if visited[n] {
+				return
 			}
+			visited[n] = true
+			if n.gradFn != nil {
+				for _, inp := range n.gradFn.inputs {
+					topo(inp)
+				}
+			}
+			order = append(order, n)
 		}
-		order = append(order, n)
-	}
-	topo(t)
+		topo(t)
 
-	// Walk in reverse topological order, propagating gradients.
-	for i := len(order) - 1; i >= 0; i-- {
-		n := order[i]
-		if n.gradFn == nil || n.grad == nil {
-			continue
-		}
-
-		inputGrads := n.gradFn.backward(n.grad)
-		for j, inp := range n.gradFn.inputs {
-			if !inp.requiresGrad {
+		// Walk in reverse topological order, propagating gradients.
+		for i := len(order) - 1; i >= 0; i-- {
+			n := order[i]
+			if n.gradFn == nil || n.grad == nil {
 				continue
 			}
-			if inp.grad == nil {
-				inp.grad = inputGrads[j]
-			} else {
-				accumulateGrad(inp.grad, inputGrads[j])
+
+			inputGrads := n.gradFn.backward(n.grad)
+			for j, inp := range n.gradFn.inputs {
+				if !inp.requiresGrad {
+					continue
+				}
+				gr := inputGrads[j]
+				if gr == nil {
+					continue
+				}
+				// Belt and braces: even if some future backward closure
+				// re-enables tracking internally, a stored .grad must
+				// never own a graph. Detach shares storage, so this is
+				// free. Invariant: p.grad == nil || p.grad.gradFn == nil.
+				if gr.gradFn != nil {
+					gr = gr.Detach()
+				}
+				if inp.grad == nil {
+					inp.grad = gr
+				} else {
+					accumulateGrad(inp.grad, gr)
+				}
 			}
 		}
-	}
+	})
 }
 
 // onesLike returns a 1-element tensor with value 1 in t's dtype.

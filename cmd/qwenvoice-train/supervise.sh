@@ -60,6 +60,21 @@ last_step() {
     [[ "$s" =~ ^[0-9]+$ ]] && echo "$s" || echo 0
 }
 
+# phys_footprint in MB — the metric jetsam acts on. ps RSS is blind to
+# Metal/IOAccelerator memory (measured 781MB RSS vs 12.7GB footprint),
+# so an RSS-based guard cannot protect the machine (2026-08-12).
+footprint_mb() {
+    local pid=$1 v
+    v=$(vmmap --summary "$pid" 2>/dev/null | awk -F: '/^Physical footprint:/ {gsub(/ /,"",$2); print $2; exit}')
+    [ -z "$v" ] && { echo 0; return; }
+    case "$v" in
+        *G) echo $(( $(echo "${v%G}" | cut -d. -f1) * 1024 )) ;;
+        *M) echo "${v%M}" | cut -d. -f1 ;;
+        *K) echo 0 ;;
+        *)  echo 0 ;;
+    esac
+}
+
 # ---- watchdog: kill the trainer before the OS has to -----------------
 # Returns via the flag file: "rss" or "sysmem" if it intervened.
 WATCH_FLAG="$RUN_DIR/.watchdog_tripped"
@@ -68,11 +83,10 @@ watchdog() {
     rm -f "$WATCH_FLAG"
     while kill -0 "$pid" 2>/dev/null; do
         local rss_mb free_mb
-        rss_mb=$(ps -o rss= -p "$pid" 2>/dev/null | tr -d ' ')
-        rss_mb=$(( ${rss_mb:-0} / 1024 ))
+        rss_mb=$(footprint_mb "$pid")
         if [ "$rss_mb" -gt "$RSS_CEILING_MB" ]; then
             echo "rss:${rss_mb}" > "$WATCH_FLAG"
-            log "WATCHDOG: trainer RSS ${rss_mb} MB > ${RSS_CEILING_MB} MB — killing (pid $pid)"
+            log "WATCHDOG: trainer footprint ${rss_mb} MB > ${RSS_CEILING_MB} MB — killing (pid $pid)"
             kill -9 "$pid" 2>/dev/null
             return
         fi

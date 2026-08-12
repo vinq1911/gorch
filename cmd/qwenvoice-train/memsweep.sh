@@ -23,6 +23,21 @@ if pgrep -f "$(basename "$BIN")" >/dev/null 2>&1; then
     echo "a trainer is already running — refusing to start" >&2; exit 2
 fi
 
+# phys_footprint in MB — the metric jetsam acts on. ps RSS is blind to
+# Metal/IOAccelerator memory (measured 781MB RSS vs 12.7GB footprint),
+# so an RSS-based guard cannot protect the machine (2026-08-12).
+footprint_mb() {
+    local pid=$1 v
+    v=$(vmmap --summary "$pid" 2>/dev/null | awk -F: '/^Physical footprint:/ {gsub(/ /,"",$2); print $2; exit}')
+    [ -z "$v" ] && { echo 0; return; }
+    case "$v" in
+        *G) echo $(( $(echo "${v%G}" | cut -d. -f1) * 1024 )) ;;
+        *M) echo "${v%M}" | cut -d. -f1 ;;
+        *K) echo 0 ;;
+        *)  echo 0 ;;
+    esac
+}
+
 run_one() {  # accel fence accum maxseq
     local accel=$1 fence=$2 accum=$3 seq=$4
     local tag="${accel}_fence${fence}_a${accum}_s${seq}"
@@ -45,7 +60,7 @@ run_one() {  # accel fence accum maxseq
     local peak=0 outcome=completed
     while kill -0 "$pid" 2>/dev/null; do
         local rss free
-        rss=$(( $(ps -o rss= -p "$pid" 2>/dev/null | tr -d ' ' || echo 0) / 1024 ))
+        rss=$(footprint_mb "$pid")
         [ "$rss" -gt "$peak" ] && peak=$rss
         plevel=$(sysctl -n kern.memorystatus_vm_pressure_level 2>/dev/null)
         if [ "$rss" -gt "$HARD_KILL_MB" ]; then

@@ -17,6 +17,7 @@ import (
 
 	g "github.com/vinq1911/gorch"
 	"github.com/vinq1911/gorch/data"
+	"github.com/vinq1911/gorch/metal"
 	"github.com/vinq1911/gorch/model/qwen"
 	"github.com/vinq1911/gorch/nn"
 	"github.com/vinq1911/gorch/optim"
@@ -179,21 +180,54 @@ func rssMB() float64 {
 	return float64(ru.Maxrss) / (1 << 20) // darwin reports bytes
 }
 
-// currentRSSMB is the process's CURRENT resident size — what the
-// ceiling guard must test, and the only way to observe
-// debug.FreeOSMemory returning pages. macOS exposes no /proc, and
-// mach task_basic_info needs cgo, so shell out: a few ms once per
-// optimizer step against a step measured in seconds.
+// currentRSSMB reports the process's PHYSICAL FOOTPRINT in MB — the
+// metric macOS jetsam actually acts on, and the only one that sees
+// GPU/IOAccelerator memory.
+//
+// Do NOT use ps RSS here (2026-08-12 post-mortem, second finding).
+// Measured simultaneously on this trainer at accum 2 / seq 512:
+//
+//	ps rss             781 MB
+//	physical footprint 12.7 GB
+//
+// A 16x blind spot: an RSS-based ceiling sat at 6.8 GB while the
+// process was being SIGKILLed. Metal buffers are unified-memory
+// allocations that never appear in RSS. vmmap is slow-ish (it walks
+// the region map) but this runs once per optimizer step, and a step
+// costs seconds.
 func currentRSSMB() float64 {
-	out, err := exec.Command("ps", "-o", "rss=", "-p", strconv.Itoa(os.Getpid())).Output()
-	if err != nil {
-		return rssMB() // fall back to peak rather than failing open
-	}
-	kb, err := strconv.ParseFloat(strings.TrimSpace(string(out)), 64)
+	out, err := exec.Command("vmmap", "--summary", strconv.Itoa(os.Getpid())).Output()
 	if err != nil {
 		return rssMB()
 	}
-	return kb / 1024
+	for _, line := range strings.Split(string(out), "\n") {
+		if !strings.HasPrefix(strings.TrimSpace(line), "Physical footprint:") {
+			continue
+		}
+		return parseFootprintMB(strings.TrimSpace(line[strings.Index(line, ":")+1:]))
+	}
+	return rssMB()
+}
+
+// parseFootprintMB converts vmmap's "12.7G" / "781.2M" / "512K" to MB.
+func parseFootprintMB(v string) float64 {
+	if v == "" {
+		return 0
+	}
+	mult := 1.0
+	switch v[len(v)-1] {
+	case 'G':
+		mult, v = 1024, v[:len(v)-1]
+	case 'M':
+		mult, v = 1, v[:len(v)-1]
+	case 'K':
+		mult, v = 1.0/1024, v[:len(v)-1]
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		return 0
+	}
+	return f * mult
 }
 
 func train(c cliConfig) error {
@@ -314,6 +348,18 @@ func train(c cliConfig) error {
 			if c.accel != "off" {
 				flushMetalGraph()
 			}
+			// Footprint must be checked per MICRO-step, not per
+			// optimizer step: the growth happens across the accumulation
+			// micro-steps, so a once-per-step check never gets to run —
+			// the OS SIGKILLs us first (measured: exit 137 before the
+			// first step completed at accum 8 / seq 1024).
+			if c.rssLimitMB > 0 {
+				if cur := currentRSSMB(); cur > float64(c.rssLimitMB) {
+					return fmt.Errorf("footprint ceiling exceeded mid-step: %.0f MB > limit %d MB "+
+						"(step %d, micro-step %d/%d, seq %d) — lower -accum / -max-seq",
+						cur, c.rssLimitMB, step, a+1, c.accum, c.maxSeq)
+				}
+			}
 		}
 		if c.clip > 0 {
 			optim.ClipGradNorm(params, float32(c.clip))
@@ -330,9 +376,18 @@ func train(c cliConfig) error {
 			}
 		}
 		tokPerS := float64(stepTokens) / time.Since(stepStart).Seconds()
-		fmt.Printf("step %4d/%d loss %.4f lr %.2e %s %.0f tok/s rss %.0f MB %.1fs\n",
+		var ms runtime.MemStats
+		runtime.ReadMemStats(&ms)
+		mb := func(v uint64) float64 { return float64(v) / (1 << 20) }
+		fmt.Printf("step %4d/%d loss %.4f lr %.2e %s %.0f tok/s phys %.0f MB %.1fs\n",
 			step, c.steps, stepLoss, c.lrLoRA*lr, perTask, tokPerS,
-			rssMB(), time.Since(stepStart).Seconds())
+			currentRSSMB(), time.Since(stepStart).Seconds())
+		// Where does the footprint live? Go heap vs everything else
+		// (Metal buffers are unified-memory allocations outside the Go
+		// heap, so a growing gap means GPU-side retention).
+		fmt.Printf("    mem: heapAlloc %.0f heapSys %.0f heapIdle %.0f heapReleased %.0f metalLive %.0f MB\n",
+			mb(ms.HeapAlloc), mb(ms.HeapSys), mb(ms.HeapIdle), mb(ms.HeapReleased),
+			float64(metal.LiveBufferBytes())/(1<<20))
 		fmt.Fprintf(lossLog, "%d\t%.6f\t%.4e\t%.1f\t%.0f\t%s\n",
 			step, stepLoss, c.lrLoRA*lr, tokPerS, rssMB(), perTask)
 

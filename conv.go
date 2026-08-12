@@ -168,14 +168,20 @@ func conv2dBackward(gradOutput *Tensor, input *Tensor, weight *Tensor, bias *Ten
 
 	is1x1 := kH == 1 && kW == 1 && stride == 1 && pad == 0
 
+	// NOTE: the predicate here is requiresGrad ALONE, never
+	// GradEnabled(). This runs inside the backward pass, which (since
+	// the 2026-08-12 retention fix) executes untracked — GradEnabled()
+	// is false there by design. Whether a gradient is WANTED is a
+	// property of the input, not of graph-recording mode. Coupling the
+	// two silently produced nil input gradients.
 	var dInput *Tensor
-	if GradEnabled() && (input.requiresGrad) {
+	if input.requiresGrad {
 		dInput = Zeros(input.shape...)
 	}
 	dWeight := Zeros(weight.shape...)
 
 	var dBias *Tensor
-	if GradEnabled() && (bias != nil && bias.requiresGrad) {
+	if bias != nil && bias.requiresGrad {
 		dBias = Zeros(bias.shape...)
 	}
 
@@ -183,7 +189,7 @@ func conv2dBackward(gradOutput *Tensor, input *Tensor, weight *Tensor, bias *Ten
 	var dcolBuf []float32
 	if !is1x1 {
 		colBuf = make([]float32, K*N)
-		if GradEnabled() && (input.requiresGrad) {
+		if input.requiresGrad {
 			dcolBuf = make([]float32, K*N)
 		}
 	}
@@ -210,7 +216,7 @@ func conv2dBackward(gradOutput *Tensor, input *Tensor, weight *Tensor, bias *Ten
 		accelerate.SgemmTransB(M, K, N, 1.0, gradSample, colData, 1.0, dWeight.data)
 
 		// dInput: dcol = weight^T @ gradSample => (K, M) @ (M, N) = (K, N)
-		if GradEnabled() && (input.requiresGrad) {
+		if input.requiresGrad {
 			if is1x1 {
 				dcolBuf = dInput.data[b*inC*H*W : (b+1)*inC*H*W]
 				accelerate.SgemmTransA(K, N, M, 1.0, weight.data, gradSample, 0.0, dcolBuf)
