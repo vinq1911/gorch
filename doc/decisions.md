@@ -209,3 +209,26 @@ Tiny GPT (vocab=256, dim=64, 4 heads, 4 layers, prompt=8, generate 64 tokens) on
 | `BenchmarkGenerateCached`   |  4.4 ms   |
 
 **8.1× speedup at 72 tokens generated** — and the gap widens with sequence length because uncached is O(N²) per token and cached is O(N). Validates ADR-008's "expect 3-5× improvement for long sequences" claim with a concrete number on a small model. Real-world GPT-2-small numbers should be similar or better.
+
+## ADR-012: bf16 matmul goes through MPSGraph (plan 0009 X3-B0 probe outcome)
+
+**Date:** 2026-08-11
+**Status:** Accepted
+
+Plan 0009 §3.4 B0 required probing whether the MPS shim can run bf16 matmuls before scoping B4, with a three-tier fallback: (a) `MPSMatrix` + `MPSDataTypeBFloat16`, (b) MPSGraph matmul with bf16, (c) custom `bfloat` simdgroup MSL kernel via the §4 codex protocol.
+
+**Probe result (Apple M4, macOS 26.5, 2026-08-11): tier (a) is dead.** `MPSMatrixMultiplication` hard-asserts on encode:
+
+> `MPSMatrixMultiplication.mm:3260: failed assertion 'Input data type must be one of MPSDataTypeFloat32, MPSDataTypeFloat16, MPSDataTypeInt8, or MPSDataTypeInt16.'`
+
+The assertion calls `abort()` — it is not an `NSException`, so it cannot even be probed safely at runtime from the shim (`@try/@catch` does not fire). `MPSDataTypeBFloat16` exists in the SDK (macOS 14+) and works elsewhere in MPS, but the classic `MPSMatrix` kernels reject it outright.
+
+**Decision: tier (b) — MPSGraph.** `metal_mps_matmul_dt` / `metal_mps_batched_matmul_dt` in `metal/shim.m` build an `MPSGraph` per (M, N, K, batch, transA, transB, dtypes) signature, cached in a dictionary for the life of the process (shapes are static per model layer, so the cache stays small and steady-state cost is one encode on a cached graph). Key properties:
+
+- **Per-operand dtype:** A and B are independently bf16 or f32 placeholders; C is always f32. Mixed f32-activation × bf16-frozen-weight — the LoRA workload's shape — is a first-class case (verified in the probe).
+- **f32 accumulation by construction (risk R2):** bf16 placeholders are `castTensor`-ed to f32 *inside the graph* before the `matrixMultiplication` node. The MPSGraph compiler fuses the cast, so memory traffic stays 2 bytes/element while the matmul accumulates in f32. Measured: 1024³ bf16×bf16 matches an f64 row reference to 2.2e-06 of RMS (bf16 accumulation would sit near 6e-2); attention-logits shape (16 heads, seq 1500, head_dim 128) matches f64 to 7.2e-07 of RMS.
+- **Async-mode compatible:** the graph is encoded onto an `MPSCommandBuffer` wrapping the shared queue; the shim commits without waiting in async mode exactly like every other dispatch (`metal_finish` on the root command buffer).
+- **Throughput:** 1024³ bf16 measured **1.33× faster** than the f32 `MPSMatrix` path (1.54 ms vs 2.04 ms per sync dispatch) — half the operand bandwidth, same f32 math.
+- **Runtime guard:** `gorch.MetalBF16MatMulSupported()` runs a once-per-process 16³ numeric probe (bf16×bf16 and f32×bf16 vs a CPU reference) before any real dispatch routes to the bf16 path; on failure (older OS, wrong numerics) every bf16 matmul silently takes the widen-to-f32 + Accelerate fallback. MPS silently producing garbage instead of erroring is a known failure mode, so support is defined by *numerics*, not by a non-error return.
+
+Tier (c) — the custom bfloat simdgroup kernel and its §4 Azure/codex protocol — is **not needed**: tier (b) closes B0 with a measured compute win, not just the memory win.

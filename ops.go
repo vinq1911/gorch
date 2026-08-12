@@ -25,6 +25,7 @@ var (
 	metalRepeatDispatches      atomic.Int64 // X2b: repeat_interleave fwd+bwd
 	metalColReduceDispatches   atomic.Int64 // X2b/K5: rmsnorm_dgamma + col_sum
 	metalBiasAddDispatches     atomic.Int64 // X2b: vec_bias_add (Linear fwd bias)
+	mpsBF16MatMulDispatches    atomic.Int64 // X3/B4: MPS dtyped (bf16-operand) matmuls, fwd+bwd
 )
 
 // MetalDispatchCounts is a snapshot of how many times each GPU dispatch
@@ -41,6 +42,7 @@ type MetalDispatchCounts struct {
 	RepeatKernel  int64 // X2b repeat_interleave fwd + bwd dispatches
 	ColReduce     int64 // X2b/K5 rmsnorm_dgamma + col_sum dispatches
 	BiasAdd       int64 // X2b vec_bias_add dispatches (Linear GPU forward)
+	BF16MatMul    int64 // X3/B4 MPS dtyped matmuls with a bf16 operand (single + batched), fwd+bwd
 }
 
 // ReadMetalDispatchCounts returns the current dispatch counters.
@@ -56,6 +58,7 @@ func ReadMetalDispatchCounts() MetalDispatchCounts {
 		RepeatKernel:  metalRepeatDispatches.Load(),
 		ColReduce:     metalColReduceDispatches.Load(),
 		BiasAdd:       metalBiasAddDispatches.Load(),
+		BF16MatMul:    mpsBF16MatMulDispatches.Load(),
 	}
 }
 
@@ -71,6 +74,7 @@ func ResetMetalDispatchCounts() {
 	metalRepeatDispatches.Store(0)
 	metalColReduceDispatches.Store(0)
 	metalBiasAddDispatches.Store(0)
+	mpsBF16MatMulDispatches.Store(0)
 }
 
 // GPU holds the shared Metal device, command queue, and compiled kernels.
@@ -695,9 +699,11 @@ func MatMul(a, b *Tensor) *Tensor {
 	if a.Dim() != 2 || b.Dim() != 2 {
 		panic("gorch: MatMul requires 2-D tensors")
 	}
-	requireSameDtype(a, b, "MatMul")
-	if a.dtype == BFloat16 {
-		return downcastToBF16(MatMul(promoteToF32(a), promoteToF32(b)))
+	if a.dtype == BFloat16 || b.dtype == BFloat16 {
+		// Plan 0009 X3-B4: bf16 operands (frozen-path weights) dispatch
+		// the MPS dtyped path with f32 accumulation + f32 output, or
+		// widen-to-f32 below threshold. Mixed f32/bf16 is allowed here.
+		return matMulBF16(a, b)
 	}
 	M, K := a.shape[0], a.shape[1]
 	K2, N := b.shape[0], b.shape[1]
@@ -768,14 +774,21 @@ func MatMulTransB(a, b *Tensor) *Tensor {
 	if a.Dim() != 2 || b.Dim() != 2 {
 		panic("gorch: MatMulTransB requires 2-D tensors")
 	}
-	requireSameDtype(a, b, "MatMulTransB")
-	if a.dtype == BFloat16 {
-		return downcastToBF16(MatMulTransB(promoteToF32(a), promoteToF32(b)))
-	}
 	M, K := a.shape[0], a.shape[1]
 	N, K2 := b.shape[0], b.shape[1]
 	if K != K2 {
 		panic(fmt.Sprintf("gorch: MatMulTransB shape mismatch: (%d,%d) @ (%d,%d)^T", M, K, N, K2))
+	}
+	if a.dtype == BFloat16 || b.dtype == BFloat16 {
+		// Plan 0009 X3-B4. MatMulTransB carries no autograd (callers
+		// like nn.Linear install their own GradFn), so the shared
+		// no-grad dtyped helper covers both the MPS path and the
+		// widen fallback — except the legacy CPU bf16-pair case,
+		// which keeps its plan-0002 bf16-output semantics.
+		if a.dtype == BFloat16 && b.dtype == BFloat16 && a.buf == nil && b.buf == nil {
+			return downcastToBF16(MatMulTransB(promoteToF32(a), promoteToF32(b)))
+		}
+		return matMulDTGrad(a, b, M, N, K, false, true)
 	}
 
 	out := zerosLikeEither([]int{M, N}, a, b)
@@ -799,14 +812,17 @@ func MatMulTransA(a, b *Tensor) *Tensor {
 	if a.Dim() != 2 || b.Dim() != 2 {
 		panic("gorch: MatMulTransA requires 2-D tensors")
 	}
-	requireSameDtype(a, b, "MatMulTransA")
-	if a.dtype == BFloat16 {
-		return downcastToBF16(MatMulTransA(promoteToF32(a), promoteToF32(b)))
-	}
 	K, M := a.shape[0], a.shape[1]
 	K2, N := b.shape[0], b.shape[1]
 	if K != K2 {
 		panic(fmt.Sprintf("gorch: MatMulTransA shape mismatch: (%d,%d)^T @ (%d,%d)", K, M, K2, N))
+	}
+	if a.dtype == BFloat16 || b.dtype == BFloat16 {
+		// Plan 0009 X3-B4 (no autograd, same contract as the f32 path).
+		if a.dtype == BFloat16 && b.dtype == BFloat16 && a.buf == nil && b.buf == nil {
+			return downcastToBF16(MatMulTransA(promoteToF32(a), promoteToF32(b)))
+		}
+		return matMulDTGrad(a, b, M, N, K, true, false)
 	}
 
 	out := zerosLikeEither([]int{M, N}, a, b)
@@ -830,9 +846,9 @@ func MatMulTransA(a, b *Tensor) *Tensor {
 //	dL/dA[i] = grad[i] @ B[i]^T  (batched MPS transB / per-batch SgemmTransB)
 //	dL/dB[i] = A[i]^T @ grad[i]  (batched MPS transA / per-batch SgemmTransA)
 func BatchedMatMul(a, b *Tensor, batchSize, M, N, K int) *Tensor {
-	requireSameDtype(a, b, "BatchedMatMul")
-	if a.dtype == BFloat16 {
-		return downcastToBF16(BatchedMatMul(promoteToF32(a), promoteToF32(b), batchSize, M, N, K))
+	if a.dtype == BFloat16 || b.dtype == BFloat16 {
+		// Plan 0009 X3-B4.
+		return batchedMatMulBF16(a, b, batchSize, M, N, K, false)
 	}
 	out := zerosLikeEither([]int{batchSize, M, N}, a, b)
 
@@ -905,9 +921,9 @@ func BatchedMatMul(a, b *Tensor, batchSize, M, N, K int) *Tensor {
 //	dL/dA[i] = grad[i] @ B[i]      (batched MPS plain / per-batch Sgemm)
 //	dL/dB[i] = grad[i]^T @ A[i]    (batched MPS transA / per-batch SgemmTransA)
 func BatchedMatMulTransB(a, b *Tensor, batchSize, M, N, K int) *Tensor {
-	requireSameDtype(a, b, "BatchedMatMulTransB")
-	if a.dtype == BFloat16 {
-		return downcastToBF16(BatchedMatMulTransB(promoteToF32(a), promoteToF32(b), batchSize, M, N, K))
+	if a.dtype == BFloat16 || b.dtype == BFloat16 {
+		// Plan 0009 X3-B4.
+		return batchedMatMulBF16(a, b, batchSize, M, N, K, true)
 	}
 	out := zerosLikeEither([]int{batchSize, M, N}, a, b)
 

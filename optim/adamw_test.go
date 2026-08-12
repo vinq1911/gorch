@@ -169,3 +169,23 @@ func TestClipGradNormHandlesNilGrad(t *testing.T) {
 	// p2.Grad() is nil; ClipGradNorm must skip it.
 	_ = ClipGradNorm([]*g.Tensor{p1, p2}, 1.0)
 }
+
+// TestAdamWBF16ParamPanics pins the plan 0009 X3-B3 guard: a bf16
+// parameter reaching AdamW.Step must fail loudly — the moment slices
+// are keyed to f32 storage (nil Data() for bf16), and the frozen-path
+// contract is that bf16 weights never enter the optimizer (trainable
+// params stay f32 with f32 moments).
+func TestAdamWBF16ParamPanics(t *testing.T) {
+	p := g.NewTensorBF16(g.F32ToBF16Slice([]float32{1, 2, 3, 4}), 4).SetRequiresGrad(true)
+	g.Sum(p).Backward() // gives p a (bf16) grad so Step reaches the dtype check
+	if p.Grad() == nil {
+		t.Fatal("test setup: bf16 param has no grad")
+	}
+	opt := NewAdamW([]*g.Tensor{p}, 1e-3, 0.0)
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected AdamW.Step to panic on a bf16 parameter (plan 0009 X3-B3)")
+		}
+	}()
+	opt.Step()
+}

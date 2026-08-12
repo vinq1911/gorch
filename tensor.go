@@ -322,6 +322,17 @@ func (t *Tensor) Data() []float32 {
 	return t.data
 }
 
+// Data16 returns the underlying bf16 storage as raw uint16 bits
+// (shared, not copied); nil for f32 tensors. Same read-barrier
+// contract as Data() for Metal-resident tensors. Used by safetensors
+// save (plan 0009 X3-B1) and bf16 tests.
+func (t *Tensor) Data16() []uint16 {
+	if t.buf != nil {
+		metal.SyncQueue()
+	}
+	return t.data16
+}
+
 // Device returns CPU or Metal.
 func (t *Tensor) Device() DeviceType {
 	if t.buf != nil {
@@ -371,9 +382,19 @@ func (t *Tensor) ZeroGrad() { t.grad = nil }
 // ---------- Device Transfer ----------
 
 // ToMetal moves the tensor to Metal GPU using unified memory.
-// If already on Metal, returns the same tensor.
+// If already on Metal, returns the same tensor. Handles both dtypes
+// (plan 0009 X3-B2): f32 storage moves into a 4-byte-element buffer,
+// bf16 storage into a 2-byte-element buffer viewed via Uint16Slice.
 func (t *Tensor) ToMetal(dev *metal.Device) *Tensor {
 	if t.buf != nil {
+		return t
+	}
+	if t.dtype == BFloat16 {
+		buf := dev.NewBuffer(len(t.data16) * 2)
+		gpuSlice := buf.Uint16Slice()
+		copy(gpuSlice, t.data16)
+		t.data16 = gpuSlice // now backed by unified memory
+		t.buf = buf
 		return t
 	}
 	buf := dev.NewBuffer(len(t.data) * 4)
@@ -391,6 +412,14 @@ func (t *Tensor) ToCPU() *Tensor {
 		return t
 	}
 	syncForCPU(t)
+	if t.dtype == BFloat16 {
+		cpuData := make([]uint16, len(t.data16))
+		copy(cpuData, t.data16)
+		t.buf.Release()
+		t.data16 = cpuData
+		t.buf = nil
+		return t
+	}
 	cpuData := make([]float32, len(t.data))
 	copy(cpuData, t.data)
 	t.buf.Release()
@@ -413,6 +442,21 @@ func NewTensorOnMetal(dev *metal.Device, data []float32, shape ...int) *Tensor {
 	gpuSlice := buf.FloatSlice()
 	copy(gpuSlice, data)
 	return &Tensor{data: gpuSlice, shape: copyShape(shape), buf: buf}
+}
+
+// NewTensorBF16OnMetal creates a bf16 tensor directly on Metal GPU
+// (plan 0009 X3-B2). The caller supplies bf16 bits as uint16 (use
+// F32ToBF16Slice to convert). The data lives in unified memory from
+// the start — no copy beyond the initial fill.
+func NewTensorBF16OnMetal(dev *metal.Device, data []uint16, shape ...int) *Tensor {
+	n := numElements(shape)
+	if len(data) != n {
+		panic("gorch: data length mismatch")
+	}
+	buf := dev.NewBuffer(n * 2)
+	gpuSlice := buf.Uint16Slice()
+	copy(gpuSlice, data)
+	return &Tensor{dtype: BFloat16, data16: gpuSlice, shape: copyShape(shape), buf: buf}
 }
 
 // ZerosOnMetal creates a zero tensor directly on Metal GPU.

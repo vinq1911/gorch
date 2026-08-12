@@ -63,9 +63,16 @@ func (l *Linear) Forward(x *g.Tensor) *g.Tensor {
 
 	var out *g.Tensor
 
-	if l.onMetal && x.MetalBuffer() != nil && l.Weight.MetalBuffer() != nil {
+	if (l.onMetal && x.MetalBuffer() != nil && l.Weight.MetalBuffer() != nil) ||
+		l.Weight.Dtype() != g.Float32 {
 		// GPU path: x @ W^T via MPS MatMulTransB
 		// x is (batch, in), W is (out, in), result is (batch, out)
+		//
+		// A bf16 Weight (plan 0009 X3: frozen-path base weights) always
+		// takes this route — MatMulTransB dispatches the MPS dtyped
+		// matmul (f32 accumulation, f32 output) when resident and above
+		// threshold, and widens to f32 + Accelerate otherwise. The CPU
+		// branch below reads Weight.Data(), which is nil for bf16.
 		out = g.MatMulTransB(x, l.Weight)
 		// Bias add via the vec_bias_add kernel (plan 0009 X2b): the
 		// previous CPU loop read out.Data(), forcing a GPU sync per
@@ -123,7 +130,13 @@ func (l *Linear) Forward(x *g.Tensor) *g.Tensor {
 			needDW := capturedW.RequiresGrad() || AlwaysComputeLinearDW
 			needDB := l.Bias.RequiresGrad() || AlwaysComputeLinearDW
 
-			if grad.IsOnMetal() && capturedX.IsOnMetal() && capturedW.IsOnMetal() {
+			if (grad.IsOnMetal() && capturedX.IsOnMetal() && capturedW.IsOnMetal()) ||
+				capturedW.Dtype() != g.Float32 {
+				// The bf16-Weight case (plan 0009 X3) also takes this
+				// branch regardless of residency: gpuLinearDx routes
+				// through g.MatMul, whose dtyped dispatch handles a bf16
+				// W on GPU or via the widen fallback — the CPU branch
+				// below would read the nil Weight.Data().
 				dx := gpuLinearDx(grad, capturedW, capturedBatch, capturedIn, capturedOut, capturedX.RequiresGrad())
 				var dw, db *g.Tensor
 				if needDW {

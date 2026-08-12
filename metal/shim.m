@@ -2,6 +2,7 @@
 
 #import <Metal/Metal.h>
 #import <MetalPerformanceShaders/MetalPerformanceShaders.h>
+#import <MetalPerformanceShadersGraph/MetalPerformanceShadersGraph.h>
 #include "shim.h"
 #include <stdlib.h>
 #include <string.h>
@@ -390,6 +391,138 @@ void metal_mps_batched_matmul_transA(MTLCommandQueueRef queue,
         [cmdBuf commit];
         metal_finish(cmdBuf);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Dtype-parameterized matmul (plan 0009 X3, B0/B4) — see shim.h.
+// A/B may independently be bf16; C is always f32 (f32 accumulation).
+//
+// B0 probe result (2026-08-11, Apple M4, macOS 26.5): MPSMatrix
+// REJECTS MPSDataTypeBFloat16 — MPSMatrixMultiplication.mm hard-asserts
+// "Input data type must be one of MPSDataTypeFloat32, MPSDataTypeFloat16,
+// MPSDataTypeInt8, or MPSDataTypeInt16" and abort()s (not catchable as
+// an NSException). Tier (a) of the plan's three-tier fallback is
+// therefore DEAD ON THIS OS; this is the tier-(b) implementation:
+// MPSGraph matmul with bf16 placeholders (ADR-012).
+//
+// Numerics: bf16 inputs are cast to f32 INSIDE the graph before the
+// matrixMultiplication node, so accumulation is f32 by construction
+// (risk R2 contract) — the cast is fused by the MPSGraph compiler, so
+// memory traffic stays 2 bytes/element for bf16 operands.
+//
+// Graphs are cached per (M, N, K, batch, trans, dtype) signature —
+// building + compiling an MPSGraph per call would dominate; with the
+// cache, steady-state cost is one encode per call on a cached
+// executable (shapes are static per model layer).
+// ---------------------------------------------------------------------------
+
+API_AVAILABLE(macos(14.0))
+@interface GorchDTGraphEntry : NSObject
+@property(strong) MPSGraph* graph;
+@property(strong) MPSGraphTensor* phA;
+@property(strong) MPSGraphTensor* phB;
+@property(strong) MPSGraphTensor* out;
+@end
+@implementation GorchDTGraphEntry
+@end
+
+static NSMutableDictionary* g_dtGraphCache = nil; // NSString -> GorchDTGraphEntry
+
+API_AVAILABLE(macos(14.0))
+static GorchDTGraphEntry* gorch_dt_graph(uint32_t M, uint32_t N, uint32_t K,
+                                         uint32_t batch, int transA, int transB,
+                                         int aBF16, int bBF16) {
+    if (!g_dtGraphCache) g_dtGraphCache = [NSMutableDictionary new];
+    NSString* key = [NSString stringWithFormat:@"%u_%u_%u_%u_%d%d%d%d",
+                     M, N, K, batch, transA, transB, aBF16, bBF16];
+    GorchDTGraphEntry* e = g_dtGraphCache[key];
+    if (e) return e;
+
+    MPSGraph* graph = [[MPSGraph alloc] init];
+    MPSDataType aType = aBF16 ? MPSDataTypeBFloat16 : MPSDataTypeFloat32;
+    MPSDataType bType = bBF16 ? MPSDataTypeBFloat16 : MPSDataTypeFloat32;
+
+    NSArray<NSNumber*>* aShape = transA ? @[ @(batch), @(K), @(M) ] : @[ @(batch), @(M), @(K) ];
+    NSArray<NSNumber*>* bShape = transB ? @[ @(batch), @(N), @(K) ] : @[ @(batch), @(K), @(N) ];
+
+    MPSGraphTensor* phA = [graph placeholderWithShape:aShape dataType:aType name:nil];
+    MPSGraphTensor* phB = [graph placeholderWithShape:bShape dataType:bType name:nil];
+
+    // Cast to f32 FIRST: the matmul node then runs (and accumulates)
+    // in f32 regardless of storage dtype.
+    MPSGraphTensor* aT = aBF16 ? [graph castTensor:phA toType:MPSDataTypeFloat32 name:nil] : phA;
+    MPSGraphTensor* bT = bBF16 ? [graph castTensor:phB toType:MPSDataTypeFloat32 name:nil] : phB;
+    if (transA) aT = [graph transposeTensor:aT dimension:1 withDimension:2 name:nil];
+    if (transB) bT = [graph transposeTensor:bT dimension:1 withDimension:2 name:nil];
+
+    MPSGraphTensor* out = [graph matrixMultiplicationWithPrimaryTensor:aT
+                                                       secondaryTensor:bT
+                                                                  name:nil];
+
+    e = [GorchDTGraphEntry new];
+    e.graph = graph;
+    e.phA = phA;
+    e.phB = phB;
+    e.out = out;
+    g_dtGraphCache[key] = e;
+    return e;
+}
+
+static int gorch_dt_run(MTLCommandQueueRef queue,
+                        MTLBufferRef A, MTLBufferRef B, MTLBufferRef C,
+                        uint32_t M, uint32_t N, uint32_t K, uint32_t batch,
+                        int transA, int transB, int aBF16, int bBF16) {
+    if (@available(macOS 14.0, *)) {
+        @autoreleasepool {
+            @try {
+                id<MTLCommandQueue> q = (__bridge id<MTLCommandQueue>)queue;
+                GorchDTGraphEntry* e = gorch_dt_graph(M, N, K, batch, transA, transB, aBF16, bBF16);
+
+                MPSDataType aType = aBF16 ? MPSDataTypeBFloat16 : MPSDataTypeFloat32;
+                MPSDataType bType = bBF16 ? MPSDataTypeBFloat16 : MPSDataTypeFloat32;
+                NSArray<NSNumber*>* aShape = transA ? @[ @(batch), @(K), @(M) ] : @[ @(batch), @(M), @(K) ];
+                NSArray<NSNumber*>* bShape = transB ? @[ @(batch), @(N), @(K) ] : @[ @(batch), @(K), @(N) ];
+                NSArray<NSNumber*>* cShape = @[ @(batch), @(M), @(N) ];
+
+                MPSGraphTensorData* tdA = [[MPSGraphTensorData alloc]
+                    initWithMTLBuffer:(__bridge id<MTLBuffer>)A shape:aShape dataType:aType];
+                MPSGraphTensorData* tdB = [[MPSGraphTensorData alloc]
+                    initWithMTLBuffer:(__bridge id<MTLBuffer>)B shape:bShape dataType:bType];
+                MPSGraphTensorData* tdC = [[MPSGraphTensorData alloc]
+                    initWithMTLBuffer:(__bridge id<MTLBuffer>)C shape:cShape dataType:MPSDataTypeFloat32];
+
+                MPSCommandBuffer* cmdBuf = [MPSCommandBuffer commandBufferFromCommandQueue:q];
+                [e.graph encodeToCommandBuffer:cmdBuf
+                                         feeds:@{e.phA : tdA, e.phB : tdB}
+                              targetOperations:nil
+                             resultsDictionary:@{e.out : tdC}
+                           executionDescriptor:nil];
+                [cmdBuf commit];
+                metal_finish(cmdBuf.rootCommandBuffer);
+                return 0;
+            } @catch (NSException* ex) {
+                return 1;
+            }
+        }
+    }
+    return 1;
+}
+
+int metal_mps_matmul_dt(MTLCommandQueueRef queue,
+                        MTLBufferRef A, MTLBufferRef B, MTLBufferRef C,
+                        uint32_t M, uint32_t N, uint32_t K,
+                        int transA, int transB,
+                        int aBF16, int bBF16) {
+    return gorch_dt_run(queue, A, B, C, M, N, K, 1, transA, transB, aBF16, bBF16);
+}
+
+int metal_mps_batched_matmul_dt(MTLCommandQueueRef queue,
+                                MTLBufferRef A, MTLBufferRef B, MTLBufferRef C,
+                                uint32_t M, uint32_t N, uint32_t K,
+                                uint32_t batchSize,
+                                int transA, int transB,
+                                int aBF16, int bBF16) {
+    return gorch_dt_run(queue, A, B, C, M, N, K, batchSize, transA, transB, aBF16, bBF16);
 }
 
 // ---------------------------------------------------------------------------

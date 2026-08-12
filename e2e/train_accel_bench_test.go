@@ -255,6 +255,51 @@ func (b *taBlock) toMetal(dev *metal.Device) {
 	}
 }
 
+// freezeBase marks every Linear weight and bias non-trainable — the
+// plan 0009 X3 frozen-path configuration (LoRA base frozen; the
+// stand-in trainable set is the norm gammas plus the block input).
+func (b *taBlock) freezeBase() {
+	for _, l := range []*nn.Linear{b.wq, b.wk, b.wv, b.wo, b.gate, b.up, b.down} {
+		l.Weight.SetRequiresGrad(false)
+		l.Bias.SetRequiresGrad(false)
+	}
+}
+
+// toMetalBF16 converts every Linear weight to bf16 storage and moves
+// the block to Metal (plan 0009 X3-B2/B4): frozen weights bf16,
+// biases and norm gammas f32. Linear.ToMetal is dtype-aware.
+func (b *taBlock) toMetalBF16(dev *metal.Device) {
+	for _, l := range []*nn.Linear{b.wq, b.wk, b.wv, b.wo, b.gate, b.up, b.down} {
+		l.Weight = l.Weight.ToBF16() // fresh bf16 copy; requiresGrad=false
+		l.ToMetal(dev)
+	}
+	for _, rn := range []*nn.RMSNorm{b.attnNorm, b.qNorm, b.kNorm, b.ffnNorm} {
+		rn.Weight.ToMetal(dev)
+	}
+}
+
+// trainableParameters filters parameters() by RequiresGrad — the
+// optimizer set for the frozen-path modes.
+func (b *taBlock) trainableParameters() []*g.Tensor {
+	var ps []*g.Tensor
+	for _, p := range b.parameters() {
+		if p.RequiresGrad() {
+			ps = append(ps, p)
+		}
+	}
+	return ps
+}
+
+// linearWeightParams returns the frozen-set param count (the 7 Linear
+// weights) — the bytes that move to bf16 in X3 memory accounting.
+func (b *taBlock) linearWeightParams() int {
+	n := 0
+	for _, l := range []*nn.Linear{b.wq, b.wk, b.wv, b.wo, b.gate, b.up, b.down} {
+		n += l.Weight.Size()
+	}
+	return n
+}
+
 // forward runs one pre-norm transformer block: x + Attn(RMSNorm(x)),
 // then h + SwiGLU-FFN(RMSNorm(h)). Attention mirrors nn/gqa.go op for
 // op at the real Qwen3 projection dims and with Qwen3's q/k per-head
@@ -2105,4 +2150,507 @@ func taX2TailsPart(t *testing.T, phase *taPhase, rng *rand.Rand, seqs []int, war
 		t.Fatalf("write %s: %v", outPath, err)
 	}
 	t.Logf("results appended to %s (phase %s)", outPath, phase.Phase)
+}
+
+// ==================== Phase X3 (plan 0009 §3.4: bf16 frozen path) ====================
+//
+// bf16 storage + MPS-dtyped (MPSGraph, ADR-012) matmul for the frozen
+// path: the 7 Linear weights per block are bf16 Metal-resident and
+// FROZEN (RequiresGrad false — dW GEMMs skipped entirely), biases and
+// norm gammas stay f32 (the stand-in trainable set; the real workload
+// trains LoRA A/B + embedding rows). Activations remain f32 — bf16
+// activations are deferred until A-parity per §3.4.
+//
+// The bench records per seq: the CPU canary (X0 chain), a frozen-f32
+// CONTROL block (same frozen config, f32 weights — isolates the
+// bf16-matmul effect from the frozen-dW effect), and the bf16-frozen
+// block — each in sync AND async dispatch (the X2b finding: async
+// reproducibly regresses at seq 1500; both modes recorded, the winner
+// is the X3 configuration). Tails: lm_head with a bf16 FROZEN head
+// (fwd dtyped 258G-FMA matmul, bwd dx only), Metal CE, K7 AdamW table.
+// Memory rows account block weights at 2 B/param (B5).
+//
+// TA_X3_PART=canary|control|bf16|tails splits the run into FOUR
+// processes: this session's SIGKILL horizon was measured at ~60 s wall
+// (tighter than the ~110 s documented on TestTrainAccelBenchX2), and
+// the two-way blocks/tails split no longer fits under it. Each part
+// accumulates the phase in the same temp handoff file; "tails"
+// finalizes and appends to the results JSON. Unset runs everything in
+// one process (TA_SMOKE-sized runs only).
+
+// taBlockStepBenchFrozen is taBlockStepBenchMetal with the optimizer
+// over the trainable subset only (frozen-path modes) and a caller-
+// supplied row note.
+func taBlockStepBenchFrozen(t *testing.T, block *taBlock, rng *rand.Rand, seq, warm, runs int, note string) taBlockRow {
+	t.Helper()
+	dev := g.MetalDev()
+	x := taSeedTensor(rng, 1.0, seq, taHidden).ToMetal(dev)
+	x.SetRequiresGrad(true)
+	opt := optim.NewAdamW(block.trainableParameters(), 1e-4, 0.01)
+
+	var fwds, bwds, opts, totals, allocs []float64
+	for i := 0; i < warm+runs; i++ {
+		opt.ZeroGrad()
+		x.ZeroGrad()
+		var m0 runtime.MemStats
+		runtime.ReadMemStats(&m0)
+		t0 := time.Now()
+		out := block.forward(x, true)
+		t1 := time.Now()
+		loss := g.Sum(out)
+		loss.Backward()
+		t2 := time.Now()
+		opt.Step()
+		t3 := time.Now()
+		var m1 runtime.MemStats
+		runtime.ReadMemStats(&m1)
+		if i >= warm {
+			fwds = append(fwds, taMs(t1.Sub(t0)))
+			bwds = append(bwds, taMs(t2.Sub(t1)))
+			opts = append(opts, taMs(t3.Sub(t2)))
+			totals = append(totals, taMs(t3.Sub(t0)))
+			allocs = append(allocs, float64(m1.TotalAlloc-m0.TotalAlloc)/1e6)
+		}
+		runtime.GC()
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	taFlushGC()
+	var h0 runtime.MemStats
+	runtime.ReadMemStats(&h0)
+	mb0 := metal.LiveBufferBytes()
+	out := block.forward(x, true)
+	taFlushGC()
+	var h1 runtime.MemStats
+	runtime.ReadMemStats(&h1)
+	mb1 := metal.LiveBufferBytes()
+	live := (float64(h1.HeapAlloc) - float64(h0.HeapAlloc) + float64(mb1-mb0)) / 1e6
+	if live < 0 {
+		live = 0
+	}
+	runtime.KeepAlive(out)
+	taFlushGC()
+
+	return taBlockRow{
+		Seq: seq, Warmups: warm, Runs: runs,
+		FwdMs: taMedian(fwds), BwdMs: taMedian(bwds), OptMs: taMedian(opts),
+		TotalMs: taMedian(totals), TotalMinMs: taMin(totals), TotalMaxMs: taMax(totals),
+		AllocPerStepMB: taMedian(allocs), LiveGraphAfterFwdMB: live,
+		Note: note,
+	}
+}
+
+// taLmHeadBenchMetalBF16 measures the lm_head matmul with the head
+// weight bf16 Metal-resident and FROZEN: forward is the 258G-FMA
+// dtyped MPS matmul, backward computes dx only (dW skipped — the
+// frozen-operand fast path in the bf16 matmul autograd).
+func taLmHeadBenchMetalBF16(t *testing.T, rng *rand.Rand, seq, warm, runs int) taTailRow {
+	t.Helper()
+	dev := g.MetalDev()
+	xl := taSeedTensor(rng, 1.0, seq, taHidden).ToMetal(dev)
+	xl.SetRequiresGrad(true)
+	wHead := taSeedTensor(rng, 0.02, taHidden, taVocab).ToBF16().ToMetal(dev)
+	fwd, bwd := taBenchOp(warm, runs, []*g.Tensor{xl}, func() *g.Tensor {
+		return g.MatMul(xl, wHead)
+	})
+	taFlushGC()
+	return taTailRow{Name: "lm_head_matmul_fwd_bwd", Seq: seq,
+		Shape: fmt.Sprintf("(%d,%d)@(%d,%d) bf16 frozen W", seq, taHidden, taHidden, taVocab),
+		FwdMs: fwd, BwdMs: bwd, TotalMs: fwd + bwd,
+		Note: "W bf16 Metal-resident frozen (X3-B4 dtyped MPS path): fwd + dx dtyped, dW GEMM skipped entirely"}
+}
+
+func TestTrainAccelBenchX3(t *testing.T) {
+	if _, err := g.InitMetal(); err != nil {
+		t.Skipf("metal not available: %v", err)
+	}
+	if !g.MetalBF16MatMulSupported() {
+		t.Skip("MPS bf16 matmul unsupported (ADR-012 runtime probe) — X3 bench needs the dtyped path")
+	}
+	smoke := os.Getenv("TA_SMOKE") != ""
+	part := os.Getenv("TA_X3_PART") // "", "canary", "control", "bf16", "tails"
+	seqs := []int{512, 1024, 1500}
+	warm, runs := taWarmups, taRuns
+	if smoke {
+		seqs = []int{64}
+		warm, runs = 1, 2
+	}
+	maxSeq := seqs[len(seqs)-1] + 1
+
+	machine := taSysctl("machdep.cpu.brand_string")
+	loadAvg := taSysctl("vm.loadavg")
+	t.Logf("machine=%s load=%s part=%q", machine, loadAvg, part)
+
+	outPath := "../doc/training_accel_results.json"
+	x0 := taX0Phase(t, outPath)
+	if x0 == nil && !smoke {
+		t.Fatal("X0-baseline phase not found in results JSON — X3 speedups need the baseline")
+	}
+	x0Block := func(seq int) *taBlockRow {
+		if x0 == nil {
+			return nil
+		}
+		for i := range x0.BlockStepResults {
+			if x0.BlockStepResults[i].Seq == seq {
+				return &x0.BlockStepResults[i]
+			}
+		}
+		return nil
+	}
+	x0Full := func(seq int) *taFullStepRow {
+		if x0 == nil {
+			return nil
+		}
+		for i := range x0.FullStepEstimate {
+			if x0.FullStepEstimate[i].Seq == seq {
+				return &x0.FullStepEstimate[i]
+			}
+		}
+		return nil
+	}
+
+	phase := taPhase{
+		Phase:            "X3",
+		Date:             time.Now().Format("2006-01-02"),
+		Machine:          machine,
+		MemoryGB:         24,
+		GoVersion:        runtime.Version(),
+		LoadAvgAtStart:   loadAvg,
+		MetalInitialized: true,
+		Geometry: map[string]any{
+			"hidden": taHidden, "q_heads": taQHeads, "kv_heads": taKVHeads,
+			"head_dim": taHeadDim, "q_dim": taQDim, "kv_dim": taKVDim,
+			"ffn_inter": taInter, "layers": taLayers,
+			"vocab": taVocab, "base_vocab": taBaseVocab, "mimi_vocab": taMimiVocab,
+			"rope_theta": taRopeTheta, "rms_norm_eps": 1e-6,
+		},
+		Notes: []string{
+			"X3 bf16 frozen path (plan 0009 §3.4): 7 Linear weights per block bf16 Metal-resident + FROZEN (dW skipped), biases/norm gammas f32 trainable, activations f32; bf16 matmuls via the MPSGraph dtyped path (ADR-012: MPSMatrix hard-asserts on MPSDataTypeBFloat16, tier-b chosen; bf16 cast to f32 inside the graph = f32 accumulation by construction)",
+			"block_step_results carry THREE configs per seq, sync+async each: CPU canary, frozen-f32 CONTROL (isolates the frozen-dW effect), and bf16-frozen (adds the bf16 matmul + half weight bytes); the X3 configuration takes the better dispatch mode per seq (X2b async-at-1500 regression re-checked here)",
+			"NOTE the frozen configs run FEWER FLOPs than X0/X2b all-trainable blocks (7 dW GEMMs skipped) — that is the workload's real shape (LoRA base frozen), but vs-X0 gate ratios below compare frozen-path steps against the all-trainable X0 baseline; the frozen-f32 control row is the honest attribution basis for the bf16-specific gain",
+			"tails: lm_head with bf16 FROZEN head weight (fwd dtyped 258G FMA, bwd dx only, dW skipped); cross-entropy Metal-resident (K2); adamw_172m_table is the K7 vectorized step (embedding table stays f32 trainable in the workload)",
+			"memory: weights_f32_gb column reports the X3 weight bytes (block Linear weights at 2 B/param + f32 embedding table/norms/biases); B5 companion test e2e/bf16_memory_test.go pins the full 0.6B set at 1.23 GB bf16 vs 2.45 GB f32",
+		},
+	}
+
+	rng := rand.New(rand.NewSource(taSeed))
+	bestRows := map[int]taBlockRow{}
+
+	// Resume the accumulated phase for every part after the first.
+	if !smoke && part != "" && part != "canary" {
+		raw, err := os.ReadFile(taX2PartialPath())
+		if err != nil {
+			t.Fatalf("TA_X3_PART=%s needs the earlier parts first: %v", part, err)
+		}
+		if err := json.Unmarshal(raw, &phase); err != nil {
+			t.Fatalf("partial phase unmarshal: %v", err)
+		}
+	}
+
+	if part == "" || part == "canary" {
+		taX3CanaryPart(t, &phase, seqs, warm, runs, maxSeq, x0Block)
+	}
+	if part == "" || part == "control" {
+		rngF := rand.New(rand.NewSource(taSeed))
+		blockF := newTABlock(rngF, maxSeq)
+		blockF.freezeBase()
+		blockF.toMetal(g.MetalDev())
+		taX3BlockModePart(t, &phase, blockF, rngF, seqs, warm, runs, "frozen-f32 control", false, x0Block, bestRows)
+	}
+	if part == "" || part == "bf16" {
+		rngB := rand.New(rand.NewSource(taSeed))
+		blockB := newTABlock(rngB, maxSeq)
+		blockB.freezeBase()
+		blockB.toMetalBF16(g.MetalDev())
+		taX3BlockModePart(t, &phase, blockB, rngB, seqs, warm, runs, "bf16-frozen", true, x0Block, bestRows)
+		if !smoke {
+			taX3DispatchGate(t, &phase, blockB, rngB)
+		}
+	}
+
+	if !smoke && part != "" && part != "tails" {
+		raw, err := json.MarshalIndent(phase, "", "  ")
+		if err != nil {
+			t.Fatalf("marshal partial phase: %v", err)
+		}
+		if err := os.WriteFile(taX2PartialPath(), append(raw, '\n'), 0o644); err != nil {
+			t.Fatalf("write partial phase: %v", err)
+		}
+		t.Logf("TA_X3_PART=%s: partial phase written to %s", part, taX2PartialPath())
+		return
+	}
+	// Reconstruct the per-seq winner among the bf16-frozen rows when
+	// they came from an earlier process.
+	if len(bestRows) == 0 {
+		for _, r := range phase.BlockStepResults {
+			if !strings.Contains(r.Note, "bf16-frozen") {
+				continue
+			}
+			if best, ok := bestRows[r.Seq]; !ok || r.TotalMs < best.TotalMs {
+				bestRows[r.Seq] = r
+			}
+		}
+	}
+	if len(bestRows) == 0 {
+		t.Fatal("no bf16-frozen block rows — run the earlier TA_X3_PART parts first")
+	}
+
+	// ---- tails ----
+	// Unlike the X2/X2b tails, the CPU lm_head micro-bench is skipped
+	// (it alone costs ~30 s of wall across the three seqs and the X0
+	// row already documents it) — X3 measures the bf16-frozen lm_head,
+	// the CPU-vectorized + Metal CE, the embedding, and the K7 table.
+	for _, seq := range seqs {
+		tails := taX3TailBench(t, rng, seq, warm, runs)
+		phase.TailResults = append(phase.TailResults, tails...)
+		phase.TailResults = append(phase.TailResults, taLmHeadBenchMetalBF16(t, rng, seq, warm, runs))
+		phase.TailResults = append(phase.TailResults, taCEBenchMetal(t, rng, seq, warm, runs))
+		taFlushGC()
+	}
+	adamwTail := taAdamWTableBench(t, rng, warm, runs)
+	adamwTail.Note = "K7 vectorized Accelerate step (embedding table stays f32 trainable in the workload)"
+	phase.TailResults = append(phase.TailResults, adamwTail)
+
+	// ---- full-step estimate (bf16-frozen winner rows) + gate verdicts ----
+	for _, seq := range seqs {
+		blockMs := bestRows[seq].TotalMs
+		est := taFullStepRow{Seq: seq, BlockMs: blockMs, Blocks28Ms: blockMs * taLayers, OptimizerTableMs: adamwTail.TotalMs}
+		for _, tr := range phase.TailResults {
+			if tr.Seq != seq {
+				continue
+			}
+			switch tr.Name {
+			case "embedding_fwd_bwd":
+				est.EmbeddingMs = tr.TotalMs
+			case "lm_head_matmul_fwd_bwd":
+				est.LmHeadMs = tr.TotalMs
+			case "cross_entropy_fwd_bwd":
+				est.LossMs = tr.TotalMs
+			}
+		}
+		est.TotalMs = est.Blocks28Ms + est.EmbeddingMs + est.LmHeadMs + est.LossMs + est.OptimizerTableMs
+		est.TotalS = est.TotalMs / 1000
+		phase.FullStepEstimate = append(phase.FullStepEstimate, est)
+		t.Logf("X3 full-step estimate seq=%d: 28xblock=%.0fms embed=%.0fms lm_head=%.0fms ce=%.0fms adamw=%.0fms -> %.2fs",
+			seq, est.Blocks28Ms, est.EmbeddingMs, est.LmHeadMs, est.LossMs, est.OptimizerTableMs, est.TotalS)
+		if base := x0Full(seq); base != nil {
+			note := fmt.Sprintf("full-step speedup vs X0 at seq %d: %.2fx (%.1fs -> %.1fs)", seq, base.TotalMs/est.TotalMs, base.TotalS, est.TotalS)
+			t.Log(note)
+			phase.Notes = append(phase.Notes, note)
+		}
+	}
+	if !smoke {
+		if base := x0Block(1024); base != nil {
+			sp := base.TotalMs / bestRows[1024].TotalMs
+			verdict := "NOT MET"
+			if sp >= 3.5 {
+				verdict = "MET"
+			}
+			phase.Notes = append(phase.Notes, fmt.Sprintf("GATE (plan X2 carry-over, block >=3.5x at seq 1024 vs X0): %s (%.2fx, bf16-frozen config — see the FLOP-count caveat note)", verdict, sp))
+		}
+		if base := x0Full(1024); base != nil {
+			for _, est := range phase.FullStepEstimate {
+				if est.Seq == 1024 {
+					sp := base.TotalMs / est.TotalMs
+					verdict := "NOT MET"
+					if sp >= 4.0 {
+						verdict = "MET"
+					}
+					phase.Notes = append(phase.Notes, fmt.Sprintf("GATE (plan X2 carry-over, full-step >=4x at seq 1024 vs X0): %s (%.2fx)", verdict, sp))
+				}
+			}
+		}
+	}
+
+	if smoke {
+		t.Log("TA_SMOKE set — skipping doc/training_accel_results.json write")
+		return
+	}
+
+	// ---- append the phase row ----
+	var file taResultsFile
+	if raw, err := os.ReadFile(outPath); err == nil {
+		if err := json.Unmarshal(raw, &file); err != nil {
+			t.Fatalf("existing %s is not valid JSON: %v", outPath, err)
+		}
+	}
+	file.Hardware = machine
+	file.Phases = append(file.Phases, phase)
+	rawOut, err := json.MarshalIndent(file, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal results: %v", err)
+	}
+	if err := os.WriteFile(outPath, append(rawOut, '\n'), 0o644); err != nil {
+		t.Fatalf("write %s: %v", outPath, err)
+	}
+	t.Logf("results appended to %s (phase %s)", outPath, phase.Phase)
+}
+
+// taX3CanaryPart: CPU canary, X0 op chain (scalar AdamW forced).
+func taX3CanaryPart(t *testing.T, phase *taPhase, seqs []int, warm, runs, maxSeq int, x0Block func(int) *taBlockRow) {
+	t.Helper()
+	rngC := rand.New(rand.NewSource(taSeed))
+	blockC := newTABlock(rngC, maxSeq)
+	optim.UseScalarAdamW = true
+	for _, seq := range seqs {
+		row := taBlockStepBench(t, blockC, rngC, seq, warm, runs)
+		row.Note = "CPU f32 canary (X0 op chain re-run under this session's load; scalar AdamW forced; CPU Permute/SwiGLU/CE are wave-vectorized — see X2b notes)"
+		phase.CanaryResults = append(phase.CanaryResults, row)
+		if base := x0Block(seq); base != nil {
+			drift := (row.TotalMs - base.TotalMs) / base.TotalMs * 100
+			note := fmt.Sprintf("canary seq=%d: %.0fms vs X0 %.0fms (drift %+.1f%%)", seq, row.TotalMs, base.TotalMs, drift)
+			t.Log(note)
+			phase.Notes = append(phase.Notes, note)
+			if drift > 10 || drift < -10 {
+				phase.Notes = append(phase.Notes, fmt.Sprintf("WARNING: canary drift at seq %d exceeds 10%% — cross-session comparison degraded per plan §2.1", seq))
+			}
+		}
+	}
+	optim.UseScalarAdamW = false
+}
+
+// taX3BlockModePart benches one frozen block config (sync + async per
+// seq), appends its rows/notes, and — when record is set — the per-seq
+// winner and the bf16-aware memory rows.
+func taX3BlockModePart(t *testing.T, phase *taPhase, block *taBlock, rng *rand.Rand, seqs []int, warm, runs int, label string, record bool, x0Block func(int) *taBlockRow, bestRows map[int]taBlockRow) {
+	t.Helper()
+	for _, seq := range seqs {
+		rowSync := taBlockStepBenchFrozen(t, block, rng, seq, warm, runs,
+			label+" (frozen base, K1..K7 kernels), per-op sync dispatch")
+		phase.BlockStepResults = append(phase.BlockStepResults, rowSync)
+
+		g.SetMetalAsync(true)
+		w0 := metal.SyncWaits.Load()
+		rowAsync := taBlockStepBenchFrozen(t, block, rng, seq, warm, runs, "")
+		w1 := metal.SyncWaits.Load()
+		g.SetMetalAsync(false)
+		stepsRun := int64(warm + runs + 1) // +1: the live-graph forward
+		rowAsync.Note = fmt.Sprintf("%s (frozen base), R6 async dispatch; ~%d host sync waits per step", label, (w1-w0)/stepsRun)
+		phase.BlockStepResults = append(phase.BlockStepResults, rowAsync)
+
+		winner := rowAsync
+		if rowSync.TotalMs < rowAsync.TotalMs {
+			winner = rowSync
+		}
+		if record {
+			bestRows[seq] = winner
+		}
+		t.Logf("X3 %s block step seq=%d: sync=%.1fms async=%.1fms", label, seq, rowSync.TotalMs, rowAsync.TotalMs)
+		if base := x0Block(seq); base != nil {
+			note := fmt.Sprintf("%s block-step vs X0 at seq %d: sync %.2fx, async %.2fx (%.0fms -> %.0fms/%.0fms)",
+				label, seq, base.TotalMs/rowSync.TotalMs, base.TotalMs/rowAsync.TotalMs, base.TotalMs, rowSync.TotalMs, rowAsync.TotalMs)
+			t.Log(note)
+			phase.Notes = append(phase.Notes, note)
+		}
+		for _, cn := range phase.CanaryResults {
+			if cn.Seq == seq {
+				note := fmt.Sprintf("%s same-session vs CPU canary at seq %d: sync %.2fx, async %.2fx",
+					label, seq, cn.TotalMs/rowSync.TotalMs, cn.TotalMs/rowAsync.TotalMs)
+				t.Log(note)
+				phase.Notes = append(phase.Notes, note)
+			}
+		}
+
+		if record {
+			// Memory row with bf16-aware weight accounting: block
+			// Linear weights at 2 B/param, everything else f32.
+			liveGB := winner.LiveGraphAfterFwdMB / 1024
+			linW := block.linearWeightParams()
+			blockParams := 0
+			for _, p := range block.parameters() {
+				blockParams += p.Size()
+			}
+			weightsGB := float64(taVocab)*taHidden*4/1e9 +
+				float64(taLayers)*(float64(linW)*2+float64(blockParams-linW)*4)/1e9
+			extrap := liveGB*taLayers + weightsGB
+			phase.MemoryResults = append(phase.MemoryResults, taMemoryRow{
+				Seq: seq, LiveGraphBlockGB: liveGB, Extrapolated28GB: extrap,
+				WeightsF32GB: weightsGB, FitsIn24GBUnifiedMem: extrap < 22,
+				Note: "X3: weights_f32_gb column = X3 weight bytes (28x block Linear weights bf16 at 2 B/param + f32 embedding table/norms/biases); activations stay f32 in this phase, so the live-graph savings vs X2b come from skipped dW allocations, not activation dtype",
+			})
+		}
+	}
+}
+
+// taX3DispatchGate asserts the bf16-frozen dispatch shape at seq 1024.
+func taX3DispatchGate(t *testing.T, phase *taPhase, blockB *taBlock, rngB *rand.Rand) {
+	t.Helper()
+	seq := 1024
+	x := taSeedTensor(rngB, 1.0, seq, taHidden).ToMetal(g.MetalDev())
+	x.SetRequiresGrad(true)
+	x.ZeroGrad()
+	g.ResetMetalDispatchCounts()
+	g.Sum(blockB.forward(x, true)).Backward()
+	c := g.ReadMetalDispatchCounts()
+	t.Logf("X3 dispatch counts (1 bf16-frozen block fwd+bwd, seq %d): bf16_matmul=%d f32_matmul=%d batched=%d softmax=%d silu=%d permute=%d rope=%d repeat=%d colreduce=%d biasadd=%d",
+		seq, c.BF16MatMul, c.MatMul, c.BatchedMatMul, c.SoftmaxKernel, c.SiluKernel, c.PermuteKernel, c.RopeKernel, c.RepeatKernel, c.ColReduce, c.BiasAdd)
+	// 7 forward projections (dtyped TransB) + 7 backward dx (dtyped
+	// plain; dW skipped, weights frozen) = 14 bf16 matmuls; the f32
+	// MPS matmul count drops to 0 (every 2-D matmul in the block has
+	// a bf16 weight operand).
+	if c.BF16MatMul < 14 {
+		t.Errorf("X3 gate: expected >=14 dtyped bf16 MPS matmuls (7 fwd + 7 dx), got %d", c.BF16MatMul)
+	}
+	if c.BatchedMatMul < 6 {
+		t.Errorf("X3 gate: expected >=6 MPS batched matmuls (f32 attention), got %d", c.BatchedMatMul)
+	}
+	if c.SoftmaxKernel < 2 || c.SiluKernel < 2 {
+		t.Errorf("X3 gate: fused softmax/silu kernels missing: softmax=%d silu=%d", c.SoftmaxKernel, c.SiluKernel)
+	}
+	phase.DispatchCounts = map[string]int64{
+		"block_fwd_bwd_seq1024_bf16_matmul":        c.BF16MatMul,
+		"block_fwd_bwd_seq1024_mps_matmul":         c.MatMul,
+		"block_fwd_bwd_seq1024_mps_batched_matmul": c.BatchedMatMul,
+		"block_fwd_bwd_seq1024_softmax_kernel":     c.SoftmaxKernel,
+		"block_fwd_bwd_seq1024_silu_kernel":        c.SiluKernel,
+		"block_fwd_bwd_seq1024_permute_kernel":     c.PermuteKernel,
+		"block_fwd_bwd_seq1024_rope_kernel":        c.RopeKernel,
+		"block_fwd_bwd_seq1024_repeat_kernel":      c.RepeatKernel,
+		"block_fwd_bwd_seq1024_colreduce_kernel":   c.ColReduce,
+		"block_fwd_bwd_seq1024_biasadd_kernel":     c.BiasAdd,
+	}
+	g.ResetMetalDispatchCounts()
+	taFlushGC()
+}
+
+// taX3TailBench: the embedding and CPU-vectorized-CE tails only (the
+// CPU lm_head micro-bench is deliberately skipped in X3 — see the
+// caller comment).
+func taX3TailBench(t *testing.T, rng *rand.Rand, seq, warm, runs int) []taTailRow {
+	t.Helper()
+	var rows []taTailRow
+
+	table := taSeedTensor(rng, 0.02, taVocab, taHidden)
+	table.SetRequiresGrad(true)
+	ids := make([]int, seq)
+	for i := range ids {
+		ids[i] = rng.Intn(taVocab)
+	}
+	fwd, bwd := taBenchOp(warm, runs, []*g.Tensor{table}, func() *g.Tensor {
+		return g.EmbeddingLookup(table, ids)
+	})
+	rows = append(rows, taTailRow{Name: "embedding_fwd_bwd", Seq: seq,
+		Shape: fmt.Sprintf("(%d ids) into (%d,%d)", seq, taVocab, taHidden),
+		FwdMs: fwd, BwdMs: bwd, TotalMs: fwd + bwd,
+		Note: "as X0 (table stays f32 trainable in the workload)"})
+	table = nil
+	runtime.GC()
+
+	logits := taSeedTensor(rng, 1.0, seq, taVocab)
+	logits.SetRequiresGrad(true)
+	tgt := g.Zeros(seq, 1)
+	for i := 0; i < seq; i++ {
+		tgt.Data()[i] = float32(rng.Intn(taVocab))
+	}
+	fwd, bwd = taBenchOp(warm, runs, []*g.Tensor{logits}, func() *g.Tensor {
+		return g.CrossEntropyLoss(logits, tgt)
+	})
+	rows = append(rows, taTailRow{Name: "cross_entropy_fwd_bwd_cpu_vectorized", Seq: seq,
+		Shape: fmt.Sprintf("(%d,%d)", seq, taVocab),
+		FwdMs: fwd, BwdMs: bwd, TotalMs: fwd + bwd,
+		Note: "K2 CPU fallback (acc_vexp path)"})
+	logits = nil
+	runtime.GC()
+
+	return rows
 }

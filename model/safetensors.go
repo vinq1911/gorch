@@ -36,6 +36,11 @@ type SafetensorsFile struct {
 //   - Remaining: raw tensor data
 //
 // Supports F32, F16 (converted to F32), and BF16 (converted to F32).
+// This is the f32-compatibility loader — every existing consumer
+// (qwen, gpt2, mimi) reads tensor.Data() and copies into f32 params,
+// so BF16 checkpoints are widened here. Frozen-path loaders that want
+// to KEEP bf16 storage (plan 0009 X3-B1: 2.46 GB → 1.23 GB for the
+// 0.6B base) use LoadSafetensorsNative instead.
 //
 // Streams tensor data: only the JSON header and one tensor's raw bytes
 // are alive at any time, plus the running set of decoded F32 tensors.
@@ -43,6 +48,19 @@ type SafetensorsFile struct {
 // (raw bytes + decoded floats both alive) to roughly the size of the
 // largest single tensor + decoded total. See issue #10.
 func LoadSafetensors(path string) (*SafetensorsFile, error) {
+	return loadSafetensors(path, false)
+}
+
+// LoadSafetensorsNative is LoadSafetensors except BF16 tensors keep
+// their native bf16 storage (Tensor.Dtype() == BFloat16, bits in
+// data16 — no widening; plan 0009 X3-B1). F32 and F16 behave exactly
+// as in LoadSafetensors. Callers must be dtype-aware: a bf16 tensor's
+// Data() is nil; use Data16(), ToF32(), or the bf16-capable ops.
+func LoadSafetensorsNative(path string) (*SafetensorsFile, error) {
+	return loadSafetensors(path, true)
+}
+
+func loadSafetensors(path string, keepBF16 bool) (*SafetensorsFile, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("open safetensors: %w", err)
@@ -103,6 +121,13 @@ func LoadSafetensors(path string) (*SafetensorsFile, error) {
 		case "F16":
 			floats = decodeF16(byteBuf)
 		case "BF16":
+			if keepBF16 {
+				// Native path (plan 0009 X3-B1): keep the bf16 bits as
+				// data16 — no widening, half the resident bytes.
+				result.Tensors[name] = g.NewTensorBF16(decodeBF16Raw(byteBuf), hdr.Shape...)
+				result.Names = append(result.Names, name)
+				continue
+			}
 			floats = decodeBF16(byteBuf)
 		default:
 			return nil, fmt.Errorf("unsupported dtype %q for tensor %q", hdr.DType, name)
@@ -147,6 +172,17 @@ func decodeBF16(data []byte) []float32 {
 	return result
 }
 
+// decodeBF16Raw decodes little-endian bf16 bytes into their raw uint16
+// bit patterns without widening (plan 0009 X3-B1 native load).
+func decodeBF16Raw(data []byte) []uint16 {
+	n := len(data) / 2
+	result := make([]uint16, n)
+	for i := 0; i < n; i++ {
+		result[i] = binary.LittleEndian.Uint16(data[i*2 : i*2+2])
+	}
+	return result
+}
+
 // float16ToFloat32 converts an IEEE 754 half-precision float to float32.
 func float16ToFloat32(h uint16) float32 {
 	sign := uint32(h>>15) & 1
@@ -176,7 +212,10 @@ func float16ToFloat32(h uint16) float32 {
 	return math.Float32frombits(f)
 }
 
-// SaveSafetensors saves tensors to a .safetensors file.
+// SaveSafetensors saves tensors to a .safetensors file. F32 tensors
+// are written as "F32"; bf16 tensors keep their native storage and are
+// written as "BF16" bit-exactly (plan 0009 X3-B1 round trip — no
+// widen/re-round cycle).
 func SaveSafetensors(path string, tensors map[string]*g.Tensor) error {
 	// Build header and compute offsets
 	header := make(map[string]SafetensorsHeader)
@@ -189,9 +228,13 @@ func SaveSafetensors(path string, tensors map[string]*g.Tensor) error {
 	offset := 0
 	for _, name := range names {
 		t := tensors[name]
-		size := t.Size() * 4 // F32
+		dtype, elemSize := "F32", 4
+		if t.Dtype() == g.BFloat16 {
+			dtype, elemSize = "BF16", 2
+		}
+		size := t.Size() * elemSize
 		header[name] = SafetensorsHeader{
-			DType:   "F32",
+			DType:   dtype,
 			Shape:   t.Shape(),
 			Offsets: [2]int{offset, offset + size},
 		}
@@ -222,9 +265,19 @@ func SaveSafetensors(path string, tensors map[string]*g.Tensor) error {
 		return err
 	}
 
-	// Tensor data (F32, little-endian)
+	// Tensor data (little-endian; F32 words or raw BF16 half-words)
 	for _, name := range names {
 		t := tensors[name]
+		if t.Dtype() == g.BFloat16 {
+			for _, v := range t.Data16() {
+				var buf [2]byte
+				binary.LittleEndian.PutUint16(buf[:], v)
+				if _, err := f.Write(buf[:]); err != nil {
+					return err
+				}
+			}
+			continue
+		}
 		for _, v := range t.Data() {
 			var buf [4]byte
 			binary.LittleEndian.PutUint32(buf[:], math.Float32bits(v))

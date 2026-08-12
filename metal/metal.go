@@ -7,7 +7,7 @@ package metal
 
 /*
 #cgo CFLAGS: -x objective-c -fobjc-arc
-#cgo LDFLAGS: -framework Metal -framework Foundation -framework MetalPerformanceShaders
+#cgo LDFLAGS: -framework Metal -framework Foundation -framework MetalPerformanceShaders -framework MetalPerformanceShadersGraph
 #include "shim.h"
 #include <stdlib.h>
 */
@@ -140,6 +140,17 @@ func (b *Buffer) FloatSlice() []float32 {
 	ptr := C.metal_buffer_contents(b.ptr)
 	n := int(C.metal_buffer_length(b.ptr)) / 4
 	return unsafe.Slice((*float32)(ptr), n)
+}
+
+// Uint16Slice returns the buffer's contents as a Go []uint16 slice
+// (length = buffer size / 2). Used for bfloat16 tensor storage (plan
+// 0009 X3-B2): gorch bf16 tensors keep their bits as uint16, and this
+// view lets them live in unified memory exactly like FloatSlice does
+// for f32.
+func (b *Buffer) Uint16Slice() []uint16 {
+	ptr := C.metal_buffer_contents(b.ptr)
+	n := int(C.metal_buffer_length(b.ptr)) / 2
+	return unsafe.Slice((*uint16)(ptr), n)
 }
 
 // Uint32Slice returns the buffer's contents as a Go []uint32 slice.
@@ -283,6 +294,56 @@ func (q *CommandQueue) BatchedMatMulTransA(a, b, c *Buffer, M, N, K, batchSize i
 		C.uint32_t(M), C.uint32_t(N), C.uint32_t(K), C.uint32_t(batchSize))
 	notePending()
 	keepAlive3(a, b, c)
+}
+
+// ErrBF16Unsupported is returned by the dtyped matmul entry points
+// when MPSDataTypeBFloat16 is unavailable on this OS/device or MPS
+// rejects the configuration (plan 0009 X3-B0 outcome b/c territory).
+var ErrBF16Unsupported = fmt.Errorf("metal: MPS bf16 matmul unsupported on this device/OS")
+
+// MatMulDT computes C = opA(A) @ opB(B) with per-operand dtypes (plan
+// 0009 X3-B4). aBF16/bBF16 mark the corresponding operand buffer as
+// bfloat16 (2 bytes/element); C is always float32 — MPS accumulates in
+// f32 when the result matrix is f32 (risk R2 contract, verified by the
+// B0 probe). Logical shapes after transposes: (M,K) @ (K,N) → (M,N);
+// stored A is (K,M) when transA, stored B is (N,K) when transB.
+//
+// Returns ErrBF16Unsupported when the shim reports failure. A nil
+// error does NOT guarantee correct numerics on untested OS versions —
+// gorch verifies once per process via its bf16 probe before routing
+// real work here.
+func (q *CommandQueue) MatMulDT(a, b, c *Buffer, M, N, K int, transA, transB, aBF16, bBF16 bool) error {
+	rc := C.metal_mps_matmul_dt(q.ptr, a.ptr, b.ptr, c.ptr,
+		C.uint32_t(M), C.uint32_t(N), C.uint32_t(K),
+		cbool(transA), cbool(transB), cbool(aBF16), cbool(bBF16))
+	keepAlive3(a, b, c)
+	if rc != 0 {
+		return ErrBF16Unsupported
+	}
+	notePending()
+	return nil
+}
+
+// BatchedMatMulDT is the batched variant of MatMulDT: C[i] =
+// opA(A[i]) @ opB(B[i]) for i in 0..batchSize-1, matrices packed
+// contiguously per operand. Same dtype/transpose semantics.
+func (q *CommandQueue) BatchedMatMulDT(a, b, c *Buffer, M, N, K, batchSize int, transA, transB, aBF16, bBF16 bool) error {
+	rc := C.metal_mps_batched_matmul_dt(q.ptr, a.ptr, b.ptr, c.ptr,
+		C.uint32_t(M), C.uint32_t(N), C.uint32_t(K), C.uint32_t(batchSize),
+		cbool(transA), cbool(transB), cbool(aBF16), cbool(bBF16))
+	keepAlive3(a, b, c)
+	if rc != 0 {
+		return ErrBF16Unsupported
+	}
+	notePending()
+	return nil
+}
+
+func cbool(b bool) C.int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 // Release frees a device.

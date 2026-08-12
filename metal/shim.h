@@ -93,6 +93,46 @@ void metal_mps_batched_matmul_transA(MTLCommandQueueRef queue,
                                      uint32_t batchSize);
 
 // ---------------------------------------------------------------------------
+// Dtype-parameterized MPS matmul (plan 0009 X3, B0/B4).
+//
+// C = opA(A) @ opB(B) where opX is transpose iff transX != 0. A and B
+// may independently be bfloat16 (aBF16/bBF16 != 0, 2 bytes/element,
+// MPSDataTypeBFloat16) or float32. C is ALWAYS float32 with f32
+// accumulation — the risk-R2 contract (bf16 storage, f32 math).
+//
+// Implementation is MPSGraph, NOT MPSMatrix: the B0 probe (2026-08-11,
+// M4, macOS 26.5) showed MPSMatrixMultiplication hard-asserts (abort)
+// on MPSDataTypeBFloat16 inputs — plan 0009 §3.4 B0 outcome (b), see
+// ADR-012. bf16 operands are cast to f32 inside the graph before the
+// matmul node, making f32 accumulation structural; compiled graphs are
+// cached per shape/dtype signature.
+//
+// Logical (post-transpose) shapes: opA(A) is (M, K), opB(B) is (K, N),
+// C is (M, N). Stored shapes: A is (K, M) when transA else (M, K);
+// B is (N, K) when transB else (K, N). All row-major, contiguous.
+//
+// Returns 0 on success; 1 when MPSDataTypeBFloat16 is unavailable
+// (pre-macOS 14) or MPS rejects the configuration (NSException
+// caught). Callers must verify numerics once per process (the B0
+// probe) — MPS can silently produce garbage rather than throw.
+int metal_mps_matmul_dt(MTLCommandQueueRef queue,
+                        MTLBufferRef A, MTLBufferRef B, MTLBufferRef C,
+                        uint32_t M, uint32_t N, uint32_t K,
+                        int transA, int transB,
+                        int aBF16, int bBF16);
+
+// Batched variant: C[i] = opA(A[i]) @ opB(B[i]) for i in
+// 0..batchSize-1, matrices packed contiguously per operand. Same
+// dtype/transpose semantics and return convention as
+// metal_mps_matmul_dt. Single command buffer, one commit.
+int metal_mps_batched_matmul_dt(MTLCommandQueueRef queue,
+                                MTLBufferRef A, MTLBufferRef B, MTLBufferRef C,
+                                uint32_t M, uint32_t N, uint32_t K,
+                                uint32_t batchSize,
+                                int transA, int transB,
+                                int aBF16, int bBF16);
+
+// ---------------------------------------------------------------------------
 // Async dispatch mode (plan 0009 X2, risk R6).
 //
 // By default every dispatch/matmul entry point commits its command
