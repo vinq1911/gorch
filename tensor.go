@@ -595,11 +595,20 @@ func Transpose2D(a *Tensor) *Tensor {
 		return downcastToBF16(Transpose2D(promoteToF32(a)))
 	}
 	M, N := a.shape[0], a.shape[1]
-	out := ZerosLike(a, N, M)
-	syncForCPU(a)
-	for i := 0; i < M; i++ {
-		for j := 0; j < N; j++ {
-			out.data[j*M+i] = a.data[i*N+j]
+	var out *Tensor
+	if a.buf != nil && permutePipelineReady() {
+		// Metal path (plan 0009 X4): route through the X2b permute_copy
+		// kernel so a resident operand (e.g. a LoRA factor) is
+		// transposed without a host sync — Transpose2D was one of the
+		// per-adapter sync points in the async trainer step.
+		out = permuteMetal(a, []int{N, M}, []int{N, 1}, []int{1, 0}, M*N)
+	} else {
+		out = ZerosLike(a, N, M)
+		syncForCPU(a)
+		for i := 0; i < M; i++ {
+			for j := 0; j < N; j++ {
+				out.data[j*M+i] = a.data[i*N+j]
+			}
 		}
 	}
 	if a.requiresGrad {

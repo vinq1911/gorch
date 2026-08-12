@@ -115,7 +115,7 @@ func Download(dir string) (string, error) {
 // attention biases) stay frozen zeros. All parameters are frozen after
 // loading — M1's LoRA/vocab-extension owns trainable state.
 func Load(path string, cfg Config) (*Model, error) {
-	return load(path, cfg, false)
+	return load(path, cfg, false, false)
 }
 
 // LoadTruncated loads only the first cfg.NumLayers layers from a
@@ -124,11 +124,32 @@ func Load(path string, cfg Config) (*Model, error) {
 // training MECHANICS are gated on real pretrained weights even when a
 // full-depth CPU run would be impractically slow.
 func LoadTruncated(path string, cfg Config) (*Model, error) {
-	return load(path, cfg, true)
+	return load(path, cfg, true, false)
 }
 
-func load(path string, cfg Config, allowDeeperLayers bool) (*Model, error) {
-	sf, err := model.LoadSafetensors(path)
+// LoadNative is Load with the frozen-path bf16 storage of plan 0009
+// X3/X4: the per-block Linear weights (q/k/v/o + gate/up/down) KEEP
+// the checkpoint's native bf16 bits (LoadSafetensorsNative — no
+// widening, 2 B/param), while the embedding table, norm gammas, and
+// any biases are widened to f32 (the embedding feeds the CPU lookup
+// and stays the trainable-adjacent f32 table; norm gammas are f32 by
+// the RMSNorm kernel contract). Combined with VoiceModel.ToMetal this
+// puts every block matmul on the MPS dtyped bf16 path.
+func LoadNative(path string, cfg Config) (*Model, error) {
+	return load(path, cfg, false, true)
+}
+
+// LoadTruncatedNative is LoadTruncated with LoadNative's bf16 layout.
+func LoadTruncatedNative(path string, cfg Config) (*Model, error) {
+	return load(path, cfg, true, true)
+}
+
+func load(path string, cfg Config, allowDeeperLayers, nativeBF16 bool) (*Model, error) {
+	loader := model.LoadSafetensors
+	if nativeBF16 {
+		loader = model.LoadSafetensorsNative
+	}
+	sf, err := loader(path)
 	if err != nil {
 		return nil, err
 	}
@@ -155,8 +176,23 @@ func load(path string, cfg Config, allowDeeperLayers bool) (*Model, error) {
 			*dst = t
 		}
 	}
+	// assignF32 widens a native-bf16 tensor to f32 before assigning —
+	// used for every tensor that must stay f32 on the accelerated path
+	// (embedding table, norm gammas): only the block Linear weights
+	// keep bf16 storage (plan 0009 X3 §3.4 layout).
+	assignF32 := func(dst **g.Tensor, name string, want ...int) {
+		if t := take(name, want...); t != nil {
+			if t.Dtype() != g.Float32 {
+				t = t.ToF32()
+			}
+			*dst = t
+		}
+	}
 	copyBias := func(l *nn.Linear, name string, want int) {
 		if t := take(name, want); t != nil {
+			if t.Dtype() != g.Float32 {
+				t = t.ToF32()
+			}
 			copy(l.Bias.Data(), t.Data())
 		}
 	}
@@ -164,20 +200,20 @@ func load(path string, cfg Config, allowDeeperLayers bool) (*Model, error) {
 	H, I := cfg.HiddenSize, cfg.IntermediateSize
 	inner, kv := cfg.InnerDim(), cfg.KVDim()
 
-	assign(&m.Embed.Weight, "model.embed_tokens.weight", cfg.VocabSize, H)
-	assign(&m.Norm.Weight, "model.norm.weight", H)
+	assignF32(&m.Embed.Weight, "model.embed_tokens.weight", cfg.VocabSize, H)
+	assignF32(&m.Norm.Weight, "model.norm.weight", H)
 
 	for i, blk := range m.Blocks {
 		p := fmt.Sprintf("model.layers.%d.", i)
-		assign(&blk.NormAttn.Weight, p+"input_layernorm.weight", H)
-		assign(&blk.NormFFN.Weight, p+"post_attention_layernorm.weight", H)
+		assignF32(&blk.NormAttn.Weight, p+"input_layernorm.weight", H)
+		assignF32(&blk.NormFFN.Weight, p+"post_attention_layernorm.weight", H)
 		assign(&blk.Attn.Wq.Weight, p+"self_attn.q_proj.weight", inner, H)
 		assign(&blk.Attn.Wk.Weight, p+"self_attn.k_proj.weight", kv, H)
 		assign(&blk.Attn.Wv.Weight, p+"self_attn.v_proj.weight", kv, H)
 		assign(&blk.Attn.Wo.Weight, p+"self_attn.o_proj.weight", H, inner)
 		if cfg.UseQKNorm {
-			assign(&blk.Attn.QNorm.Weight, p+"self_attn.q_norm.weight", cfg.HeadDim)
-			assign(&blk.Attn.KNorm.Weight, p+"self_attn.k_norm.weight", cfg.HeadDim)
+			assignF32(&blk.Attn.QNorm.Weight, p+"self_attn.q_norm.weight", cfg.HeadDim)
+			assignF32(&blk.Attn.KNorm.Weight, p+"self_attn.k_norm.weight", cfg.HeadDim)
 		}
 		if cfg.AttnBias {
 			copyBias(blk.Attn.Wq, p+"self_attn.q_proj.bias", inner)
@@ -197,12 +233,26 @@ func load(path string, cfg Config, allowDeeperLayers bool) (*Model, error) {
 			if !shapeEq(lm.Shape(), []int{cfg.VocabSize, H}) {
 				problems = append(problems, fmt.Sprintf("shape: lm_head.weight is %v, want %v", lm.Shape(), []int{cfg.VocabSize, H}))
 			} else if emb, ok := sf.Tensors["model.embed_tokens.weight"]; ok {
-				a, b := lm.Data(), emb.Data()
-				for j := range a {
-					if a[j] != b[j] {
-						problems = append(problems,
-							fmt.Sprintf("tied-head violation: lm_head.weight differs from model.embed_tokens.weight at element %d (%v vs %v)", j, a[j], b[j]))
-						break
+				// Dtype-aware bit compare: the native loader keeps both
+				// tensors bf16 (Data() would be nil), the compat loader
+				// keeps both f32 — either way the tie must be bit-exact.
+				if lm.Dtype() == g.BFloat16 && emb.Dtype() == g.BFloat16 {
+					a, b := lm.Data16(), emb.Data16()
+					for j := range a {
+						if a[j] != b[j] {
+							problems = append(problems,
+								fmt.Sprintf("tied-head violation: lm_head.weight differs from model.embed_tokens.weight at bf16 element %d (0x%04x vs 0x%04x)", j, a[j], b[j]))
+							break
+						}
+					}
+				} else {
+					a, b := lm.Data(), emb.Data()
+					for j := range a {
+						if a[j] != b[j] {
+							problems = append(problems,
+								fmt.Sprintf("tied-head violation: lm_head.weight differs from model.embed_tokens.weight at element %d (%v vs %v)", j, a[j], b[j]))
+							break
+						}
 					}
 				}
 			}

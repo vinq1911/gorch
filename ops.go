@@ -287,8 +287,7 @@ func Scale(a *Tensor, s float32) *Tensor {
 		return downcastToBF16(Scale(promoteToF32(a), s))
 	}
 	out := ZerosLike(a, a.shape...)
-	syncForCPU(a)
-	accelerate.VScale(a.data, s, out.data)
+	scaleInto(a, out, s)
 	if GradEnabled() && a.requiresGrad {
 		out.requiresGrad = true
 		out.gradFn = &GradFn{
@@ -296,13 +295,29 @@ func Scale(a *Tensor, s float32) *Tensor {
 			inputs: []*Tensor{a},
 			backward: func(grad *Tensor) []*Tensor {
 				dx := zerosLikeEither(a.shape, grad, a)
-				syncForCPU(grad)
-				accelerate.VScale(grad.data, s, dx.data)
+				scaleInto(grad, dx, s)
 				return []*Tensor{dx}
 			},
 		}
 	}
 	return out
+}
+
+// scaleInto writes out = a * s, dispatching the vec_scale Metal kernel
+// when both tensors are resident (plan 0009 X4: the LoRA adapter's
+// α/r scaling must not force a host sync per adapter in async mode)
+// and falling back to Accelerate VScale through unified memory.
+func scaleInto(a, out *Tensor, s float32) {
+	if a.buf != nil && out.buf != nil && gpu != nil {
+		if p, ok := gpu.pipelines["vec_scale"]; ok {
+			sb := gpu.Dev.NewBuffer(4)
+			sb.FloatSlice()[0] = s
+			gpu.Queue.Dispatch1D(p, []*metal.Buffer{a.buf, out.buf, sb}, a.Size())
+			return
+		}
+	}
+	syncForCPU(a)
+	accelerate.VScale(a.data, s, out.data)
 }
 
 // ReLU returns max(0, a) element-wise.

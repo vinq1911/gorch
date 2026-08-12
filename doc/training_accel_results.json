@@ -2325,6 +2325,46 @@
         "bf16 dtyped throughput in isolation (bf16_shape_bench_test.go diagnostics): 1024^3 plain 1.33x FASTER than f32 MPSMatrix; block projection shapes 0.75-1.06x (TransB transpose not fused as well); the in-block variance is environmental (MPSGraph workspace allocation under buffer churn + external load), echoing X2b's buffer-pooling follow-up",
         "bench executed as FOUR processes (TA_X3_PART=canary|control|bf16|tails, temp-file phase handoff): this session's SIGKILL horizon dropped to ~60 s wall (X2 sessions: ~110 s)"
       ]
+    },
+    {
+      "phase": "X4",
+      "date": "2026-08-12",
+      "machine": "Apple M4",
+      "memory_gb": 24,
+      "go_version": "go1.26.0",
+      "load_avg_at_start": "{ 3.4 - 40 across session; VM compressor ~17.6 GB, repeated vm-compressor-space-shortage jetsams }",
+      "metal_initialized": true,
+      "geometry": {
+        "hidden": 1024,
+        "q_heads": 16,
+        "kv_heads": 8,
+        "head_dim": 128,
+        "q_dim": 2048,
+        "kv_dim": 1024,
+        "ffn_inter": 3072,
+        "layers": 28,
+        "vocab": 168336,
+        "base_vocab": 151936,
+        "mimi_vocab": 16400,
+        "rope_theta": 1000000.0,
+        "rms_norm_eps": 1e-06
+      },
+      "block_step_results": [],
+      "tail_results": [],
+      "full_step_estimate": [],
+      "per_op_results": [],
+      "memory_results": [],
+      "pprof_top10": [],
+      "measured_ranking_seq1500": [],
+      "notes": [
+        "X4 trainer integration (plan 0009 \u00a72.8): the REAL qwen VoiceModel/qwenvoice-train on the GPU+bf16 path \u2014 qwen.LoadNative (block Linear weights native bf16, embed/norms widened f32), VoiceModel.ToMetal (blocks + gammas + LoRA A/B + ExtendedEmbedding resident), residency-aware ExtendedEmbedding fwd + MPS tied-head GEMMs (base-side dW structurally absent), g.Scale vec_scale dispatch + Transpose2D via permute_copy (LoRA delta path sync-free), trainer -accel async|sync|off with -metal-min-matmul (default 8M FMA) and per-micro-step GC flush",
+        "correctness gate MET (e2e/qwenvoice_accel_test.go): 20-step fixed trainer-loop fixture on 4-layer-truncated REAL Qwen3-0.6B, identical trainable init \u2014 CPU f32 20.594->0.68313 vs GPU+bf16 20.594->0.68307, |dLoss|/CPU = 0.01% at step 20 (gate 5%); 56 dtyped bf16 matmuls per micro-step asserted; full 28-layer accel confirmation: 14.33->9.70 over 6 steps",
+        "A/B on IDENTICAL samples (Stage-A shards, full 28 layers, accum 8 equivalent, max-seq 1024, r=16 alpha=32, seed 42): CPU f32 accum-8 step = 420.1 s (~11 tok/s, peak RSS 10.8 GB); GPU+bf16 async as 4 chained accum-2 steps over the SAME 8 draws (~4,650 tokens) = 73.4 s (12.0+18.5+30.8+12.1; 63 tok/s incl a load spike, 71-94 tok/s on low-noise invocations; peak RSS 6.4-7.4 GB, includes 3 extra optimizer steps + 4 cold starts charged to the accelerated side)",
+        "GATE (plan \u00a75 X4, >=5x full step vs CPU f32): MET at 5.7x on identical data under identical load (7.4x low-noise subset); >=10x stretch NOT met \u2014 X0-vs-X3 harness estimates put the quiet-machine ratio near 6.2x (18.1 s -> 2.94 s at seq 1024)",
+        "session validity: WORST conditions of the plan \u2014 loadavg 3.4-40 (external screen-sharing workload), VM compressor saturated (26.5 GB swap peak); macOS jetsam'd the trainer (vm-compressor-space-shortage, largestProcess=qwenvoice-train, JetsamEvent-2026-08-12-12*.ips) whenever its ~6-8 GB footprint persisted ~45-60 s \u2014 the \u00a72.5/\u00a72.7 SIGKILL class, now with kernel evidence; measurement therefore ran as chained 1-step checkpoint/resume invocations (~20 s process lifetime), which the same-seed dataset-draw replay makes token-identical to a continuous run",
+        "Stage-A projection (20M tokens, ~4,700 tok per accum-8 step, ~4,255 steps): 69-88 h at this session's measured accelerated throughput; ~16-18 h quiet-machine (same-session inflation factor ~5x, cross-checked against the X3 full-step estimate 2.94 s/1024-token seq ~= 350 tok/s); CPU f32 same budget: ~21 days measured-session, ~4 days quiet",
+        "recommended Stage-A command (NOT started) recorded in plan \u00a72.8: -steps 4300 -accum 8 -max-seq 1024 -lora-r 16 -lora-alpha 32 -task-ratios listen=0.45,speak=0.45,text=0.10 -save-every 25 -resume auto -accel async"
+      ]
     }
   ]
 }

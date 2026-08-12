@@ -13,6 +13,10 @@ import (
 // supervised-token loss over every sample, and greedy regeneration of
 // each sample's supervised target span with exact-match counting.
 func evalRegen(c cliConfig) error {
+	// Eval runs the CPU f32 path regardless of -accel: greedy span
+	// regeneration is the KV-cached decode loop, whose per-token
+	// single-row matmuls would hit the bf16 widen-per-call fallback.
+	c.accel = "off"
 	vm, err := loadVoiceModel(c)
 	if err != nil {
 		return err
