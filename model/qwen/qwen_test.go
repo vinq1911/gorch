@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -337,15 +338,45 @@ func TestQwenGoldenTop5(t *testing.T) {
 // attention vs per-KV-head cached GEMMs) across 28 layers — measured
 // divergence on the logits is ≤5e-5 absolute / ≤3e-5 relative (vs
 // 2e-3 relative for Go-vs-HF parity). Gate: |a−b| ≤ 5e-5 + 1e-4·|b|.
+//
+// Flake discipline (2026-08-12 investigation). The earlier
+// "load-induced BLAS reduction reordering, min-over-attempts clears
+// it" comment was measured and found wrong in two ways:
+//
+//  1. Accelerate's sgemm on Apple Silicon (measured on M4, macOS 26.x)
+//     occasionally computes a tile-shaped patch (~192 elements, or one
+//     output row) of ONE GEMM call in an alternate bit-state for
+//     bit-identical inputs — flip-flopping between exactly two stable
+//     states, more often under host load, and the alternate state can
+//     be STICKY for a process's lifetime (observed: one process
+//     failing 3/3 attempts at ratio 6-64x while sibling processes
+//     under the same load pass 3/3 bit-identically; go test -race
+//     clean; inputs at the diverging op verified bit-identical, so
+//     this is not a gorch memory bug). f64-reference conditioning
+//     analysis showed the normal state matches the f64 dot product
+//     while the alternate state lands 12-22x OUTSIDE the maximal f32
+//     summation-order error bound u·K·Σ|a_i·b_i| — i.e. a
+//     reduced-precision (bf16-like) tile, a platform defect rather
+//     than benign reduction reordering. One such ~1% hidden-state
+//     perturbation amplifies through the remaining layers into the
+//     observed 60x logit ratios (which is also why widening the
+//     tolerance is not a viable fix).
+//  2. The old min-over-attempts retry recomputed only the CACHED path
+//     against a full-forward reference computed once — a noisy draw on
+//     the full side could never clear, turning transient platform
+//     noise into a stable-looking failure.
+//
+// Discipline now: each attempt is self-contained (recomputes BOTH the
+// full forward and the cached staircase); after 3 failed in-process
+// attempts the test re-execs itself once in a fresh subprocess
+// (process restart empirically leaves the sticky BLAS mode behind) and
+// accepts that verdict, logging the recovery loudly. Set
+// QWEN_CACHED_DIAG=1 for layer-divergence forensics on failure.
+const qwenCachedSubprocEnv = "QWEN_CACHED_EQUIV_SUBPROC"
+
 func TestQwenForwardCachedMatchesFull(t *testing.T) {
 	m := loadModelCached(t)
 	ids := promptShort // 16 tokens
-
-	full := m.Forward(ids, 0)
-	vocab := full.Shape()[1]
-	fullRow := func(pos int) []float32 {
-		return full.Data()[pos*vocab : (pos+1)*vocab]
-	}
 
 	type step struct {
 		toks []int
@@ -358,11 +389,6 @@ func TestQwenForwardCachedMatchesFull(t *testing.T) {
 		{ids[14:15], 14},
 		{ids[15:16], 15},
 	}
-	// Min-over-attempts discipline (see audio/mimi requireClose): under
-	// concurrent CPU load Accelerate's threaded GEMM reorders reductions
-	// differently between the cached and full paths, occasionally
-	// inflating the worst ratio past 1 (observed 1/5 runs at load 5+).
-	// A real cache bug produces a stable floor; noise clears on retry.
 	worstOf := func(got, ref []float32) float64 {
 		var worst float64
 		for i := range got {
@@ -373,43 +399,167 @@ func TestQwenForwardCachedMatchesFull(t *testing.T) {
 		}
 		return worst
 	}
-	runSteps := func() []float64 {
+	// attempt recomputes the full-forward reference AND the cached
+	// staircase — both sides of the comparison are fresh draws, so a
+	// transient BLAS event on either side clears on retry.
+	attempt := func() (ratios []float64, full *g.Tensor) {
+		full = m.Forward(ids, 0)
+		vocab := full.Shape()[1]
 		cache := m.NewCache()
-		ratios := make([]float64, 0, len(steps))
 		for _, s := range steps {
 			logits := m.ForwardCached(s.toks, cache)
-			ratios = append(ratios, worstOf(logits.Data(), fullRow(s.pos)))
+			ref := full.Data()[s.pos*vocab : (s.pos+1)*vocab]
+			ratios = append(ratios, worstOf(logits.Data(), ref))
 		}
 		if cache.Len() != len(ids) {
 			t.Errorf("cache.Len() = %d, want %d", cache.Len(), len(ids))
 		}
-		return ratios
+		return ratios, full
 	}
-	best := runSteps()
-	for attempt := 2; attempt <= 3; attempt++ {
-		ok := true
-		for _, r := range best {
+	pass := func(ratios []float64) bool {
+		for _, r := range ratios {
 			if r > 1 {
-				ok = false
+				return false
 			}
 		}
-		if ok {
+		return true
+	}
+
+	var last []float64
+	var lastFull *g.Tensor
+	for a := 1; a <= 3; a++ {
+		last, lastFull = attempt()
+		for i, s := range steps {
+			t.Logf("attempt %d pos %d: worst |a-b|/(5e-5 + 1e-4*|b|) = %.3g", a, s.pos, last[i])
+		}
+		if pass(last) {
+			if a > 1 {
+				t.Logf("recovered on attempt %d — transient platform BLAS nondeterminism, not a cache defect", a)
+			}
+			return
+		}
+		t.Logf("attempt %d failed the gate", a)
+	}
+
+	if os.Getenv("QWEN_CACHED_DIAG") != "" {
+		chunks := make([][2]int, len(steps))
+		off := 0
+		for i, st := range steps {
+			chunks[i] = [2]int{off, off + len(st.toks)}
+			off += len(st.toks)
+		}
+		diagnoseCachedDivergence(t, m, ids, lastFull, chunks)
+	}
+
+	if os.Getenv(qwenCachedSubprocEnv) != "" {
+		// We ARE the quarantine subprocess: report the failure for real.
+		for i, s := range steps {
+			if last[i] > 1 {
+				t.Errorf("pos %d: cached logits diverge from full forward beyond 5e-5 + 1e-4·|b|: ratio %.3g (persists in a fresh process)", s.pos, last[i])
+			}
+		}
+		return
+	}
+
+	// Quarantine re-exec: the sticky alternate BLAS mode is per-process
+	// state; a fresh process is a fresh draw. Exactly one child, scoped
+	// to this test only, recursion blocked by the env sentinel.
+	t.Logf("3/3 in-process attempts failed — re-exec quarantine (fresh process leaves sticky per-process BLAS state behind)")
+	cmd := exec.Command(os.Args[0],
+		"-test.run", "^TestQwenForwardCachedMatchesFull$", "-test.count=1", "-test.v")
+	cmd.Env = append(os.Environ(), qwenCachedSubprocEnv+"=1")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Logf("RECOVERED in fresh subprocess — per-process-sticky platform BLAS numerical nondeterminism, not a cache defect. Child output:\n%s", out)
+		return
+	}
+	t.Errorf("cached-vs-full divergence persists in a fresh subprocess (exec err: %v):\n%s", err, out)
+}
+
+// diagnoseCachedDivergence — env-gated failure forensics
+// (QWEN_CACHED_DIAG=1). Three discriminating measurements:
+//
+//  1. Recompute the FULL forward and compare against the last
+//     attempt's full logits — a nonzero delta proves the platform's
+//     GEMM nondeterminism directly (same process, same inputs), which
+//     is what originally exposed the old min-over-attempts discipline
+//     as unsound.
+//  2. Re-run the cached staircase layer-by-layer and report, per
+//     single-token position, the first block whose output hidden state
+//     diverges from the full path beyond f32 noise.
+//  3. Run the cached staircase twice and compare bit-exactness, to
+//     distinguish deterministic wrongness from run-to-run noise.
+func diagnoseCachedDivergence(t *testing.T, m *Model, ids []int, full *g.Tensor, chunks [][2]int) {
+	t.Helper()
+	vocab := full.Shape()[1]
+
+	// (1) full-forward self-consistency.
+	full2 := m.Forward(ids, 0)
+	var worstFull float64
+	var worstIdx int
+	a, b := full.Data(), full2.Data()
+	for i := range a {
+		if d := math.Abs(float64(a[i]) - float64(b[i])); d > worstFull {
+			worstFull, worstIdx = d, i
+		}
+	}
+	t.Logf("DIAG full-vs-recomputed-full: max |Δ| = %.3g at flat index %d (pos %d) — nonzero here means the ORIGINAL full forward differs from a recompute in the same process",
+		worstFull, worstIdx, worstIdx/vocab)
+
+	// (2) layer-by-layer cached-vs-full hidden states.
+	fullH := make([]*g.Tensor, len(m.Blocks))
+	g.NoGrad(func() {
+		h := m.Embed.Forward(ids)
+		for i, blk := range m.Blocks {
+			h = blk.Forward(h, 0)
+			fullH[i] = h
+		}
+	})
+	dim := m.Cfg.HiddenSize
+	g.NoGrad(func() {
+		cache := m.NewCache()
+		for _, c := range chunks {
+			start, end := c[0], c[1]
+			h := m.Embed.Forward(ids[start:end])
+			for li, blk := range m.Blocks {
+				h = blk.ForwardCached(h, cache, li, start)
+				// Compare every row of this chunk against the full path.
+				hd := h.Data()
+				fd := fullH[li].Data()
+				var worst float64
+				for r := 0; r < end-start; r++ {
+					for j := 0; j < dim; j++ {
+						d := math.Abs(float64(hd[r*dim+j]) - float64(fd[(start+r)*dim+j]))
+						if d > worst {
+							worst = d
+						}
+					}
+				}
+				if worst > 1e-3 || li == len(m.Blocks)-1 {
+					t.Logf("DIAG chunk pos %d..%d layer %d: max |Δh| = %.3g", start, end-1, li, worst)
+				}
+			}
+		}
+	})
+
+	// (3) cached determinism: two fresh staircases, bit-compare last row.
+	run := func() []float32 {
+		cache := m.NewCache()
+		var last *g.Tensor
+		for _, c := range chunks {
+			last = m.ForwardCached(ids[c[0]:c[1]], cache)
+		}
+		return last.Data()
+	}
+	r1, r2 := run(), run()
+	bitEqual := true
+	for i := range r1 {
+		if r1[i] != r2[i] {
+			bitEqual = false
 			break
 		}
-		t.Logf("attempt %d: retrying to rule out load-induced BLAS drift", attempt)
-		next := runSteps()
-		for i := range best {
-			if next[i] < best[i] {
-				best[i] = next[i]
-			}
-		}
 	}
-	for i, s := range steps {
-		t.Logf("pos %d: worst |a-b|/(5e-5 + 1e-4*|b|) = %.3g", s.pos, best[i])
-		if best[i] > 1 {
-			t.Errorf("pos %d: cached logits diverge from full forward beyond 5e-5 + 1e-4·|b|: ratio %.3g", s.pos, best[i])
-		}
-	}
+	t.Logf("DIAG cached-path determinism (two fresh staircases, final row bit-equal): %v", bitEqual)
 }
 
 // TestQwenGenerateGreedy — token-id-level greedy generation through the
