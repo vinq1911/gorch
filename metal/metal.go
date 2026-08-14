@@ -51,6 +51,45 @@ var liveBufferBytes atomic.Int64
 // count — call runtime.GC() (twice, finalizers run async) to flush.
 func LiveBufferBytes() int64 { return liveBufferBytes.Load() }
 
+// peakLiveBufferBytes is the high-water mark of liveBufferBytes since
+// the last ResetBufferStats; totalAllocBytes/totalAllocCount are the
+// cumulative allocation volume over the same window.
+//
+// LiveBufferBytes alone cannot distinguish "nothing was retained" from
+// "a huge transient came and went": both read the same at a micro-step
+// boundary. The peak is what the allocator (and the physical
+// footprint) actually had to accommodate, so it is the number that
+// explains footprint.
+var (
+	peakLiveBufferBytes atomic.Int64
+	totalAllocBytes     atomic.Int64
+	totalAllocCount     atomic.Int64
+)
+
+// BufferStats returns the peak live bytes, cumulative allocated bytes,
+// and allocation count since the last ResetBufferStats.
+func BufferStats() (peakLive, totalAlloc, allocCount int64) {
+	return peakLiveBufferBytes.Load(), totalAllocBytes.Load(), totalAllocCount.Load()
+}
+
+// ResetBufferStats restarts the peak/cumulative window, seeding the
+// peak with the currently live bytes.
+func ResetBufferStats() {
+	peakLiveBufferBytes.Store(liveBufferBytes.Load())
+	totalAllocBytes.Store(0)
+	totalAllocCount.Store(0)
+}
+
+// notePeak raises the high-water mark to cur if cur exceeds it.
+func notePeak(cur int64) {
+	for {
+		old := peakLiveBufferBytes.Load()
+		if cur <= old || peakLiveBufferBytes.CompareAndSwap(old, cur) {
+			return
+		}
+	}
+}
+
 // ---------- async dispatch mode (plan 0009 X2, risk R6) ----------
 //
 // Default (sync) mode blocks in waitUntilCompleted after every
@@ -128,7 +167,9 @@ func (d *Device) NewCommandQueue() *CommandQueue {
 // becomes unreachable; call Release for deterministic freeing.
 func (d *Device) NewBuffer(sizeBytes int) *Buffer {
 	b := &Buffer{ptr: C.metal_create_shared_buffer(d.ptr, C.uint64_t(sizeBytes)), bytes: int64(sizeBytes)}
-	liveBufferBytes.Add(b.bytes)
+	notePeak(liveBufferBytes.Add(b.bytes))
+	totalAllocBytes.Add(b.bytes)
+	totalAllocCount.Add(1)
 	runtime.SetFinalizer(b, (*Buffer).Release)
 	return b
 }
@@ -337,6 +378,67 @@ func (q *CommandQueue) BatchedMatMulDT(a, b, c *Buffer, M, N, K, batchSize int, 
 	}
 	notePending()
 	return nil
+}
+
+// ---------- shared-buffer page reclaim ----------
+//
+// Releasing an MTLResourceStorageModeShared buffer does not return the
+// physical pages the CPU has faulted in through its contents mapping —
+// a read is as bad as a write — and the driver does not recycle them
+// for later same-size allocations. Pages only ever touched by the GPU
+// do come back. Release therefore discards a buffer's pages explicitly
+// before destroying it, but only once GPU work is known to have
+// COMPLETED (see metal_release_buffer in shim.m for the matched
+// measurements and the safety argument).
+//
+// This buys bounded footprint without an allocator. Recycling buffers
+// in a size-classed cache would be the better long-term fix: it avoids
+// the churn entirely rather than paying to undo it.
+
+// SetPurgeOnRelease enables or disables the page discard performed by
+// Release. It is ON by default; turning it off restores the unbounded
+// footprint growth and exists only so tests can demonstrate the
+// difference.
+func SetPurgeOnRelease(on bool) { C.metal_set_purge_on_release(cbool(on)) }
+
+// PurgeStats returns how many buffer releases were able to discard
+// their pages immediately, and how many could not because GPU work was
+// still in flight. Unpurged releases are correct but reclaim late.
+func PurgeStats() (purged, unpurged int64) {
+	return int64(C.metal_purged_releases()), int64(C.metal_unpurged_releases())
+}
+
+// ---------- dtyped-matmul MPSGraph cache (plan 0009 X3 / ADR-012) ----------
+//
+// The shim caches one compiled MPSGraph per
+// (M, N, K, batch, transA, transB, aBF16, bBF16) signature. M and K
+// carry the SEQUENCE LENGTH of the sample being trained, so on
+// variable-length data every new sequence length mints a fresh graph at
+// every matmul site. Each graph retains a compiled MPSGraph executable
+// and its MPS workspace; those are neither Go-heap objects nor gorch
+// MTLBuffers, so they are invisible to runtime.MemStats AND to
+// LiveBufferBytes, while being fully charged to the process's physical
+// footprint. Left unbounded, this is a monotone footprint leak across
+// gradient-accumulation micro-steps.
+
+// DTGraphCacheLen returns the number of compiled dtyped-matmul graphs
+// currently cached. Exact and instant — no GC or sampling involved.
+func DTGraphCacheLen() int { return int(C.metal_dt_graph_cache_count()) }
+
+// ClearDTGraphCache drops every cached dtyped-matmul graph, releasing
+// the compiled executables and their MPS workspaces. Subsequent
+// matmuls recompile on demand.
+func ClearDTGraphCache() { C.metal_clear_dt_graph_cache() }
+
+// SetDTGraphCacheLimit caps the dtyped-matmul graph cache at n entries;
+// the cache is dropped wholesale when a miss would exceed the cap.
+// n <= 0 restores unbounded growth (the pre-fix behaviour) and is only
+// useful for reproducing the leak in tests.
+func SetDTGraphCacheLimit(n int) {
+	if n < 0 {
+		n = 0
+	}
+	C.metal_set_dt_graph_cache_limit(C.uint64_t(n))
 }
 
 func cbool(b bool) C.int {

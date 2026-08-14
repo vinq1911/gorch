@@ -132,6 +132,37 @@ int metal_mps_batched_matmul_dt(MTLCommandQueueRef queue,
                                 int transA, int transB,
                                 int aBF16, int bBF16);
 
+// Enable/disable discarding a buffer's physical pages immediately
+// before releasing it. ON by default — see metal_release_buffer for
+// why it is required and why it is guarded. Turning it off reproduces
+// the unbounded-footprint behaviour and is for tests only.
+void metal_set_purge_on_release(int on);
+
+// Counts of buffer releases that did / did not get to purge their
+// pages. A release cannot purge while GPU work may still reference the
+// buffer, so a nonzero unpurged count means some memory was reclaimed
+// late rather than immediately.
+uint64_t metal_purged_releases(void);
+uint64_t metal_unpurged_releases(void);
+
+// Number of distinct MPSGraph objects currently held by the dtyped
+// matmul cache (see gorch_dt_graph in shim.m). Each entry owns a
+// compiled MPSGraph executable plus its MPS workspace allocations —
+// memory that is invisible to both the Go heap and gorch's MTLBuffer
+// accounting, but fully visible in the process's physical footprint.
+// Exposed so the trainer and its regression tests can assert the cache
+// stays bounded.
+uint64_t metal_dt_graph_cache_count(void);
+
+// Drop every cached dtyped-matmul graph. Subsequent calls recompile on
+// demand. Used to bound the cache (see metal_set_dt_graph_cache_limit).
+void metal_clear_dt_graph_cache(void);
+
+// Cap the dtyped-matmul graph cache at `limit` entries; the cache is
+// cleared wholesale when it would exceed the cap. 0 = unbounded (the
+// pre-fix behaviour).
+void metal_set_dt_graph_cache_limit(uint64_t limit);
+
 // ---------------------------------------------------------------------------
 // Async dispatch mode (plan 0009 X2, risk R6).
 //

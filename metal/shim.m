@@ -14,6 +14,27 @@
 static int g_async = 0;
 static id<MTLCommandBuffer> g_lastCmdBuf = nil; // strong ref under ARC
 
+// g_maybeInFlight is 1 whenever GPU work may be outstanding. It is
+// raised by metal_begin_work() BEFORE any command buffer is created or
+// committed, and lowered only where the queue is provably drained
+// (after waitUntilCompleted in sync mode, or in metal_sync_queue).
+//
+// It exists so metal_release_buffer's page purge can never race a
+// commit: g_lastCmdBuf alone is assigned AFTER [cmdBuf commit], so
+// there is a window in which work is in flight but the pointer is
+// still nil. Nothing may be purged in that window.
+//
+// Atomic because it is written by the goroutine driving training and
+// read by whichever thread runs a Buffer finalizer. Only one direction
+// of a stale read is dangerous — seeing 0 while work is in flight
+// would allow an unsafe purge — so this is sequentially consistent
+// rather than relaxed.
+static _Atomic int g_maybeInFlight = 0;
+
+// metal_begin_work marks the start of an encode+commit sequence. Every
+// entry point that builds a command buffer must call it first.
+static inline void metal_begin_work(void) { g_maybeInFlight = 1; }
+
 // metal_finish: called after [cmdBuf commit] by every dispatch entry
 // point. Sync mode blocks; async mode records the buffer so
 // metal_sync_queue can block later. Command buffers on one queue
@@ -23,6 +44,7 @@ static inline void metal_finish(id<MTLCommandBuffer> cmdBuf) {
         g_lastCmdBuf = cmdBuf;
     } else {
         [cmdBuf waitUntilCompleted];
+        g_maybeInFlight = 0; // queue drained: this buffer was the only work
     }
 }
 
@@ -31,6 +53,7 @@ void metal_sync_queue(void) {
         [g_lastCmdBuf waitUntilCompleted];
         g_lastCmdBuf = nil;
     }
+    g_maybeInFlight = 0;
 }
 
 void metal_set_async(int on) {
@@ -73,10 +96,79 @@ uint64_t metal_buffer_length(MTLBufferRef buf) {
     return [(__bridge id<MTLBuffer>)buf length];
 }
 
+static int g_purgeOnRelease = 1;
+// Atomic: finalizers releasing buffers can run on any thread.
+static _Atomic uint64_t g_purgedReleases = 0;
+static _Atomic uint64_t g_unpurgedReleases = 0;
+
+void metal_set_purge_on_release(int on) { g_purgeOnRelease = on; }
+
+uint64_t metal_purged_releases(void) { return g_purgedReleases; }
+uint64_t metal_unpurged_releases(void) { return g_unpurgedReleases; }
+
+// metal_release_buffer destroys a buffer, first discarding its
+// physical pages when that is provably safe.
+//
+// WHY THE PURGE (2026-08-13 measurement). Releasing an
+// MTLResourceStorageModeShared buffer does NOT return the physical
+// pages the CPU has faulted in through the buffer's `contents`
+// mapping, and the driver does not recycle them for later allocations
+// of the same size. Pages only ever touched by the GPU come back.
+//
+// Measured over 200 iterations of allocate-4MB / fill / release, all
+// variants matched on size, pages touched (all), byte pattern (a
+// non-compressible integer hash, bit-identical whichever side produced
+// it), alignment, sync, and release timing; every iteration verified
+// by a GPU-side checksum reduction so an unmaterialized write cannot
+// masquerade as a reclaim:
+//
+//   CPU access   GPU access        end footprint (800 MB churned)
+//   ----------   ---------------   ------------------------------
+//   write        none                810 MB   (== everything churned)
+//   none         write + read         50 MB   (flat)
+//   write        read (encoded)      850 MB
+//   READ only    write + read        850 MB
+//
+// So the trigger is ANY CPU access to the mapping — a read is as bad
+// as a write — and whether the buffer was encoded into a command
+// buffer is irrelevant. Purging before release makes the CPU-touched
+// case flat (10 MB).
+//
+// gorch maps every tensor's storage into Go (FloatSlice/Uint16Slice at
+// construction) and reads and writes it from the CPU throughout, so
+// without the purge a training step's footprint equals its CUMULATIVE
+// allocation volume rather than its live set.
+//
+// WHY THE GUARD. setPurgeableState:Empty discards the contents
+// immediately, ignoring the retain count — so a command buffer that
+// has encoded this buffer and is still in flight would read garbage.
+// That failure mode is silent wrong numbers, not a crash, which makes
+// the gate more important than the purge.
+//
+// Purging is therefore allowed ONLY when the queue is drained by
+// COMPLETION, not merely by commit or end-of-encode:
+// g_maybeInFlight is raised by metal_begin_work() BEFORE any command
+// buffer is created, and lowered only after a waitUntilCompleted has
+// actually returned (sync mode) or in metal_sync_queue, which waits on
+// the last committed buffer — and a single queue completes in commit
+// order, so that one wait drains every earlier buffer too. g_lastCmdBuf
+// could not serve as the gate: it is assigned AFTER [cmdBuf commit],
+// leaving a window in which work is in flight but the pointer reads
+// nil.
+//
+// The trainer's micro-step flush is sync-then-GC, so the entire
+// release wave lands inside the purgeable window. A release that
+// arrives with work in flight simply skips the purge: still correct,
+// just not reclaimed until a later allocation reuses the region.
 void metal_release_buffer(MTLBufferRef buf) {
-    if (buf) {
-        CFRelease(buf);
+    if (!buf) return;
+    if (g_purgeOnRelease && !g_maybeInFlight) {
+        [(__bridge id<MTLBuffer>)buf setPurgeableState:MTLPurgeableStateEmpty];
+        g_purgedReleases++;
+    } else {
+        g_unpurgedReleases++;
     }
+    CFRelease(buf);
 }
 
 // ---------------------------------------------------------------------------
@@ -140,6 +232,7 @@ void metal_dispatch_1d(MTLCommandQueueRef queue,
                        MTLBufferRef* bufs, uint32_t bufCount,
                        uint32_t threadCount) {
     @autoreleasepool {
+        metal_begin_work();
         id<MTLCommandQueue> q = (__bridge id<MTLCommandQueue>)queue;
         id<MTLComputePipelineState> pso = (__bridge id<MTLComputePipelineState>)pipeline;
 
@@ -168,6 +261,7 @@ void metal_dispatch_threadgroups_1d(MTLCommandQueueRef queue,
                                     uint32_t groupCount,
                                     uint32_t groupThreads) {
     @autoreleasepool {
+        metal_begin_work();
         id<MTLCommandQueue> q = (__bridge id<MTLCommandQueue>)queue;
         id<MTLComputePipelineState> pso = (__bridge id<MTLComputePipelineState>)pipeline;
 
@@ -204,6 +298,7 @@ void metal_mps_matmul(MTLCommandQueueRef queue,
                       MTLBufferRef A, MTLBufferRef B, MTLBufferRef C,
                       uint32_t M, uint32_t N, uint32_t K) {
     @autoreleasepool {
+        metal_begin_work();
         id<MTLCommandQueue> q = (__bridge id<MTLCommandQueue>)queue;
         id<MTLDevice> dev = q.device;
 
@@ -244,6 +339,7 @@ void metal_mps_batched_matmul(MTLCommandQueueRef queue,
                               uint32_t M, uint32_t N, uint32_t K,
                               uint32_t batchSize) {
     @autoreleasepool {
+        metal_begin_work();
         id<MTLCommandQueue> q = (__bridge id<MTLCommandQueue>)queue;
         id<MTLDevice> dev = q.device;
         id<MTLCommandBuffer> cmdBuf = [q commandBuffer];
@@ -294,6 +390,7 @@ void metal_mps_batched_matmul_transB(MTLCommandQueueRef queue,
                                      uint32_t M, uint32_t N, uint32_t K,
                                      uint32_t batchSize) {
     @autoreleasepool {
+        metal_begin_work();
         id<MTLCommandQueue> q = (__bridge id<MTLCommandQueue>)queue;
         id<MTLDevice> dev = q.device;
         id<MTLCommandBuffer> cmdBuf = [q commandBuffer];
@@ -351,6 +448,7 @@ void metal_mps_batched_matmul_transA(MTLCommandQueueRef queue,
                                      uint32_t M, uint32_t N, uint32_t K,
                                      uint32_t batchSize) {
     @autoreleasepool {
+        metal_begin_work();
         id<MTLCommandQueue> q = (__bridge id<MTLCommandQueue>)queue;
         id<MTLDevice> dev = q.device;
         id<MTLCommandBuffer> cmdBuf = [q commandBuffer];
@@ -427,6 +525,19 @@ API_AVAILABLE(macos(14.0))
 @end
 
 static NSMutableDictionary* g_dtGraphCache = nil; // NSString -> GorchDTGraphEntry
+static uint64_t g_dtGraphCacheLimit = 0;          // 0 = unbounded
+
+uint64_t metal_dt_graph_cache_count(void) {
+    return g_dtGraphCache ? (uint64_t)[g_dtGraphCache count] : 0;
+}
+
+void metal_clear_dt_graph_cache(void) {
+    if (g_dtGraphCache) [g_dtGraphCache removeAllObjects];
+}
+
+void metal_set_dt_graph_cache_limit(uint64_t limit) {
+    g_dtGraphCacheLimit = limit;
+}
 
 API_AVAILABLE(macos(14.0))
 static GorchDTGraphEntry* gorch_dt_graph(uint32_t M, uint32_t N, uint32_t K,
@@ -437,6 +548,18 @@ static GorchDTGraphEntry* gorch_dt_graph(uint32_t M, uint32_t N, uint32_t K,
                      M, N, K, batch, transA, transB, aBF16, bBF16];
     GorchDTGraphEntry* e = g_dtGraphCache[key];
     if (e) return e;
+
+    // Bound the cache. Keys embed M/N/K, and M/K track the SEQUENCE
+    // LENGTH of the sample being trained — which varies per sample — so
+    // an unbounded cache grows by a fresh compiled MPSGraph per matmul
+    // site per unique sequence length, forever. Each graph retains its
+    // compiled executable and MPS workspace, neither of which is a
+    // gorch MTLBuffer, so the growth is invisible to LiveBufferBytes()
+    // and to the Go heap while being fully charged to the process's
+    // physical footprint (the 2026-08-13 cross-micro-step compounding).
+    if (g_dtGraphCacheLimit > 0 && (uint64_t)[g_dtGraphCache count] >= g_dtGraphCacheLimit) {
+        [g_dtGraphCache removeAllObjects];
+    }
 
     MPSGraph* graph = [[MPSGraph alloc] init];
     MPSDataType aType = aBF16 ? MPSDataTypeBFloat16 : MPSDataTypeFloat32;
@@ -475,6 +598,7 @@ static int gorch_dt_run(MTLCommandQueueRef queue,
     if (@available(macOS 14.0, *)) {
         @autoreleasepool {
             @try {
+                metal_begin_work();
                 id<MTLCommandQueue> q = (__bridge id<MTLCommandQueue>)queue;
                 GorchDTGraphEntry* e = gorch_dt_graph(M, N, K, batch, transA, transB, aBF16, bBF16);
 
@@ -538,6 +662,7 @@ void metal_mps_matmul_transB(MTLCommandQueueRef queue,
                              MTLBufferRef A, MTLBufferRef B, MTLBufferRef C,
                              uint32_t M, uint32_t N, uint32_t K) {
     @autoreleasepool {
+        metal_begin_work();
         id<MTLCommandQueue> q = (__bridge id<MTLCommandQueue>)queue;
         id<MTLDevice> dev = q.device;
 
@@ -579,6 +704,7 @@ void metal_mps_matmul_transA(MTLCommandQueueRef queue,
                              MTLBufferRef A, MTLBufferRef B, MTLBufferRef C,
                              uint32_t M, uint32_t N, uint32_t K) {
     @autoreleasepool {
+        metal_begin_work();
         id<MTLCommandQueue> q = (__bridge id<MTLCommandQueue>)queue;
         id<MTLDevice> dev = q.device;
 

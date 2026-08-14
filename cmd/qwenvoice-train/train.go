@@ -46,6 +46,9 @@ func loadVoiceModel(c cliConfig) (*qwen.VoiceModel, error) {
 		}
 		g.MatMulMetalThreshold = c.metalMinMM
 		g.SetMetalAsync(c.accel == "async")
+		if unsafeNoPurge {
+			metal.SetPurgeOnRelease(false)
+		}
 	}
 
 	path, err := qwen.FindCheckpoint()
@@ -158,6 +161,44 @@ func lrAt(step, warmup, total int, minFrac float64) float64 {
 // it reproduces the unbounded-retention failure described above.
 // Never set it for a real run.
 var unsafeNoFence = false
+
+// memTrace prints one memory line per accumulation micro-step.
+var memTrace = false
+
+// unsafeNoPurge disables the shared-buffer page discard performed when
+// a Metal buffer is released. DIAGNOSTIC ONLY — it reproduces the
+// footprint-grows-by-cumulative-allocation-volume behaviour that made
+// gradient accumulation unbounded. Never set it for a real run.
+var unsafeNoPurge = false
+
+// memTraceRegions additionally dumps vmmap's per-region-type breakdown
+// each micro-step — the only way to attribute footprint that neither
+// the Go heap nor gorch's MTLBuffer accounting can see.
+var memTraceRegions = false
+
+// vmmapRegions returns vmmap --summary's region-type table, which
+// attributes the physical footprint to categories (IOAccelerator,
+// MALLOC, VM_ALLOCATE, ...). Slow; diagnostic only.
+func vmmapRegions() string {
+	out, err := exec.Command("vmmap", "--summary", strconv.Itoa(os.Getpid())).Output()
+	if err != nil {
+		return "vmmap failed: " + err.Error()
+	}
+	var b strings.Builder
+	inTable := false
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.HasPrefix(line, "REGION TYPE") {
+			inTable = true
+		}
+		if inTable {
+			if strings.TrimSpace(line) == "" {
+				break
+			}
+			b.WriteString("      " + line + "\n")
+		}
+	}
+	return b.String()
+}
 
 func flushMetalGraph() {
 	if !unsafeNoFence {
@@ -347,6 +388,30 @@ func train(c cliConfig) error {
 			stepTokens += int64(len(tokens))
 			if c.accel != "off" {
 				flushMetalGraph()
+			}
+			// Per-micro-step memory trace. The three numbers together
+			// localize any retention: heapAlloc is the Go heap,
+			// metalLive is gorch's own MTLBuffer accounting, and
+			// dtGraphs counts compiled MPSGraph executables — the one
+			// consumer of footprint that neither of the first two can
+			// see (2026-08-13: footprint compounded per micro-step while
+			// both heapAlloc and metalLive sat flat).
+			if memTrace {
+				var ms runtime.MemStats
+				runtime.ReadMemStats(&ms)
+				peak, alloc, n := metal.BufferStats()
+				fmt.Printf("    micro %d/%d seq %d phys %.0f MB heap %.0f MB metalLive %.0f MB peakLive %.0f MB alloc %.0f MB (%d bufs) dtGraphs %d\n",
+					a+1, c.accum, len(tokens), currentRSSMB(),
+					float64(ms.HeapAlloc)/(1<<20),
+					float64(metal.LiveBufferBytes())/(1<<20),
+					float64(peak)/(1<<20), float64(alloc)/(1<<20), n,
+					metal.DTGraphCacheLen())
+				pg, un := metal.PurgeStats()
+				fmt.Printf("      purgedReleases %d unpurged %d\n", pg, un)
+				metal.ResetBufferStats()
+				if memTraceRegions {
+					fmt.Print(vmmapRegions())
+				}
 			}
 			// Footprint must be checked per MICRO-step, not per
 			// optimizer step: the growth happens across the accumulation
