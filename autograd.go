@@ -47,56 +47,69 @@ func (t *Tensor) Backward() {
 	NoGrad(func() {
 		// Seed gradient: dL/dL = 1, in the loss's dtype.
 		t.grad = onesLike(t)
+		backpropFrom(t)
+	})
+}
 
-		// Topological sort: collect all nodes in reverse order.
-		visited := make(map[*Tensor]bool)
-		var order []*Tensor
-		var topo func(n *Tensor)
-		topo = func(n *Tensor) {
-			if visited[n] {
-				return
-			}
-			visited[n] = true
-			if n.gradFn != nil {
-				for _, inp := range n.gradFn.inputs {
-					topo(inp)
-				}
-			}
-			order = append(order, n)
+// backpropFrom walks the graph reachable from root in reverse
+// topological order, propagating root.grad into every input that
+// requires gradients. The caller must seed root.grad and must call
+// this inside a NoGrad scope — see the post-mortem on Backward for
+// why the backward pass must not record.
+//
+// Factored out of Backward so gradient checkpointing (checkpoint.go)
+// can reuse the exact same engine on a locally recomputed subgraph:
+// two implementations of "walk the graph backward" would be two places
+// for the retention and detach invariants to drift apart.
+func backpropFrom(root *Tensor) {
+	// Topological sort: collect all nodes in reverse order.
+	visited := make(map[*Tensor]bool)
+	var order []*Tensor
+	var topo func(n *Tensor)
+	topo = func(n *Tensor) {
+		if visited[n] {
+			return
 		}
-		topo(t)
+		visited[n] = true
+		if n.gradFn != nil {
+			for _, inp := range n.gradFn.inputs {
+				topo(inp)
+			}
+		}
+		order = append(order, n)
+	}
+	topo(root)
 
-		// Walk in reverse topological order, propagating gradients.
-		for i := len(order) - 1; i >= 0; i-- {
-			n := order[i]
-			if n.gradFn == nil || n.grad == nil {
+	// Walk in reverse topological order, propagating gradients.
+	for i := len(order) - 1; i >= 0; i-- {
+		n := order[i]
+		if n.gradFn == nil || n.grad == nil {
+			continue
+		}
+
+		inputGrads := n.gradFn.backward(n.grad)
+		for j, inp := range n.gradFn.inputs {
+			if !inp.requiresGrad {
 				continue
 			}
-
-			inputGrads := n.gradFn.backward(n.grad)
-			for j, inp := range n.gradFn.inputs {
-				if !inp.requiresGrad {
-					continue
-				}
-				gr := inputGrads[j]
-				if gr == nil {
-					continue
-				}
-				// Belt and braces: even if some future backward closure
-				// re-enables tracking internally, a stored .grad must
-				// never own a graph. Detach shares storage, so this is
-				// free. Invariant: p.grad == nil || p.grad.gradFn == nil.
-				if gr.gradFn != nil {
-					gr = gr.Detach()
-				}
-				if inp.grad == nil {
-					inp.grad = gr
-				} else {
-					accumulateGrad(inp.grad, gr)
-				}
+			gr := inputGrads[j]
+			if gr == nil {
+				continue
+			}
+			// Belt and braces: even if some future backward closure
+			// re-enables tracking internally, a stored .grad must
+			// never own a graph. Detach shares storage, so this is
+			// free. Invariant: p.grad == nil || p.grad.gradFn == nil.
+			if gr.gradFn != nil {
+				gr = gr.Detach()
+			}
+			if inp.grad == nil {
+				inp.grad = gr
+			} else {
+				accumulateGrad(inp.grad, gr)
 			}
 		}
-	})
+	}
 }
 
 // onesLike returns a 1-element tensor with value 1 in t's dtype.
@@ -171,4 +184,21 @@ func NoGrad(fn func()) {
 // local opt-out that doesn't touch this state.
 func GradEnabled() bool {
 	return noGradDepth == 0
+}
+
+// enableGrad executes fn with gradient tracking forced ON, restoring
+// the enclosing NoGrad depth afterwards (including on panic).
+//
+// This is the inverse of NoGrad and exists for exactly one caller:
+// Checkpoint's recompute, which must rebuild a local graph while the
+// whole backward pass is running inside Backward's NoGrad scope. It is
+// deliberately unexported — an exported "ignore every NoGrad scope my
+// caller opened" primitive is a footgun, and it inherits every
+// process-global caveat documented on noGradDepth (a concurrent
+// goroutine's inference will build a graph for the duration).
+func enableGrad(fn func()) {
+	saved := noGradDepth
+	noGradDepth = 0
+	defer func() { noGradDepth = saved }()
+	fn()
 }

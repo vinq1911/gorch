@@ -80,6 +80,42 @@ func ResetBufferStats() {
 	totalAllocCount.Store(0)
 }
 
+// liveBufferLimit, when > 0, is a hard ceiling on live Metal bytes:
+// NewBuffer panics rather than allocating past it.
+//
+// WHY A PANIC IS THE KIND OPTION. Metal shared buffers are the bulk of
+// this process's physical footprint, and the footprint is what macOS
+// jetsam acts on. On a saturated 24 GB machine jetsam does not politely
+// kill the trainer — it takes the desktop with it (2026-08-12
+// post-mortem: three SIGKILLs, one hard reboot). The trainer's own
+// -rss-limit-mb guard cannot catch this because it samples vmmap at
+// MICRO-STEP boundaries, and the dangerous peak is transient: measured
+// at 28 layers / seq 512 / accum 1, live buffers peaked at 12.3 GB
+// mid-micro-step while the boundary sample read 1.9 GB. The peak is
+// only visible where the allocation happens.
+//
+// So: one atomic compare per buffer allocation, on a path that already
+// does a cgo call into the Metal allocator. Free, and it turns a
+// machine-killing event into a stack trace.
+var liveBufferLimit atomic.Int64
+
+// SetLiveBufferLimit sets the hard ceiling on total live Metal buffer
+// bytes; 0 (the default) disables it. See liveBufferLimit.
+func SetLiveBufferLimit(bytes int64) { liveBufferLimit.Store(bytes) }
+
+// LiveBufferLimit returns the current ceiling (0 = none).
+func LiveBufferLimit() int64 { return liveBufferLimit.Load() }
+
+// checkLiveLimit panics if live bytes have passed the ceiling.
+func checkLiveLimit(live int64) {
+	lim := liveBufferLimit.Load()
+	if lim > 0 && live > lim {
+		panic(fmt.Sprintf("metal: live buffer ceiling exceeded: %.0f MB > limit %.0f MB "+
+			"— aborting before the OS does (lower -accum / -max-seq, or enable -checkpoint-every)",
+			float64(live)/(1<<20), float64(lim)/(1<<20)))
+	}
+}
+
 // notePeak raises the high-water mark to cur if cur exceeds it.
 func notePeak(cur int64) {
 	for {
@@ -167,7 +203,9 @@ func (d *Device) NewCommandQueue() *CommandQueue {
 // becomes unreachable; call Release for deterministic freeing.
 func (d *Device) NewBuffer(sizeBytes int) *Buffer {
 	b := &Buffer{ptr: C.metal_create_shared_buffer(d.ptr, C.uint64_t(sizeBytes)), bytes: int64(sizeBytes)}
-	notePeak(liveBufferBytes.Add(b.bytes))
+	live := liveBufferBytes.Add(b.bytes)
+	notePeak(live)
+	checkLiveLimit(live)
 	totalAllocBytes.Add(b.bytes)
 	totalAllocCount.Add(1)
 	runtime.SetFinalizer(b, (*Buffer).Release)

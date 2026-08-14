@@ -232,3 +232,44 @@ The assertion calls `abort()` — it is not an `NSException`, so it cannot even 
 - **Runtime guard:** `gorch.MetalBF16MatMulSupported()` runs a once-per-process 16³ numeric probe (bf16×bf16 and f32×bf16 vs a CPU reference) before any real dispatch routes to the bf16 path; on failure (older OS, wrong numerics) every bf16 matmul silently takes the widen-to-f32 + Accelerate fallback. MPS silently producing garbage instead of erroring is a known failure mode, so support is defined by *numerics*, not by a non-error return.
 
 Tier (c) — the custom bfloat simdgroup kernel and its §4 Azure/codex protocol — is **not needed**: tier (b) closes B0 with a measured compute win, not just the memory win.
+
+## ADR-013: Activation checkpointing for the LoRA trainer
+
+**Date:** 2026-08-14
+**Status:** Accepted
+
+After the R1 fix (`d5cc131`, released Metal buffers discard their CPU-faulted pages) gradient accumulation stopped compounding, and what remained was legitimate: a single micro-step at 28 layers retains every layer's forward activations, and there is no leak to remove. Activation checkpointing is the standard trade, and it is unusually clean here because **the base model is frozen and the block path has no RNG** — no dropout, no stochastic routing, nothing to reproduce (verified by grep over `nn/gqa.go`, `nn/moe.go`, `nn/rmsnorm.go`, `nn/lora.go`, `nn/rope.go`). Unlike `torch.utils.checkpoint`, gorch's `Checkpoint` needs no RNG fork/restore.
+
+**Mechanism** (`checkpoint.go`). `Checkpoint(name, x, fn)` runs `fn` on a *detached* handle inside `NoGrad`, so the segment builds no graph and allocates no backward closures, then installs one `GradFn` whose only input is `x`. Its backward re-runs `fn` under `enableGrad` (Backward itself runs inside `NoGrad` — the recompute has to force tracking back on) on a *fresh detached leaf* `xl`, backprops the local graph with the same `backpropFrom` engine `Backward` uses, and returns `xl.grad` as `dL/dx`. LoRA A/B are leaves *inside* the recomputed subgraph, so the local backward accumulates into their real `.grad` exactly once and they are deliberately absent from the outer node's `inputs`.
+
+Three details are load-bearing and all three were review findings (`gpt-5.6-terra`, once on the design and once on the shipped code):
+
+- `xl` must be a detached handle, not `x` itself. Otherwise the local backward writes `x.grad` *and* the outer engine accumulates the returned `dx` into it — measured as a 1.5× gradient on a two-segment toy.
+- The degenerate identity closure (`fn` returns its argument) must short-circuit, or `y` and `xl` are the same tensor and the grad-restore zeroes `dx`.
+- A closure that returns a captured *leaf* produces no local graph, so restoring the root's saved gradient would discard that segment's entire contribution to the parameter. It has to be accumulated by hand.
+
+Each has a named regression test in `checkpoint_test.go`, and each test was verified to fail against a deliberately broken implementation.
+
+**The Metal half of the trade is not optional.** "Not retained" and "freed" are different things when the memory lives outside the Go heap: dropping the last reference to an MTLBuffer exerts no heap pressure, so no GC runs, so the release finalizer never fires, and live bytes track the pass's *cumulative* allocation volume whether or not a graph was retained. Checkpointing without a flush hook measured a 30% dent (peak live 7687 → 5391 MB) while *raising* the physical footprint, because the recompute nearly doubles allocation volume. `CheckpointSegmentDone` fires at both points where a segment's intermediates die — after the no-grad forward and after the recompute — and the trainer installs a `SyncMetal` + GC + settle + GC flush there. That is what turns the mechanism into memory.
+
+The settle beat matters because a buffer released while GPU work is in flight *skips its page purge* (`shim.m`'s `g_maybeInFlight` gate) and its pages are reclaimed only much later. At 28 layers / seq 1024 / accum 1: a 2 ms beat left peak footprint at 12.9 GB (ceiling abort), 10 ms brought it to 7.4 GB. Default `-checkpoint-flush-ms 10`. Corroboration: `-accel=sync`, which drains the queue after every dispatch, drives unpurged releases from 6284 to 845.
+
+**Correctness gates.** CPU f32 gradients are **bit-identical** with checkpointing on and off — worst relative error exactly 0.0 across every LoRA A/B tensor and the ext rows, at segment lengths 1–4, at 4 and 28 layers, and across three accumulated micro-steps without an intervening `ZeroGrad`. On the GPU bf16 path, 20-step runs resumed from one shared checkpoint: two identical checkpointing-OFF runs differ by max |Δloss| 5e-6, and ON-vs-OFF differs by 6e-6 — the same floor. (Comparing *fresh* runs instead measures 1.8%, but that is unseeded weight init, not the GPU path: `g.RandN` draws from `math/rand`'s global source.)
+
+**Measured, 28 layers, `-rss-limit-mb 9000`.** Peak live Metal bytes per micro-step; "abort" = hit the ceiling.
+
+| accum | max-seq | OFF peak | ON (every=1) peak | ON step time |
+| ----- | ------- | -------- | ----------------- | ------------ |
+| 1     | 512     | abort    | 3255 MB           |  8.3 s |
+| 2     | 512     | abort    | 3338 MB           | 13.5 s |
+| 1     | 1024    | abort    | 4320 MB           |  9.6 s |
+| 2     | 1024    | abort    | 4404 MB           | 15.8 s |
+| 4     | 1024    | abort    | 4404 MB           | 27.5 s |
+
+Every one of these configurations fits with checkpointing and none of them fits without it: OFF peaks at 7687 MB on a 312-token micro-step and trips the ceiling before finishing a 512-token one.
+
+Segment length at seq 1024, accum 1 (peak live / peak footprint): every=1 → 4320 / 8397 MB, every=2 → 4861 / 7885 MB, every=4 → 6010 / 10035 MB (abort), every=7 → 7756 / 14336 MB (abort). **Use 1 or 2.**
+
+**Compute cost**, full depth at max-seq 256 (the largest configuration OFF survives), 6 steps: OFF 30.3 s, every=1 55.8 s (+84%), every=2 46.3 s (+53%), every=4 41.7 s (+38%). The recompute itself is the expected ~+33%; the rest is the flush's sleeping (28 segments × 2 hooks × 2 × 10 ms ≈ 2.2 s per step at accum 2), which is why the overhead *falls* as segments get longer. Removing it needs a deterministic-release path in the Metal shim — the purge-skip gate is the real remaining cost, not the recompute.
+
+**Also added:** `metal.SetLiveBufferLimit` — a hard ceiling on live Metal bytes, checked on every buffer allocation. The trainer's `-rss-limit-mb` guard samples `vmmap` at micro-step boundaries, which cannot see the peak: measured at 28 layers / seq 512 / accum 1, live buffers peaked at 12.3 GB mid-micro-step while the boundary sample read 1.9 GB. One atomic compare per allocation turns a jetsam event that takes the desktop down into a stack trace.

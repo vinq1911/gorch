@@ -16,6 +16,12 @@ type VoiceConfig struct {
 	LoRAAlpha  float32 // α (plan default 32)
 	LoRALayers int     // adapt the TOP n layers; 0 = all layers
 	NumExt     int     // appended vocab rows; 0 = NumExtTokens (16,400)
+
+	// CheckpointEvery enables activation checkpointing over the decoder
+	// stack: 0 (default) keeps the ordinary graph-retaining forward, N ≥ 1
+	// wraps each consecutive run of N blocks in one g.Checkpoint segment.
+	// See VoiceModel.CheckpointEvery.
+	CheckpointEvery int
 }
 
 // VoiceModel is the M1 training composition: a frozen Qwen base with
@@ -25,6 +31,21 @@ type VoiceModel struct {
 	Base  *Model
 	Embed *nn.ExtendedEmbedding
 	Cfg   VoiceConfig
+
+	// CheckpointEvery is the activation-checkpointing segment length in
+	// decoder blocks: 0 = off (retain every layer's activations), N ≥ 1 =
+	// run each group of N consecutive blocks under g.Checkpoint, keeping
+	// only the group's input and recomputing its forward during backward.
+	//
+	// 1 is the memory-minimal setting and the one to want: the extra
+	// forward cost is identical for every N (each block is recomputed
+	// exactly once), but peak activation memory is one segment's worth,
+	// so a larger N buys nothing except fewer GradFn nodes. Larger values
+	// exist to bound the recompute-flush overhead, which IS per-segment.
+	//
+	// Only ForwardHidden (the training path) honours it; the KV-cached
+	// decode path runs under NoGrad and has no graph to trade away.
+	CheckpointEvery int
 
 	adapters     []*nn.LoRALinear
 	adapterNames []string
@@ -52,9 +73,10 @@ func NewVoiceModel(m *Model, vc VoiceConfig) *VoiceModel {
 	}
 
 	vm := &VoiceModel{
-		Base:  m,
-		Embed: nn.NewExtendedEmbedding(m.Embed.Weight, vc.NumExt),
-		Cfg:   vc,
+		Base:            m,
+		Embed:           nn.NewExtendedEmbedding(m.Embed.Weight, vc.NumExt),
+		Cfg:             vc,
+		CheckpointEvery: vc.CheckpointEvery,
 	}
 
 	add := func(name string, l *nn.LoRALinear) *nn.LoRALinear {
@@ -80,13 +102,41 @@ func NewVoiceModel(m *Model, vc VoiceConfig) *VoiceModel {
 // ForwardHidden runs embeddings → blocks → final norm with autograd
 // active, returning the (seq, hidden) hidden states. Token ids may
 // span the extended vocabulary.
+//
+// With CheckpointEvery > 0 the decoder stack runs under activation
+// checkpointing (see g.Checkpoint): each group of CheckpointEvery
+// consecutive blocks retains only its input tensor and rebuilds its
+// graph during backward. The embedding lookup and the final norm are
+// deliberately left outside — the lookup's "graph" is one scatter-add
+// closure over the Ext rows and the norm is a single op, so
+// checkpointing either would buy nothing and cost a recompute.
 func (vm *VoiceModel) ForwardHidden(tokens []int) *g.Tensor {
 	if len(tokens) == 0 {
 		panic("qwen: empty token slice")
 	}
 	h := vm.Embed.Forward(tokens)
-	for _, blk := range vm.Base.Blocks {
-		h = blk.Forward(h, 0)
+	blocks := vm.Base.Blocks
+	seg := vm.CheckpointEvery
+	if seg <= 0 || !g.GradEnabled() {
+		for _, blk := range blocks {
+			h = blk.Forward(h, 0)
+		}
+		return vm.Base.Norm.Forward(h)
+	}
+	for lo := 0; lo < len(blocks); lo += seg {
+		hi := lo + seg
+		if hi > len(blocks) {
+			hi = len(blocks)
+		}
+		group := blocks[lo:hi]
+		// The closure captures only `group` (frozen base weights + LoRA
+		// leaves) and its argument — the Checkpoint purity contract.
+		h = g.Checkpoint("qwen.blocks", h, func(in *g.Tensor) *g.Tensor {
+			for _, blk := range group {
+				in = blk.Forward(in, 0)
+			}
+			return in
+		})
 	}
 	return vm.Base.Norm.Forward(h)
 }

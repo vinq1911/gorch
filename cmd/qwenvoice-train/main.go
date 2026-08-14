@@ -52,6 +52,8 @@ type cliConfig struct {
 	accel      string
 	metalMinMM int
 	rssLimitMB int
+	ckptEvery  int
+	ckptFlush  bool
 }
 
 func main() {
@@ -89,6 +91,9 @@ func main() {
 	flag.BoolVar(&unsafeNoFence, "unsafe-no-fence", false, "DIAGNOSTIC ONLY: disable the micro-step GPU fence. Reproduces unbounded MTLBuffer retention (57+ GB). Never use for a real run")
 	flag.IntVar(&c.rssLimitMB, "rss-limit-mb", 12000, "abort if PHYSICAL FOOTPRINT exceeds this, in MB (0 = no limit). Footprint, not RSS: Metal memory is invisible to RSS (measured 781 MB RSS vs 12.7 GB footprint), so an RSS ceiling cannot protect the machine")
 	flag.IntVar(&c.metalMinMM, "metal-min-matmul", 8_000_000, "MatMulMetalThreshold (FMA count) used when -accel is on; keeps short-sequence and LoRA matmuls on the resident GPU path")
+	flag.IntVar(&c.ckptEvery, "checkpoint-every", 0, "activation checkpointing: 0 = off, N = recompute each group of N decoder blocks during backward instead of retaining their activations. 1 is memory-minimal (the recompute cost is the same for every N). Trades ~1 extra forward per step for the bulk of the activation footprint")
+	flag.IntVar(&segmentFlushMS, "checkpoint-flush-ms", segmentFlushMS, "with -checkpoint-flush, milliseconds to let the runtime's finalizer goroutine drain a segment's Metal buffers, once after each of the flush's two GCs. A buffer released while GPU work is in flight skips its page purge and its pages are only reclaimed much later, so this beat is what converts checkpointing's live-memory saving into a footprint saving (measured: 2 ms → 12.9 GB, 10 ms → 7.4 GB at seq 1024)")
+	flag.BoolVar(&c.ckptFlush, "checkpoint-flush", true, "with -checkpoint-every, fence+GC after each recomputed segment's backward. Metal buffers live outside the Go heap, so without this the freed segments never get collected during the backward pass and the footprint win disappears")
 	flag.Parse()
 
 	var err error

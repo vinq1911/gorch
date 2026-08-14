@@ -49,6 +49,21 @@ func loadVoiceModel(c cliConfig) (*qwen.VoiceModel, error) {
 		if unsafeNoPurge {
 			metal.SetPurgeOnRelease(false)
 		}
+		// Enforce the footprint ceiling CONTINUOUSLY, not just at
+		// micro-step boundaries. The boundary check below runs vmmap after
+		// the flush, by which point the dangerous peak is already gone:
+		// measured at 28 layers / seq 512 / accum 1, live Metal buffers
+		// peaked at 12.3 GB mid-micro-step while the boundary sample read
+		// 1.9 GB. Metal buffers are the bulk of the footprint, so a
+		// per-allocation ceiling on them is what actually stands between a
+		// too-large (accum, seq) and a jetsam event that takes the desktop
+		// down with it.
+		//
+		// Headroom: the ceiling covers Metal only, so leave room for the
+		// Go heap and the loaded weights that are already counted in it.
+		if c.rssLimitMB > 0 {
+			metal.SetLiveBufferLimit(int64(c.rssLimitMB) << 20)
+		}
 	}
 
 	path, err := qwen.FindCheckpoint()
@@ -71,10 +86,20 @@ func loadVoiceModel(c cliConfig) (*qwen.VoiceModel, error) {
 		return nil, err
 	}
 	vm := qwen.NewVoiceModel(m, qwen.VoiceConfig{
-		LoRARank:   c.loraR,
-		LoRAAlpha:  float32(c.loraAlpha),
-		LoRALayers: c.loraLayers,
+		LoRARank:        c.loraR,
+		LoRAAlpha:       float32(c.loraAlpha),
+		LoRALayers:      c.loraLayers,
+		CheckpointEvery: c.ckptEvery,
 	})
+	if c.ckptEvery > 0 && c.ckptFlush {
+		// Bound peak footprint DURING the backward pass, not just across
+		// micro-steps. A recomputed segment's Metal buffers are freed by
+		// finalizers, which need a GC; those buffers exert no Go-heap
+		// pressure, so nothing triggers one. Without this hook the 28
+		// segments' recompute graphs pile up inside a single backward and
+		// checkpointing saves nothing.
+		g.CheckpointSegmentDone = segmentFlush
+	}
 	if accel {
 		vm.ToMetal(g.MetalDev())
 		// Drop the load-time transients (the pre-load random f32 init,
@@ -209,6 +234,51 @@ func flushMetalGraph() {
 	runtime.GC()
 }
 
+// segmentFlushSleep is the settle beat between the two GCs of
+// segmentFlush. Shorter than flushMetalGraph's 10 ms because this runs
+// once per checkpoint SEGMENT (28 times per micro-step at
+// -checkpoint-every 1, where 10 ms would be 0.3 s of pure sleeping).
+// segmentFlushMS exposes that beat as a flag (-checkpoint-flush-ms):
+// the right value is a property of how fast the runtime's finalizer
+// goroutine drains a segment's buffers, which is worth being able to
+// measure rather than guess. Measured at 28 layers, seq 1024, accum 1,
+// checkpoint-every 1 — peak physical footprint over the micro-step:
+//
+//	beat   footprint   step
+//	 2 ms    12.9 GB    ceiling abort
+//	10 ms     7.4 GB    10.1 s
+//
+// 10 ms it is. The step-time cost of the extra sleeping is ~6%.
+var segmentFlushMS = 10
+
+// segmentFlush is flushMetalGraph's per-segment sibling, installed as
+// g.CheckpointSegmentDone. It runs after each recomputed segment's
+// backward, and it is what makes checkpointing actually save anything:
+// the recompute allocates a full block's activations 28 times per
+// micro-step, and unless each one is genuinely freed before the next
+// begins, live Metal bytes climb exactly as they did without
+// checkpointing.
+//
+// THE SECOND GC IS NOT OPTIONAL (measured). MTLBuffer release runs from
+// a GC FINALIZER, and finalizers are queued by a GC but executed
+// asynchronously on the runtime's finalizer goroutine. One bare
+// runtime.GC() therefore returns before a single buffer has actually
+// been released: at 28 layers / seq 312 that left the peak at 5391 MB
+// (vs 7687 MB uncheckpointed) — a third of the expected saving —
+// because release lagged allocation all the way down the stack. GC,
+// yield long enough for the finalizer goroutine to drain, GC again.
+// Same lesson as flushMetalGraph's 10 ms beat, one scope smaller.
+func segmentFlush() {
+	if !unsafeNoFence {
+		g.SyncMetal() // retire command buffers → drop their MTLBuffer refs
+	}
+	beat := time.Duration(segmentFlushMS) * time.Millisecond
+	runtime.GC()
+	time.Sleep(beat)
+	runtime.GC()
+	time.Sleep(beat)
+}
+
 // rssMB is the process PEAK resident size. Useful as a high-water
 // report, but NOT as a guard input: it can only rise, so a large load
 // transient would trip a steady-state ceiling forever after (and it
@@ -293,8 +363,12 @@ func train(c cliConfig) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("model loaded in %.1fs (layers=%d lora-r=%d lora-layers=%d dw-skip=%v accel=%s)\n",
-		time.Since(t0).Seconds(), vm.Base.Cfg.NumLayers, c.loraR, c.loraLayers, c.dwSkip, c.accel)
+	ckpt := "off"
+	if c.ckptEvery > 0 {
+		ckpt = fmt.Sprintf("every %d (flush=%v)", c.ckptEvery, c.ckptFlush)
+	}
+	fmt.Printf("model loaded in %.1fs (layers=%d lora-r=%d lora-layers=%d dw-skip=%v accel=%s checkpoint=%s)\n",
+		time.Since(t0).Seconds(), vm.Base.Cfg.NumLayers, c.loraR, c.loraLayers, c.dwSkip, c.accel, ckpt)
 
 	ds, ratios, err := loadDataset(c)
 	if err != nil {
