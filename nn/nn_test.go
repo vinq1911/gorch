@@ -65,6 +65,18 @@ func TestSequentialParameters(t *testing.T) {
 	}
 }
 
+// predictionsGood reports whether every XOR output is within the
+// tolerance the test asserts.
+func predictionsGood(model *Sequential, inputs *g.Tensor) bool {
+	p := model.Forward(inputs).Data()
+	for i, target := range []float32{0, 1, 1, 0} {
+		if math.Abs(float64(p[i]-target)) > 0.15 {
+			return false
+		}
+	}
+	return true
+}
+
 // TestTrainXOR trains a small network to learn XOR — the "hello world" of neural nets.
 // XOR with ReLU+MSE has a genuine local minimum at loss 0.125 (one sample
 // wrong), so an unlucky random init can stall there. Weight init draws from
@@ -104,17 +116,25 @@ func TestTrainXOR(t *testing.T) {
 			finalLoss = loss.Data()[0]
 		}
 
-		if finalLoss <= 0.05 {
+		// Accept only if BOTH gates pass. Gating the retry on loss
+		// alone was an incomplete fix: a run can land at loss 0.0275
+		// (under the 0.05 bar) while one prediction is still 0.19 off,
+		// which the per-prediction check below then fails with no
+		// retry left to save it. The retry must test what the test
+		// asserts.
+		if finalLoss <= 0.05 && predictionsGood(model, inputs) {
 			break
 		}
-		t.Logf("attempt %d stalled at loss %f, retrying from fresh init", attempt, finalLoss)
+		t.Logf("attempt %d stalled (loss %f, predictions ok=%v), retrying from fresh init",
+			attempt, finalLoss, predictionsGood(model, inputs))
 	}
 
 	if finalLoss > 0.05 {
 		t.Fatalf("XOR training failed after %d inits: final loss = %f (want < 0.05)", maxAttempts, finalLoss)
 	}
 
-	// Verify predictions
+	// Verify predictions (the retry loop above already required this,
+	// so a failure here means every attempt fell short).
 	pred := model.Forward(inputs)
 	pData := pred.Data()
 	xorTargets := []float32{0, 1, 1, 0}
