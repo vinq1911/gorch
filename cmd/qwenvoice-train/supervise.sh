@@ -121,8 +121,13 @@ while :; do
         die "restart cap reached ($restarts) at step $step — investigate before continuing"
     fi
 
-    log "launch #$((restarts + 1)) from step $step"
-    "$BIN" -data "$DATA" -out "$RUN_DIR" -steps "$TARGET_STEPS" -resume auto \
+    launch_target=$TARGET_STEPS
+    if [ "$CHUNK_STEPS" -gt 0 ]; then
+        launch_target=$(( step + CHUNK_STEPS ))
+        [ "$launch_target" -gt "$TARGET_STEPS" ] && launch_target=$TARGET_STEPS
+    fi
+    log "launch #$((restarts + 1)) from step $step, this process targets $launch_target / $TARGET_STEPS"
+    "$BIN" -data "$DATA" -out "$RUN_DIR" -steps "$launch_target" -resume auto \
         -rss-limit-mb "$RSS_CEILING_MB" "$@" >> "$RUN_DIR/trainer.log" 2>&1 &
     TRAINER_PID=$!
     watchdog "$TRAINER_PID" &
@@ -155,6 +160,10 @@ Not relaunching: a config that OOMs will OOM again."
         die "no forward progress (step stayed at $step) — refusing to spin"
     fi
 
+    if [ "$rc" -eq 0 ] && [ "$new_step" -gt "$step" ]; then
+        log "chunk complete at step $new_step — relaunching with a fresh VM region map"
+        continue          # planned boundary: no backoff, no restart budget
+    fi
     restarts=$((restarts + 1))
     backoff=$((10 * restarts))
     log "backoff ${backoff}s before restart $((restarts + 1))"
