@@ -273,3 +273,41 @@ Segment length at seq 1024, accum 1 (peak live / peak footprint): every=1 → 43
 **Compute cost**, full depth at max-seq 256 (the largest configuration OFF survives), 6 steps: OFF 30.3 s, every=1 55.8 s (+84%), every=2 46.3 s (+53%), every=4 41.7 s (+38%). The recompute itself is the expected ~+33%; the rest is the flush's sleeping (28 segments × 2 hooks × 2 × 10 ms ≈ 2.2 s per step at accum 2), which is why the overhead *falls* as segments get longer. Removing it needs a deterministic-release path in the Metal shim — the purge-skip gate is the real remaining cost, not the recompute.
 
 **Also added:** `metal.SetLiveBufferLimit` — a hard ceiling on live Metal bytes, checked on every buffer allocation. The trainer's `-rss-limit-mb` guard samples `vmmap` at micro-step boundaries, which cannot see the peak: measured at 28 layers / seq 512 / accum 1, live buffers peaked at 12.3 GB mid-micro-step while the boundary sample read 1.9 GB. One atomic compare per allocation turns a jetsam event that takes the desktop down into a stack trace.
+
+## ADR-014: The VM region growth is stranded IOAccelerator map entries, not the page purge
+
+**Date:** 2026-08-17
+**Status:** Accepted
+
+R3a observed the trainer's VM map growing ~9000 regions per optimizer step — 2302 at startup to 132672 fifteen steps in, linear, no plateau — while the physical footprint, `metal.LiveBufferBytes` and the Go heap all stayed flat. The growth tracked the ~10000 buffer allocations a micro-step makes, not the bytes it holds. `e3965f4` capped a trainer process at `CHUNK_STEPS` steps as a holding action against "an untested kernel limit". This ADR replaces the guess with measurements (`metal/vmregion_growth_test.go`, `metal.VMRegionSnapshot`).
+
+**It is not the purge, and it is not the deferred-release list.** Both were the prime suspects and both are innocent. Churning fixed 64 KB buffers, the slope is *1.004 regions per allocation with the purge on and 1.004 with it off* — identical to three decimal places. Toggling `SetPurgeOnRelease` changes nothing.
+
+**It is the CPU touch**, and it is the same driver behaviour the 2026-08-13 reclaim bug exposed, seen from the other side:
+
+> A shared `MTLBuffer` whose `contents` mapping the CPU has touched leaves its IOAccelerator VM map entry behind when it is released. Never-touched buffers give theirs back — 0.000 regions per allocation, flat over any number of rounds.
+
+`setPurgeableState:Empty` returns the buffer's physical **pages** — that is what `d5cc131` fixed and the footprint measurements confirm it still works — but it does not return the map **entry**. The purge fixed the visible half of this behaviour and left the invisible half. That is exactly why the footprint looked innocent while the map grew.
+
+Attribution is unambiguous: at 1M regions `vmmap` reports 1,000,002 `IOAccelerator (graphics)` regions out of 1,006,123 total, with every `MALLOC*` bucket flat at ~200. Nothing else moves. Releasing every buffer does not give the entries back either — after draining to `live=0 MB` the count stays where it was.
+
+**The threshold is sharp and sits at 16 KB.** At or above it the driver hands each buffer its own mapping and each release strands one entry, whatever the size (16 K, 20 K, 32 K, 64 K, 1 M all measure 1.004/alloc). Below it buffers are suballocated out of driver arenas and the leak becomes proportional to *bytes churned* rather than to allocation count — 1 KB→0.012, 2 KB→0.019, 4 KB→0.035, 8 KB→0.067, 12 KB→0.104 per allocation, i.e. one stranded entry per ~115 KB throughout. Small buffers are cheaper, not free. On the log-uniform [256 B, 4 MB] distribution a micro-step actually produces, the composite is 0.586/alloc — matching the 0.571 fraction of that distribution at or above 16 KB.
+
+**What it costs.** Nothing about it is free even though `phys_footprint` is flat.
+
+| region count | alloc p50 | alloc p99 | release p50 | `vmmap --summary` | teardown |
+| ------------ | --------- | --------- | ----------- | ----------------- | -------- |
+| 50 k         |  4.0 µs   | 27.6 µs   | 4.3 µs      | —                 | —        |
+| 100 k        |  5.3 µs   | 25.2 µs   | 4.5 µs      | —                 |  71 ms   |
+| 500 k        | 16.8 µs   | 43.5 µs   | 5.4 µs      | —                 | 434 ms   |
+| 1 M          | 26.1 µs   | 78.0 µs   | 6.2 µs      | 28.2 s            | 964 ms   |
+
+`newBufferWithLength:` degrades **linearly** with map size — 6.5× from 50 k to 1 M — while release stays flat, so the cost is in the allocation path, not teardown. Process teardown, the one failure mode that would have been operationally nasty, is *not* a problem: ~1 µs per region, linear, under a second at 1 M.
+
+**Kernel memory is the real ceiling.** `zprint` gives the `VM.map.entries` zone an element size of **64 bytes**, and the zone's in-use count rises by **2.03 entries per leaked region** (502,261 regions → +1,020,639 entries; 1,004,307 → +2,011,798; idle drift 1479/min, negligible). So each stranded buffer costs ~128 bytes of **wired kernel memory**, which is *not* charged to the task's `phys_footprint` — precisely why the footprint guard could not see this. There is no macOS analogue of Linux's `vm.max_map_count`: no per-task entry cap exists, `RLIMIT_AS` is unlimited, and the failure mode is kernel zone growth plus allocator slowdown rather than a clean error.
+
+Extrapolated: an unchunked 4600-step run reaches ~41 M regions → ~83 M kernel entries → **~5.3 GB of wired kernel memory** on a 24 GB machine, with `newBufferWithLength:` an order of magnitude slower. That is a real ceiling, and `e3965f4`'s chunking was the right instinct — but a 250-step chunk still reaches ~2.25 M regions, ~288 MB wired, and ~13× allocation latency before it recycles. Chunking bounds the damage; it does not remove it.
+
+**The fix is R1b — a size-classed buffer reuse cache — and the classes must be coarse.** Recycling through a free list eliminates the growth outright, because a buffer that is never released never strands anything: power-of-two classes measure **0.003 regions per allocation** against 0.586 for the same workload uncached, with a bounded pool (15 classes, 176 buffers, 257 MB). But caching by *exact size* on the real mixed distribution is a trap that looks like a fix and is not: it produces thousands of single-use classes that never hit, leaves the slope untouched at 0.570/alloc, and balloons live bytes to 5 GB in 12 k allocations instead. `TestVMRegionReuseCacheStopsTheGrowth` pins all three arms so the classing cannot be "simplified" away.
+
+**Also added:** `metal.VMRegionSnapshot` — an in-process `mach_vm_region_recurse` walk returning the leaf entry count and a per-VM-tag histogram. It exists because `vmmap` forks and takes 28 s at 1 M regions, which is what made the old footprint guard pathological; the walk is O(entries) mach traps (~4 µs/entry) and must stay off any per-step path.
