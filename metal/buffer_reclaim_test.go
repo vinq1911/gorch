@@ -27,9 +27,21 @@ import "testing"
 //  4. buffers still holding live data are unaffected (numerics)
 //
 // These are exact counter assertions, not memory-growth measurements:
-// the counters are incremented on the two branches of the gate itself,
-// so they observe the decision directly rather than inferring it from
-// a footprint sample.
+// the counters are incremented on the branches of the gate itself, so
+// they observe the decision directly rather than inferring it from a
+// footprint sample.
+//
+// 2026-08-17 follow-up. Skipping the purge is safe but lossy, and the
+// loss is not noise: over 8 optimizer steps at the Stage-A geometry the
+// process footprint grew 3379 MB while 3316 MB of releases had
+// abandoned their pages (1.02x), step for step — a step that abandoned
+// 2672 MB grew the footprint 2560 MB, and steps that abandoned nothing
+// did not grow at all. So an in-flight release now DEFERS rather than
+// abandons: the buffer keeps its retain, waits on a pending list, and
+// is purged at the next drained window. That adds two invariants:
+//
+//  5. a deferred buffer must not be purged before the queue drains
+//  6. it must not be forgotten either — the list must always drain
 
 const reclaimKernel = `
 #include <metal_stdlib>
@@ -72,6 +84,9 @@ func reclaimFixture(t *testing.T) (*Device, *CommandQueue, *Pipeline) {
 // while the GPU may still be reading must leave the pages alone. If
 // this regresses, training does not crash: it silently computes on
 // discarded memory.
+//
+// It must also not ABANDON them (that was the footprint ramp), so the
+// release is expected to land on the deferred list instead.
 func TestReleaseWithWorkInFlightDoesNotPurge(t *testing.T) {
 	dev, queue, pipe := reclaimFixture(t)
 	SetPurgeOnRelease(true)
@@ -87,9 +102,10 @@ func TestReleaseWithWorkInFlightDoesNotPurge(t *testing.T) {
 	queue.Dispatch1D(pipe, []*Buffer{in, out}, n)
 
 	victim := dev.NewBuffer(n * 4)
-	beforeP, beforeU := PurgeStats()
+	beforeP, beforeD, beforeU := PurgeStats()
+	beforePending := PendingReleaseBytes()
 	victim.Release()
-	afterP, afterU := PurgeStats()
+	afterP, afterD, afterU := PurgeStats()
 
 	if afterP != beforeP {
 		t.Errorf("release purged %d buffer(s) while GPU work was in flight — "+
@@ -97,10 +113,99 @@ func TestReleaseWithWorkInFlightDoesNotPurge(t *testing.T) {
 			"this corrupts results silently rather than crashing",
 			afterP-beforeP)
 	}
-	if afterU != beforeU+1 {
-		t.Errorf("unpurged-release count went %d -> %d, want +1 — the gate did not "+
+	if afterD != beforeD+1 {
+		t.Errorf("deferred-release count went %d -> %d, want +1 — the gate did not "+
 			"take the in-flight branch, so this test is not observing what it claims",
-			beforeU, afterU)
+			beforeD, afterD)
+	}
+	if afterU != beforeU {
+		t.Errorf("release abandoned %d buffer(s)' pages instead of deferring them — "+
+			"that is the per-optimizer-step footprint ramp coming back",
+			afterU-beforeU)
+	}
+	if got := PendingReleaseBytes() - beforePending; got != n*4 {
+		t.Errorf("pending bytes grew by %d, want %d — the deferred buffer's "+
+			"allocation is still live and must be counted against the memory "+
+			"ceiling until it is actually destroyed", got, n*4)
+	}
+}
+
+// TestDeferredReleaseIsPurgedOnSync is invariant 5+6 together: the
+// deferral must be a delay, not a hiding place. If the pending list can
+// outlive a drain, the fix converts a leak of a buffer's PAGES into a
+// leak of its whole ALLOCATION — strictly worse than the bug.
+func TestDeferredReleaseIsPurgedOnSync(t *testing.T) {
+	dev, queue, pipe := reclaimFixture(t)
+	SetPurgeOnRelease(true)
+	SetAsync(true)
+
+	const n = 4096
+	in, out := dev.NewBuffer(n*4), dev.NewBuffer(n*4)
+	defer in.Release()
+	defer out.Release()
+
+	queue.Dispatch1D(pipe, []*Buffer{in, out}, n)
+
+	beforeP, _, _ := PurgeStats()
+	victim := dev.NewBuffer(n * 4)
+	victim.Release() // in flight → deferred
+	if PendingReleaseBytes() == 0 {
+		t.Fatal("nothing was deferred — the test is not exercising the drain")
+	}
+
+	SyncQueue()
+
+	if got := PendingReleaseBytes(); got != 0 {
+		t.Errorf("%d bytes still pending after SyncQueue — a drained queue must "+
+			"empty the deferred list, or released allocations accumulate forever", got)
+	}
+	if afterP, _, _ := PurgeStats(); afterP != beforeP+1 {
+		t.Errorf("purged-release count went %d -> %d across the drain, want +1 — "+
+			"the deferred buffer's pages were never discarded", beforeP, afterP)
+	}
+}
+
+// TestSyncModeDrainsDeferredReleases pins the drain point that is easy
+// to forget: with async off, metal_sync_queue is essentially never
+// called, so the synchronous dispatch path itself has to drain. A
+// release landing between two synchronous dispatches (as a finalizer
+// on another thread does) would otherwise sit on the list for the life
+// of the process.
+func TestSyncModeDrainsDeferredReleases(t *testing.T) {
+	dev, queue, pipe := reclaimFixture(t)
+	SetPurgeOnRelease(true)
+	SetAsync(false)
+
+	const n = 4096
+	in, out := dev.NewBuffer(n*4), dev.NewBuffer(n*4)
+	defer in.Release()
+	defer out.Release()
+
+	// Release from another goroutine while dispatches run, the way a
+	// finalizer does; some of them will land mid-flight.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 64; i++ {
+			b := dev.NewBuffer(n * 4)
+			s := b.FloatSlice()
+			for j := range s {
+				s[j] = float32(j)
+			}
+			b.Release()
+		}
+	}()
+	for i := 0; i < 64; i++ {
+		queue.Dispatch1D(pipe, []*Buffer{in, out}, n)
+	}
+	<-done
+	// One more dispatch: it ends in waitUntilCompleted, which is the
+	// sync-mode drain point.
+	queue.Dispatch1D(pipe, []*Buffer{in, out}, n)
+
+	if got := PendingReleaseBytes(); got != 0 {
+		t.Errorf("%d bytes still pending after a synchronous dispatch — sync mode "+
+			"has no other drain point, so these allocations are leaked outright", got)
 	}
 }
 
@@ -128,9 +233,9 @@ func TestReleaseAfterSyncPurges(t *testing.T) {
 		s[i] = 1
 	}
 
-	beforeP, beforeU := PurgeStats()
+	beforeP, beforeD, _ := PurgeStats()
 	victim.Release()
-	afterP, afterU := PurgeStats()
+	afterP, afterD, _ := PurgeStats()
 
 	if afterP != beforeP+1 {
 		t.Errorf("purged-release count went %d -> %d, want +1 — a release with the "+
@@ -138,9 +243,9 @@ func TestReleaseAfterSyncPurges(t *testing.T) {
 			"is never reclaimed and the footprint grows without bound",
 			beforeP, afterP)
 	}
-	if afterU != beforeU {
+	if afterD != beforeD {
 		t.Errorf("release took the in-flight branch %d time(s) after SyncQueue — "+
-			"the drain is not clearing the in-flight flag", afterU-beforeU)
+			"the drain is not clearing the in-flight flag", afterD-beforeD)
 	}
 }
 
@@ -153,9 +258,9 @@ func TestPurgeOnByDefault(t *testing.T) {
 
 	// Do not call SetPurgeOnRelease first — observe the default.
 	b := dev.NewBuffer(4096)
-	beforeP, _ := PurgeStats()
+	beforeP, _, _ := PurgeStats()
 	b.Release()
-	afterP, _ := PurgeStats()
+	afterP, _, _ := PurgeStats()
 
 	if afterP == beforeP {
 		t.Error("a release with the queue drained did not purge — page discard is " +
@@ -207,6 +312,78 @@ func TestPurgeDoesNotDisturbLiveBuffers(t *testing.T) {
 		if src[i] != float32(i) {
 			t.Fatalf("keepIn[%d] = %v, want %v — a live buffer's CPU-written contents "+
 				"were discarded", i, src[i], float32(i))
+		}
+	}
+}
+
+// TestConcurrentReleaseDuringDispatch is the race the deferred list
+// exists to survive: the Go runtime's finalizer goroutine calls
+// Release on one thread while the training goroutine dispatches and
+// fences on another. The window that matters is a releaser deciding
+// "defer" against an in-flight reading, then enqueuing AFTER the fence
+// that was meant to collect it — the buffer would be stranded on the
+// list forever, holding its whole allocation. Run under -race.
+//
+// It also re-checks numerics under that concurrency: the live buffers
+// must come through untouched by any neighbouring purge.
+func TestConcurrentReleaseDuringDispatch(t *testing.T) {
+	dev, queue, pipe := reclaimFixture(t)
+	SetPurgeOnRelease(true)
+	SetAsync(true)
+
+	const n = 4096
+	keepIn, keepOut := dev.NewBuffer(n*4), dev.NewBuffer(n*4)
+	defer keepIn.Release()
+	defer keepOut.Release()
+	src := keepIn.FloatSlice()
+	for i := range src {
+		src[i] = float32(i)
+	}
+
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			b := dev.NewBuffer(n * 4)
+			s := b.FloatSlice()
+			for j := range s {
+				s[j] = -1
+			}
+			b.Release()
+		}
+	}()
+
+	for i := 0; i < 200; i++ {
+		queue.Dispatch1D(pipe, []*Buffer{keepIn, keepOut}, n)
+		if i%8 == 0 {
+			SyncQueue()
+		}
+	}
+	close(stop)
+	<-done
+	SyncQueue()
+
+	if got := PendingReleaseBytes(); got != 0 {
+		t.Errorf("%d bytes stranded on the deferred list after the final drain — "+
+			"a releaser enqueued behind the drain that should have collected it, "+
+			"which leaks whole allocations rather than merely their pages", got)
+	}
+	if _, _, unpurged := PurgeStats(); unpurged != 0 {
+		t.Logf("note: %d releases abandoned their pages (expected 0 unless the "+
+			"pending list failed to grow)", unpurged)
+	}
+
+	got := keepOut.FloatSlice()
+	for i := 0; i < n; i++ {
+		if want := float32(i) * 2; got[i] != want {
+			t.Fatalf("keepOut[%d] = %v, want %v — a concurrent purge corrupted "+
+				"memory that was still live", i, got[i], want)
 		}
 	}
 }

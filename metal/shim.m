@@ -4,6 +4,8 @@
 #import <MetalPerformanceShaders/MetalPerformanceShaders.h>
 #import <MetalPerformanceShadersGraph/MetalPerformanceShadersGraph.h>
 #include "shim.h"
+#include <os/lock.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -31,6 +33,128 @@ static id<MTLCommandBuffer> g_lastCmdBuf = nil; // strong ref under ARC
 // rather than relaxed.
 static _Atomic int g_maybeInFlight = 0;
 
+// ---------------------------------------------------------------------------
+// Deferred release list
+// ---------------------------------------------------------------------------
+//
+// A buffer released while g_maybeInFlight is raised cannot have its
+// pages discarded (see metal_release_buffer). Dropping the purge in
+// that case is safe but LOSSY: shared-buffer pages the CPU has touched
+// are not returned by release alone, so those bytes stay resident for
+// the life of the process. Per micro-step it is noise; across
+// optimizer steps it is a monotone ramp (measured 2026-08-17 at
+// accum 2 / seq 1024 / 28 layers: a step that abandoned 2672 MB grew
+// the physical footprint by 2560 MB, and steps that abandoned nothing
+// grew by nothing).
+//
+// So instead of abandoning those buffers, we keep them — holding the
+// +1 retain that Go's handle carried — on a pending list, and purge
+// plus release them at the next moment the queue is provably drained.
+// Nothing is reclaimed later than it would have been; the buffers that
+// used to leak now get discarded one fence later.
+//
+// CONCURRENCY. The list is pushed by whichever thread runs a Buffer
+// finalizer (the Go runtime's finalizer goroutine, concurrent with the
+// training goroutine) and drained by the training goroutine. The lock
+// covers more than the array: the DECISION to defer and the transition
+// out of the in-flight state must be one atomic step with respect to
+// each other. Otherwise:
+//
+//	finalizer  reads inFlight == 1, decides to defer
+//	training   waitUntilCompleted returns, clears inFlight, drains — empty
+//	finalizer  pushes
+//
+// and that buffer is stranded on the list forever, retaining its whole
+// allocation rather than just its pages: strictly worse than the bug
+// being fixed. gorch_leave_inflight therefore clears the flag AND
+// detaches the batch inside the same critical section that
+// metal_release_buffer uses to read the flag and push.
+//
+// The purge itself runs OUTSIDE the lock — it is a driver call, and
+// holding a lock across it would serialize finalizers against the
+// training thread for no benefit.
+
+// Release dispositions. Atomic: finalizers releasing buffers can run on
+// any thread. g_purgedReleases counts page discards wherever they
+// happen; g_deferredReleases counts how many of those had to wait for a
+// drain; g_unpurgedReleases counts pages abandoned unreclaimed.
+static _Atomic uint64_t g_purgedReleases = 0;
+static _Atomic uint64_t g_unpurgedReleases = 0;
+
+static os_unfair_lock g_pendingLock = OS_UNFAIR_LOCK_INIT;
+static MTLBufferRef* g_pending = NULL; // each element carries a +1 retain
+static size_t g_pendingLen = 0;
+static size_t g_pendingCap = 0;
+static _Atomic uint64_t g_pendingBytes = 0;
+static _Atomic uint64_t g_pendingPeakBytes = 0;
+static _Atomic uint64_t g_deferredReleases = 0;
+
+uint64_t metal_pending_bytes(void) { return g_pendingBytes; }
+uint64_t metal_pending_peak_bytes(void) { return g_pendingPeakBytes; }
+uint64_t metal_deferred_releases(void) { return g_deferredReleases; }
+
+// pending_push_locked takes ownership of buf. Returns 0 if the list
+// could not grow, in which case ownership stays with the caller — the
+// token must never be dropped on the floor.
+static int pending_push_locked(MTLBufferRef buf) {
+    if (g_pendingLen == g_pendingCap) {
+        size_t cap = g_pendingCap ? g_pendingCap * 2 : 256;
+        MTLBufferRef* grown = realloc(g_pending, cap * sizeof(MTLBufferRef));
+        if (!grown) return 0; // old array intact; caller keeps the token
+        g_pending = grown;
+        g_pendingCap = cap;
+    }
+    g_pending[g_pendingLen++] = buf;
+    return 1;
+}
+
+// gorch_leave_inflight moves the queue from "work may be outstanding"
+// to "provably drained" and hands back the batch of buffers that were
+// released during the flight. Call ONLY where a waitUntilCompleted has
+// actually returned.
+//
+// The caller purges and releases the batch. Splitting it this way keeps
+// the driver calls out of the critical section while keeping the flag
+// clear and the detach indivisible.
+static void gorch_leave_inflight(MTLBufferRef** batch, size_t* count) {
+    os_unfair_lock_lock(&g_pendingLock);
+    g_maybeInFlight = 0;
+    *batch = g_pending;
+    *count = g_pendingLen;
+    g_pending = NULL;
+    g_pendingLen = 0;
+    g_pendingCap = 0;
+    g_pendingBytes = 0;
+    os_unfair_lock_unlock(&g_pendingLock);
+}
+
+// gorch_purge_batch discards and destroys a detached batch.
+//
+// Safe outside the lock: every buffer in it has already been released
+// by its Go owner, so no FUTURE command buffer can encode it, and the
+// only work that could have read it was committed before the drain we
+// just waited on. The training thread raising g_maybeInFlight again
+// while this loop runs therefore cannot make these buffers live.
+static void gorch_purge_batch(MTLBufferRef* batch, size_t count) {
+    for (size_t i = 0; i < count; i++) {
+        [(__bridge id<MTLBuffer>)batch[i] setPurgeableState:MTLPurgeableStateEmpty];
+        // g_purgedReleases counts page DISCARDS, wherever they happen;
+        // g_deferredReleases counts how many of them had to wait for a
+        // drain. So a deferred release advances both, one at a time.
+        g_purgedReleases++;
+        CFRelease(batch[i]);
+    }
+    free(batch);
+}
+
+// gorch_drain_inflight is gorch_leave_inflight + gorch_purge_batch.
+static void gorch_drain_inflight(void) {
+    MTLBufferRef* batch = NULL;
+    size_t count = 0;
+    gorch_leave_inflight(&batch, &count);
+    gorch_purge_batch(batch, count);
+}
+
 // metal_begin_work marks the start of an encode+commit sequence. Every
 // entry point that builds a command buffer must call it first.
 static inline void metal_begin_work(void) { g_maybeInFlight = 1; }
@@ -44,7 +168,11 @@ static inline void metal_finish(id<MTLCommandBuffer> cmdBuf) {
         g_lastCmdBuf = cmdBuf;
     } else {
         [cmdBuf waitUntilCompleted];
-        g_maybeInFlight = 0; // queue drained: this buffer was the only work
+        // Queue drained: this buffer was the only work. Sync mode never
+        // reaches metal_sync_queue, so this is the ONLY drain point for
+        // deferred releases when async is off — without it they would
+        // accumulate unbounded.
+        gorch_drain_inflight();
     }
 }
 
@@ -53,7 +181,7 @@ void metal_sync_queue(void) {
         [g_lastCmdBuf waitUntilCompleted];
         g_lastCmdBuf = nil;
     }
-    g_maybeInFlight = 0;
+    gorch_drain_inflight();
 }
 
 void metal_set_async(int on) {
@@ -96,15 +224,56 @@ uint64_t metal_buffer_length(MTLBufferRef buf) {
     return [(__bridge id<MTLBuffer>)buf length];
 }
 
-static int g_purgeOnRelease = 1;
-// Atomic: finalizers releasing buffers can run on any thread.
-static _Atomic uint64_t g_purgedReleases = 0;
-static _Atomic uint64_t g_unpurgedReleases = 0;
+static _Atomic int g_purgeOnRelease = 1;
 
-void metal_set_purge_on_release(int on) { g_purgeOnRelease = on; }
+// Turning the purge off must not strand buffers already sitting on the
+// deferred list: they are unreachable from Go, so nothing else will
+// ever free them. Take the batch and destroy it under the semantics
+// being selected — "off" means abandon the pages, so no purge here.
+void metal_set_purge_on_release(int on) {
+    g_purgeOnRelease = on;
+    if (on) return;
+    MTLBufferRef* batch = NULL;
+    size_t count = 0;
+    os_unfair_lock_lock(&g_pendingLock);
+    batch = g_pending;
+    count = g_pendingLen;
+    g_pending = NULL;
+    g_pendingLen = 0;
+    g_pendingCap = 0;
+    g_pendingBytes = 0;
+    os_unfair_lock_unlock(&g_pendingLock);
+    for (size_t i = 0; i < count; i++) {
+        g_unpurgedReleases++;
+        CFRelease(batch[i]);
+    }
+    free(batch);
+}
 
 uint64_t metal_purged_releases(void) { return g_purgedReleases; }
 uint64_t metal_unpurged_releases(void) { return g_unpurgedReleases; }
+
+// metal_drain_pending_releases purges whatever is on the deferred list
+// IF the queue currently reads drained. Unlike the drain performed by
+// metal_finish / metal_sync_queue it never CLEARS the in-flight flag —
+// clearing it is only sound where a waitUntilCompleted has actually
+// returned, and this entry point makes no such promise. Safe to call
+// from anywhere at any time; a no-op while work is outstanding.
+void metal_drain_pending_releases(void) {
+    MTLBufferRef* batch = NULL;
+    size_t count = 0;
+    os_unfair_lock_lock(&g_pendingLock);
+    if (!g_maybeInFlight) {
+        batch = g_pending;
+        count = g_pendingLen;
+        g_pending = NULL;
+        g_pendingLen = 0;
+        g_pendingCap = 0;
+        g_pendingBytes = 0;
+    }
+    os_unfair_lock_unlock(&g_pendingLock);
+    gorch_purge_batch(batch, count);
+}
 
 // metal_release_buffer destroys a buffer, first discarding its
 // physical pages when that is provably safe.
@@ -156,19 +325,65 @@ uint64_t metal_unpurged_releases(void) { return g_unpurgedReleases; }
 // leaving a window in which work is in flight but the pointer reads
 // nil.
 //
-// The trainer's micro-step flush is sync-then-GC, so the entire
+// The trainer's micro-step flush is sync-then-GC, so most of the
 // release wave lands inside the purgeable window. A release that
-// arrives with work in flight simply skips the purge: still correct,
-// just not reclaimed until a later allocation reuses the region.
-void metal_release_buffer(MTLBufferRef buf) {
-    if (!buf) return;
-    if (g_purgeOnRelease && !g_maybeInFlight) {
-        [(__bridge id<MTLBuffer>)buf setPurgeableState:MTLPurgeableStateEmpty];
-        g_purgedReleases++;
-    } else {
+// arrives with work in flight is DEFERRED to the pending list rather
+// than abandoned — see the deferred-release block above for why, and
+// for the locking that makes the defer/drain handoff race-free.
+//
+// WHY THE TOCTOU ON THE GATE IS NOT A BUG. A buffer reaching this
+// function has had its last Go reference dropped (Buffer.Release nils
+// its handle; a finalizer runs only once the *Buffer is unreachable,
+// and gorch pins buffers across every encode with runtime.KeepAlive).
+// So no FUTURE command buffer can encode it, and the only work that
+// could still read it was committed before this call. Observing the
+// gate at 0 is therefore enough to purge even if the training thread
+// raises it again immediately afterwards: the new work provably cannot
+// touch this buffer. What the gate protects against is work already
+// submitted or being encoded, and for that a stale-1 read is the safe
+// direction.
+int metal_release_buffer(MTLBufferRef buf) {
+    if (!buf) return 0;
+    if (!g_purgeOnRelease) {
         g_unpurgedReleases++;
+        CFRelease(buf);
+        return 0;
     }
+
+    // Outside the lock: no message sends in the critical section.
+    uint64_t n = [(__bridge id<MTLBuffer>)buf length];
+
+    os_unfair_lock_lock(&g_pendingLock);
+    if (g_maybeInFlight) {
+        // The push must happen under the same lock that reads the flag:
+        // gorch_leave_inflight clears the flag and takes the batch in
+        // one critical section, so a buffer can never be enqueued
+        // behind the drain that was supposed to collect it.
+        if (pending_push_locked(buf)) {
+            uint64_t tot = (g_pendingBytes += n);
+            os_unfair_lock_unlock(&g_pendingLock);
+            for (;;) { // peak, for the pending-list high-water report
+                uint64_t old = g_pendingPeakBytes;
+                if (tot <= old) break;
+                if (atomic_compare_exchange_weak(&g_pendingPeakBytes, &old, tot)) break;
+            }
+            g_deferredReleases++;
+            return 2;
+        }
+        // The list could not grow. Ownership is still ours, so fall
+        // back to the old lossy behaviour rather than leak the object:
+        // abandoning pages beats abandoning the whole allocation.
+        os_unfair_lock_unlock(&g_pendingLock);
+        g_unpurgedReleases++;
+        CFRelease(buf);
+        return 0;
+    }
+    os_unfair_lock_unlock(&g_pendingLock);
+
+    [(__bridge id<MTLBuffer>)buf setPurgeableState:MTLPurgeableStateEmpty];
+    g_purgedReleases++;
     CFRelease(buf);
+    return 1;
 }
 
 // ---------------------------------------------------------------------------

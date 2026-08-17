@@ -21,7 +21,11 @@ MTLCommandQueueRef metal_create_command_queue(MTLDeviceRef dev);
 MTLBufferRef metal_create_shared_buffer(MTLDeviceRef dev, uint64_t length);
 void*        metal_buffer_contents(MTLBufferRef buf);
 uint64_t     metal_buffer_length(MTLBufferRef buf);
-void         metal_release_buffer(MTLBufferRef buf);
+// metal_release_buffer destroys a buffer, discarding its physical
+// pages first when that is provably safe. Returns 1 if the pages were
+// discarded (immediately or by handing the buffer to the deferred
+// list), 0 if they were abandoned unreclaimed. See shim.m.
+int          metal_release_buffer(MTLBufferRef buf);
 
 // Compile a Metal kernel from source at runtime.
 // Returns NULL on failure; errOut (if non-NULL) receives a message.
@@ -138,12 +142,27 @@ int metal_mps_batched_matmul_dt(MTLCommandQueueRef queue,
 // the unbounded-footprint behaviour and is for tests only.
 void metal_set_purge_on_release(int on);
 
-// Counts of buffer releases that did / did not get to purge their
-// pages. A release cannot purge while GPU work may still reference the
-// buffer, so a nonzero unpurged count means some memory was reclaimed
-// late rather than immediately.
+// Counts of buffer releases by disposition:
+//   purged    — pages discarded on the spot (queue was drained)
+//   deferred  — queued for discard at the next drain (work in flight)
+//   unpurged  — pages abandoned; the leak the deferred list eliminates.
+// With the deferred list in place, unpurged should only ever advance
+// when the purge is switched off or the pending list cannot grow.
 uint64_t metal_purged_releases(void);
 uint64_t metal_unpurged_releases(void);
+uint64_t metal_deferred_releases(void);
+
+// Bytes currently sitting on the deferred-release list (released by
+// their Go owner, purge pending on the next drain), and the high-water
+// mark of that figure. These allocations are still live, so the caller
+// must count them against any live-memory ceiling.
+uint64_t metal_pending_bytes(void);
+uint64_t metal_pending_peak_bytes(void);
+
+// Purge and destroy anything on the deferred-release list, if the queue
+// currently reads drained; a no-op otherwise. Never clears the
+// in-flight gate — that is only sound where a wait has returned.
+void metal_drain_pending_releases(void);
 
 // Number of distinct MPSGraph objects currently held by the dtyped
 // matmul cache (see gorch_dt_graph in shim.m). Each entry owns a

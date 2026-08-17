@@ -107,12 +107,23 @@ func SetLiveBufferLimit(bytes int64) { liveBufferLimit.Store(bytes) }
 func LiveBufferLimit() int64 { return liveBufferLimit.Load() }
 
 // checkLiveLimit panics if live bytes have passed the ceiling.
+//
+// Buffers on the deferred-release list count. Their Go owners are gone,
+// so liveBufferBytes has stopped tracking them, but their allocations
+// are still resident until the next drain — leaving them out would let
+// the ceiling under-report exactly the memory it exists to bound.
 func checkLiveLimit(live int64) {
 	lim := liveBufferLimit.Load()
-	if lim > 0 && live > lim {
-		panic(fmt.Sprintf("metal: live buffer ceiling exceeded: %.0f MB > limit %.0f MB "+
+	if lim <= 0 {
+		return
+	}
+	total := live + int64(C.metal_pending_bytes())
+	if total > lim {
+		panic(fmt.Sprintf("metal: live buffer ceiling exceeded: %.0f MB (%.0f MB live + "+
+			"%.0f MB awaiting purge) > limit %.0f MB "+
 			"— aborting before the OS does (lower -accum / -max-seq, or enable -checkpoint-every)",
-			float64(live)/(1<<20), float64(lim)/(1<<20)))
+			float64(total)/(1<<20), float64(live)/(1<<20),
+			float64(total-live)/(1<<20), float64(lim)/(1<<20)))
 	}
 }
 
@@ -254,7 +265,14 @@ func (b *Buffer) Release() {
 	}
 	runtime.SetFinalizer(b, nil)
 	liveBufferBytes.Add(-b.bytes)
-	C.metal_release_buffer(b.ptr)
+	switch C.metal_release_buffer(b.ptr) {
+	case 1:
+		purgedBytes.Add(b.bytes)
+	case 2:
+		deferredBytes.Add(b.bytes)
+	default:
+		unpurgedBytes.Add(b.bytes)
+	}
 	b.ptr = nil
 }
 
@@ -429,6 +447,15 @@ func (q *CommandQueue) BatchedMatMulDT(a, b, c *Buffer, M, N, K, batchSize int, 
 // COMPLETED (see metal_release_buffer in shim.m for the matched
 // measurements and the safety argument).
 //
+// A release that lands while work IS in flight cannot purge on the
+// spot. It used to give up, and that residue was the trainer's
+// ~1 GB-per-optimizer-step footprint ramp: measured over 8 steps at
+// the Stage-A geometry, 3316 MB of releases abandoned their pages
+// while the process footprint grew 3379 MB, step for step. Such
+// releases are now DEFERRED — the buffer keeps its retain on a pending
+// list and is purged at the next fence — so the reclaim no longer
+// depends on GC timing landing inside the drained window.
+//
 // This buys bounded footprint without an allocator. Recycling buffers
 // in a size-classed cache would be the better long-term fix: it avoids
 // the churn entirely rather than paying to undo it.
@@ -436,15 +463,63 @@ func (q *CommandQueue) BatchedMatMulDT(a, b, c *Buffer, M, N, K, batchSize int, 
 // SetPurgeOnRelease enables or disables the page discard performed by
 // Release. It is ON by default; turning it off restores the unbounded
 // footprint growth and exists only so tests can demonstrate the
-// difference.
+// difference. Turning it off also disposes of anything already on the
+// deferred list — under the semantics being selected, so those pages
+// are abandoned rather than purged.
+//
+// Not a linearization point: a release already past its branch on
+// another thread finishes under the old setting. Call it at startup,
+// not mid-run.
 func SetPurgeOnRelease(on bool) { C.metal_set_purge_on_release(cbool(on)) }
 
-// PurgeStats returns how many buffer releases were able to discard
-// their pages immediately, and how many could not because GPU work was
-// still in flight. Unpurged releases are correct but reclaim late.
-func PurgeStats() (purged, unpurged int64) {
-	return int64(C.metal_purged_releases()), int64(C.metal_unpurged_releases())
+// PurgeStats returns how many buffer releases discarded their pages
+// immediately, how many were deferred to the next drain because GPU
+// work was in flight, and how many abandoned their pages entirely.
+// The last is the one that costs footprint; it should stay at zero
+// unless the purge is switched off.
+func PurgeStats() (purged, deferred, unpurged int64) {
+	return int64(C.metal_purged_releases()),
+		int64(C.metal_deferred_releases()),
+		int64(C.metal_unpurged_releases())
 }
+
+// purgedBytes/unpurgedBytes are PurgeStats in bytes rather than
+// releases. The counts alone cannot be compared against a footprint:
+// a micro-step's buffers span four orders of magnitude in size, so
+// "30% of releases could not purge" says nothing about how many
+// megabytes were abandoned. The byte totals are what a footprint
+// ramp has to be reconciled against.
+var (
+	purgedBytes   atomic.Int64
+	deferredBytes atomic.Int64
+	unpurgedBytes atomic.Int64
+)
+
+// PurgeByteStats returns the cumulative bytes of buffers whose pages
+// were reclaimed on release, those deferred to the next drain, and
+// those abandoned unreclaimed. The last number is the leak; with the
+// deferred list wired up it should stay at zero.
+func PurgeByteStats() (purged, deferred, unpurged int64) {
+	return purgedBytes.Load(), deferredBytes.Load(), unpurgedBytes.Load()
+}
+
+// PendingReleaseBytes returns the bytes of buffers released by their Go
+// owner but not yet destroyed, because they were released while GPU
+// work was in flight and their pages cannot be discarded until the
+// queue drains. Their allocations are still live — LiveBufferBytes has
+// already stopped counting them, so a memory ceiling must add this in.
+func PendingReleaseBytes() int64 { return int64(C.metal_pending_bytes()) }
+
+// PendingReleasePeakBytes is the high-water mark of PendingReleaseBytes
+// since process start: how much extra live memory deferring the
+// destruction of in-flight releases actually costs.
+func PendingReleasePeakBytes() int64 { return int64(C.metal_pending_peak_bytes()) }
+
+// DrainPendingReleases discards and destroys everything on the deferred
+// list if the GPU queue currently reads drained; a no-op otherwise. The
+// normal drain points (every fence) make this unnecessary — it exists
+// so a caller that has just done something unusual can force the issue.
+func DrainPendingReleases() { C.metal_drain_pending_releases() }
 
 // ---------- dtyped-matmul MPSGraph cache (plan 0009 X3 / ADR-012) ----------
 //

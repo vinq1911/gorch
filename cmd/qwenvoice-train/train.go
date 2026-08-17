@@ -234,21 +234,39 @@ func flushMetalGraph() {
 	runtime.GC()
 }
 
-// segmentFlushSleep is the settle beat between the two GCs of
-// segmentFlush. Shorter than flushMetalGraph's 10 ms because this runs
-// once per checkpoint SEGMENT (28 times per micro-step at
-// -checkpoint-every 1, where 10 ms would be 0.3 s of pure sleeping).
-// segmentFlushMS exposes that beat as a flag (-checkpoint-flush-ms):
-// the right value is a property of how fast the runtime's finalizer
-// goroutine drains a segment's buffers, which is worth being able to
-// measure rather than guess. Measured at 28 layers, seq 1024, accum 1,
-// checkpoint-every 1 — peak physical footprint over the micro-step:
+// segmentFlushMS is the settle beat between the two GCs of
+// segmentFlush, exposed as -checkpoint-flush-ms. It runs once per
+// checkpoint SEGMENT, so it is paid 2 x segments x accum times per
+// optimizer step.
 //
-//	beat   footprint   step
-//	 2 ms    12.9 GB    ceiling abort
-//	10 ms     7.4 GB    10.1 s
+// WHAT IT USED TO BUY, AND NO LONGER HAS TO. A Metal buffer released
+// while GPU work was in flight could not discard its pages and used to
+// abandon them, so reclaim depended on the finalizer goroutine
+// happening to run inside a drained window — and the beat was how that
+// luck was bought. At 28 layers / seq 1024 / accum 1 /
+// checkpoint-every 1 that was worth 12.9 GB (2 ms, ceiling abort) vs
+// 7.4 GB (10 ms). Releases are now deferred and purged at the next
+// fence instead (see metal.PurgeStats), so the footprint no longer
+// depends on this beat at all. Re-measured 2026-08-17 at the Stage-A
+// geometry — 28 layers, seq 1024, accum 2, checkpoint-every 2, 10
+// optimizer steps each, identical samples:
 //
-// 10 ms it is. The step-time cost of the extra sleeping is ~6%.
+//	beat   end-of-step footprint   abandoned   deferred-list peak
+//	 0 ms   2048 -> 2458 MB flat      0 MB           2604 MB
+//	 2 ms   2048 -> 2458 MB flat      0 MB           1781 MB
+//	10 ms   2150 -> 2458 MB flat      0 MB           1100 MB
+//
+// So the beat is now only worth what it trims off the deferred list —
+// real live memory, but bounded and counted against the ceiling. Its
+// step-time cost at this config is 56 sleeps x beat = 0.56 s out of an
+// ~80 s step (0.7%), which is why the three runs' wall clocks
+// (755 s / 852 s / 822 s) rank in no particular order: run-to-run
+// variance swamps it. 10 ms therefore stays the default — it is the
+// cheapest of the three in memory and indistinguishable in time.
+//
+// The change that matters for an operator is that dropping it is now
+// SAFE: at -checkpoint-every 1, where the sleeps double and steps are
+// ~10 s, 2 ms used to mean a ceiling abort and now does not.
 var segmentFlushMS = 10
 
 // segmentFlush is flushMetalGraph's per-segment sibling, installed as
@@ -438,6 +456,11 @@ func train(c cliConfig) error {
 
 	trainStart := time.Now()
 	var tokensSeen int64
+	// Previous step's reclaim ledger and footprint, for the per-step
+	// deltas printed below.
+	var lastDeferredB, lastUnpurgedB int64
+	lastPhys := currentRSSMB()
+	mb2 := func(v int64) float64 { return float64(v) / (1 << 20) }
 	for step := startStep + 1; step <= c.steps; step++ {
 		lr := lrAt(step, c.warmup, c.steps, c.minLRFrac)
 		opt.SetLR(float32(c.lrLoRA * lr))
@@ -480,8 +503,11 @@ func train(c cliConfig) error {
 					float64(metal.LiveBufferBytes())/(1<<20),
 					float64(peak)/(1<<20), float64(alloc)/(1<<20), n,
 					metal.DTGraphCacheLen())
-				pg, un := metal.PurgeStats()
-				fmt.Printf("      purgedReleases %d unpurged %d\n", pg, un)
+				pg, df, un := metal.PurgeStats()
+				fmt.Printf("      releases: purged %d deferred %d unpurged %d; pending %.0f MB (peak %.0f MB)\n",
+					pg, df, un,
+					float64(metal.PendingReleaseBytes())/(1<<20),
+					float64(metal.PendingReleasePeakBytes())/(1<<20))
 				metal.ResetBufferStats()
 				if memTraceRegions {
 					fmt.Print(vmmapRegions())
@@ -518,15 +544,32 @@ func train(c cliConfig) error {
 		var ms runtime.MemStats
 		runtime.ReadMemStats(&ms)
 		mb := func(v uint64) float64 { return float64(v) / (1 << 20) }
+		curPhys := currentRSSMB()
 		fmt.Printf("step %4d/%d loss %.4f lr %.2e %s %.0f tok/s phys %.0f MB %.1fs\n",
 			step, c.steps, stepLoss, c.lrLoRA*lr, perTask, tokPerS,
-			currentRSSMB(), time.Since(stepStart).Seconds())
+			curPhys, time.Since(stepStart).Seconds())
 		// Where does the footprint live? Go heap vs everything else
 		// (Metal buffers are unified-memory allocations outside the Go
 		// heap, so a growing gap means GPU-side retention).
 		fmt.Printf("    mem: heapAlloc %.0f heapSys %.0f heapIdle %.0f heapReleased %.0f metalLive %.0f MB\n",
 			mb(ms.HeapAlloc), mb(ms.HeapSys), mb(ms.HeapIdle), mb(ms.HeapReleased),
 			float64(metal.LiveBufferBytes())/(1<<20))
+		// The reclaim ledger, per optimizer step. Shared-buffer pages
+		// the CPU has touched are not returned by release alone, and a
+		// buffer released while GPU work is in flight cannot have its
+		// pages discarded then and there — so `unpurged` is bytes
+		// abandoned, and it is what the residual per-optimizer-step
+		// footprint ramp was made of (2026-08-17: a step that abandoned
+		// 2672 MB grew the footprint 2560 MB; steps that abandoned
+		// nothing grew by nothing). `deferred` is the same buffers
+		// after the fix, reclaimed one fence later instead of never.
+		pgB, dfB, unB := metal.PurgeByteStats()
+		fmt.Printf("    reclaim: purged %.0f MB deferred %.0f MB unpurged %.0f MB "+
+			"(step delta: deferred %.0f MB unpurged %.0f MB, phys %+.0f MB; pending peak %.0f MB)\n",
+			mb2(pgB), mb2(dfB), mb2(unB),
+			mb2(dfB-lastDeferredB), mb2(unB-lastUnpurgedB), curPhys-lastPhys,
+			mb2(metal.PendingReleasePeakBytes()))
+		lastDeferredB, lastUnpurgedB, lastPhys = dfB, unB, curPhys
 		fmt.Fprintf(lossLog, "%d\t%.6f\t%.4e\t%.1f\t%.0f\t%s\n",
 			step, stepLoss, c.lrLoRA*lr, tokPerS, rssMB(), perTask)
 
