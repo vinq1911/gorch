@@ -60,19 +60,23 @@ last_step() {
     [[ "$s" =~ ^[0-9]+$ ]] && echo "$s" || echo 0
 }
 
-# phys_footprint in MB — the metric jetsam acts on. ps RSS is blind to
-# Metal/IOAccelerator memory (measured 781MB RSS vs 12.7GB footprint),
-# so an RSS-based guard cannot protect the machine (2026-08-12).
+# Trainer-reported footprint in MB, read from its log.
+#
+# DO NOT call vmmap here. vmmap walks the whole VM region map, and
+# Metal buffer churn fragments it badly: R3a measured 68,538 regions
+# after five steps and ONE vmmap call taking 11 SECONDS. Polling it
+# every POLL_SEC starved the trainer and made step times ramp 7 -> 84 s
+# — the same bug the trainer's own guard had, one layer out.
+#
+# The trainer now computes its footprint via task_info (one syscall,
+# O(1)) and prints it every step, and self-guards per MICRO-step with
+# -rss-limit-mb. So this watchdog is a backstop, not the primary
+# control: it reads the last logged value (free) and leans on the
+# kernel pressure level (a cheap sysctl) for anything faster-moving.
 footprint_mb() {
-    local pid=$1 v
-    v=$(vmmap --summary "$pid" 2>/dev/null | awk -F: '/^Physical footprint:/ {gsub(/ /,"",$2); print $2; exit}')
-    [ -z "$v" ] && { echo 0; return; }
-    case "$v" in
-        *G) echo $(( $(echo "${v%G}" | cut -d. -f1) * 1024 )) ;;
-        *M) echo "${v%M}" | cut -d. -f1 ;;
-        *K) echo 0 ;;
-        *)  echo 0 ;;
-    esac
+    local v
+    v=$(grep -o 'phys [0-9]* MB' "$RUN_DIR/trainer.log" 2>/dev/null | tail -1 | awk '{print $2}')
+    [[ "$v" =~ ^[0-9]+$ ]] && echo "$v" || echo 0
 }
 
 # ---- watchdog: kill the trainer before the OS has to -----------------
