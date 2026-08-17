@@ -213,7 +213,35 @@ func (d *Device) NewCommandQueue() *CommandQueue {
 // contract). The buffer is released automatically when the *Buffer
 // becomes unreachable; call Release for deterministic freeing.
 func (d *Device) NewBuffer(sizeBytes int) *Buffer {
-	b := &Buffer{ptr: C.metal_create_shared_buffer(d.ptr, C.uint64_t(sizeBytes)), bytes: int64(sizeBytes)}
+	ptr := C.metal_create_shared_buffer(d.ptr, C.uint64_t(sizeBytes))
+	if ptr == nil {
+		// newBufferWithLength: returned nil — the driver refused the
+		// allocation. Until 2026-08-17 this was passed straight through
+		// to MPS, which aborts the PROCESS on an internal assertion
+		// ("buffer may not be nil") with no Go stack and no chance to
+		// recover. That killed a Stage-A training run at step ~250
+		// eight times in a row.
+		//
+		// The most likely cause is transient pressure, and we are
+		// holding memory we can give back: the deferred-release list
+		// (buffers released while GPU work was in flight, purged at
+		// the next drained window). So drain and retry once before
+		// giving up — that turns a hard abort into a hiccup in the
+		// common case.
+		C.metal_sync_queue()
+		ptr = C.metal_create_shared_buffer(d.ptr, C.uint64_t(sizeBytes))
+	}
+	if ptr == nil {
+		panic(fmt.Sprintf("gorch/metal: allocation of %d bytes (%.1f MB) failed even after draining "+
+			"pending releases: live %.0f MB, pending %.0f MB, %d buffers allocated this process. "+
+			"The driver is out of resources — see ADR-014 (every CPU-touched buffer strands a VM map "+
+			"region for the life of the process, so long runs must recycle buffers or restart)",
+			sizeBytes, float64(sizeBytes)/(1<<20),
+			float64(liveBufferBytes.Load())/(1<<20),
+			float64(C.metal_pending_bytes())/(1<<20),
+			totalAllocCount.Load()))
+	}
+	b := &Buffer{ptr: ptr, bytes: int64(sizeBytes)}
 	live := liveBufferBytes.Add(b.bytes)
 	notePeak(live)
 	checkLiveLimit(live)
