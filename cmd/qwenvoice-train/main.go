@@ -54,6 +54,9 @@ type cliConfig struct {
 	rssLimitMB int
 	ckptEvery  int
 	ckptFlush  bool
+
+	seqBucket    int
+	dtCacheLimit int
 }
 
 func main() {
@@ -94,6 +97,8 @@ func main() {
 	flag.IntVar(&c.ckptEvery, "checkpoint-every", 0, "activation checkpointing: 0 = off, N = recompute each group of N decoder blocks during backward instead of retaining their activations. 1 is memory-minimal (the recompute cost is the same for every N). Trades ~1 extra forward per step for the bulk of the activation footprint")
 	flag.IntVar(&segmentFlushMS, "checkpoint-flush-ms", segmentFlushMS, "with -checkpoint-flush, milliseconds to let the runtime's finalizer goroutine drain a segment's Metal buffers, once after each of the flush's two GCs. A buffer released while GPU work is in flight is now purged at the next fence rather than abandoned, so the footprint no longer depends on this beat (measured flat at 0, 2 and 10 ms); it only trims the transient deferred-release list (2604 / 1781 / 1100 MB peak). Lowering it is safe and costs ~0.7% of step time at -checkpoint-every 2")
 	flag.BoolVar(&c.ckptFlush, "checkpoint-flush", true, "with -checkpoint-every, fence+GC after each recomputed segment's backward. Metal buffers live outside the Go heap, so without this the freed segments never get collected during the backward pass and the footprint win disappears")
+	flag.IntVar(&c.seqBucket, "seq-bucket", 0, "pad every training sequence up to a multiple of this many tokens (0/1 = off, the measured default). Samples have arbitrary lengths (24..1016 in the Stage-A shards) and every distinct length is a distinct set of GPU matmul shapes, so bucketing collapses those to max-seq/bucket shape sets and lets the compiled-graph cache converge. Measured at the Stage-A geometry over 15 steps with identical draws: 2m25s bucketed at 128 vs 2m23s unbucketed, for 14.7% padded tokens and a cached-graph count of 82 vs 302. So it is a WASH on time — the wasted compute on pad tokens and the compile it saves cancel to within run-to-run noise — and it is off by default because a wash that also does 14.7% of its work on padding is not worth taking, and because -dt-graph-cache-limit already bounds the growth it was meant to fix. Turn it on if compile cost ever stops being negligible. Correctness is not the reason it is off: attention is causal and the loss is a gather over supervised positions, so end-padding needs no extra mask (see padToBucket, and the invariance tests in model/qwen/padding_test.go)")
+	flag.IntVar(&c.dtCacheLimit, "dt-graph-cache-limit", 4096, "cap the dtyped-matmul compiled-MPSGraph cache at N entries (0 = unbounded). Insurance against a long run accumulating one compiled executable per (matmul site x sequence length) forever; with -seq-bucket on, the steady-state working set is far below this and the cap never fires")
 	flag.Parse()
 
 	var err error

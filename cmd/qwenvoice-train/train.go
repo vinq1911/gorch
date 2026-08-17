@@ -321,10 +321,30 @@ func rssMB() float64 {
 //
 // A 16x blind spot: an RSS-based ceiling sat at 6.8 GB while the
 // process was being SIGKILLed. Metal buffers are unified-memory
-// allocations that never appear in RSS. vmmap is slow-ish (it walks
-// the region map) but this runs once per optimizer step, and a step
-// costs seconds.
+// allocations that never appear in RSS.
+//
+// The number comes from task_info(TASK_VM_INFO), not from forking
+// `vmmap --summary` — same value, but O(1) instead of O(VM regions).
+// See physFootprintBytes: the fork-and-walk version cost 11 s per call
+// after five steps and was the entire per-step slowdown. vmmapFootprintMB
+// remains available as the cross-check that the two agree.
 func currentRSSMB() float64 {
+	if b := physFootprintBytes(); b > 0 {
+		return float64(b) / (1 << 20)
+	}
+	return vmmapFootprintMB()
+}
+
+// vmmapFootprintMB is the original vmmap-parsing reader, kept as the
+// cross-check that pins physFootprintBytes to the number an operator
+// would read by hand (TestPhysFootprintMatchesVmmap) and as the
+// fallback if the kernel ever declines TASK_VM_INFO. It is not an
+// INDEPENDENT measurement — vmmap's "Physical footprint:" line almost
+// certainly reports the same kernel counter — so what the comparison
+// buys is that the replacement reads the right field in the right
+// units, not a second opinion on the value. It is O(VM regions) and
+// must never go back on a hot path.
+func vmmapFootprintMB() float64 {
 	out, err := exec.Command("vmmap", "--summary", strconv.Itoa(os.Getpid())).Output()
 	if err != nil {
 		return rssMB()
@@ -357,6 +377,61 @@ func parseFootprintMB(v string) float64 {
 		return 0
 	}
 	return f * mult
+}
+
+// padToBucket rounds a training sequence's length UP to the next
+// multiple of bucket by repeating its last token, so that the matmul
+// shapes a micro-step presents to the GPU come from a small fixed set
+// (max-seq/bucket of them) instead of one per distinct sample length.
+// bucket <= 1 disables it; the result is never longer than modelMaxSeq
+// (RoPE tables and the trainer's footprint ceiling are both sized on
+// that bound).
+//
+// WHY END-PADDING NEEDS NO MASK HERE. Three properties of this model
+// and this loss, each checked in TestSupervisedLossPaddingInvariance:
+//
+//  1. Attention is causal (nn.GQA.Causal, fused into g.CausalSoftmax),
+//     so a real position i only ever attends columns j <= i. Padding is
+//     appended, so every pad column sits strictly after every real
+//     query row and is masked out — exactly, to a 0.0 probability, not
+//     to a small number.
+//  2. Every other op is per-position: RMSNorm normalises over the
+//     hidden dim, SwiGLU is elementwise, RoPE rotates by absolute
+//     position, and pads take positions that no real token occupies.
+//  3. The loss is a GATHER over supervised positions (see
+//     qwen.SupervisedLoss), not a mean over the sequence. Pad positions
+//     are never in `supervised`, so they enter neither the numerator nor
+//     the denominator — no length normalisation to correct.
+//
+// Gradients follow: pad rows receive zero grad from the gather, and
+// causality gives dLoss/d(pad K,V) = 0, so nothing flows back out of
+// them either (CausalSoftmax's backward is dx = scale·y⊙(g−Σg⊙y), and
+// y is exactly 0 on masked columns).
+//
+// The pad token is the sample's LAST REAL TOKEN rather than a constant
+// id. Masked-out columns still participate in the attn@V GEMM as
+// 0·V[j], and 0·NaN is NaN — so what matters is that pad rows carry
+// ordinary in-distribution activations. Repeating a real token
+// guarantees that without assuming anything about a designated pad id's
+// embedding row.
+func padToBucket(tokens []int, bucket, modelMaxSeq int) []int {
+	if bucket <= 1 || len(tokens) == 0 {
+		return tokens
+	}
+	n := ((len(tokens) + bucket - 1) / bucket) * bucket
+	if modelMaxSeq > 0 && n > modelMaxSeq {
+		n = modelMaxSeq
+	}
+	if n <= len(tokens) {
+		return tokens
+	}
+	out := make([]int, n)
+	copy(out, tokens)
+	last := tokens[len(tokens)-1]
+	for i := len(tokens); i < n; i++ {
+		out[i] = last
+	}
+	return out
 }
 
 func train(c cliConfig) error {
@@ -454,8 +529,16 @@ func train(c cliConfig) error {
 		return g.Mul(s, g.NewTensor([]float32{scale}, 1))
 	}
 
+	if c.seqBucket > 1 {
+		fmt.Printf("sequence bucketing: pad each sample up to a multiple of %d tokens\n", c.seqBucket)
+	}
+	if c.accel != "off" && c.dtCacheLimit > 0 {
+		metal.SetDTGraphCacheLimit(c.dtCacheLimit)
+		fmt.Printf("dtyped-matmul graph cache capped at %d entries\n", c.dtCacheLimit)
+	}
+
 	trainStart := time.Now()
-	var tokensSeen int64
+	var tokensSeen, padTokens int64
 	// Previous step's reclaim ledger and footprint, for the per-step
 	// deltas printed below.
 	var lastDeferredB, lastUnpurgedB int64
@@ -476,13 +559,28 @@ func train(c cliConfig) error {
 			if len(sup) == 0 {
 				continue
 			}
+			microStart := time.Now()
+			rawLen := len(tokens)
+			// Targets must come from REAL tokens. SupervisedLoss rejects
+			// a position with no next token, but it can only compare
+			// against the length it is handed — so padding would turn
+			// "position rawLen-1 is unsupervisable" into "position
+			// rawLen-1 predicts a pad token", training the wrong
+			// objective with no error. Check against the pre-pad length.
+			if sup[len(sup)-1] >= rawLen-1 {
+				return fmt.Errorf("dataset gave supervised position %d in a %d-token sample "+
+					"(step %d, micro %d/%d, task %s): its target would be a pad token",
+					sup[len(sup)-1], rawLen, step, a+1, c.accum, task)
+			}
+			tokens = padToBucket(tokens, c.seqBucket, vm.Base.Cfg.MaxSeq)
+			padTokens += int64(len(tokens) - rawLen)
 			loss := vm.SupervisedLoss(tokens, sup)
 			raw := float64(loss.Data()[0])
 			one(1/float32(c.accum), loss).Backward()
 			stepLoss += raw
 			taskLoss[task] += raw
 			taskCount[task]++
-			stepTokens += int64(len(tokens))
+			stepTokens += int64(rawLen)
 			if c.accel != "off" {
 				flushMetalGraph()
 			}
@@ -497,8 +595,15 @@ func train(c cliConfig) error {
 				var ms runtime.MemStats
 				runtime.ReadMemStats(&ms)
 				peak, alloc, n := metal.BufferStats()
-				fmt.Printf("    micro %d/%d seq %d phys %.0f MB heap %.0f MB metalLive %.0f MB peakLive %.0f MB alloc %.0f MB (%d bufs) dtGraphs %d\n",
-					a+1, c.accum, len(tokens), currentRSSMB(),
+				// seq is reported as padded(raw): the padded length is
+				// what the matmul shapes — and therefore the compute —
+				// actually are, while raw is what the throughput counter
+				// credits. micro_s is the wall time of THIS micro-step,
+				// which is what makes "does step time ramp, or does the
+				// workload?" answerable from one run's log.
+				fmt.Printf("    micro %d/%d seq %d(%d) sup %d micro_s %.2f phys %.0f MB heap %.0f MB metalLive %.0f MB peakLive %.0f MB alloc %.0f MB (%d bufs) dtGraphs %d\n",
+					a+1, c.accum, len(tokens), rawLen, len(sup),
+					time.Since(microStart).Seconds(), currentRSSMB(),
 					float64(ms.HeapAlloc)/(1<<20),
 					float64(metal.LiveBufferBytes())/(1<<20),
 					float64(peak)/(1<<20), float64(alloc)/(1<<20), n,
@@ -603,9 +708,14 @@ func train(c cliConfig) error {
 		}
 	}
 	elapsed := time.Since(trainStart)
-	fmt.Printf("done: %d steps in %s (%.1f tok/s avg, peak rss %.0f MB)\n",
+	padPct := 0.0
+	if tokensSeen > 0 {
+		padPct = 100 * float64(padTokens) / float64(tokensSeen)
+	}
+	fmt.Printf("done: %d steps in %s (%.1f tok/s avg, peak rss %.0f MB, pad %d tokens = %.1f%% of real, dtGraphs %d)\n",
 		c.steps-startStep, elapsed.Round(time.Second),
-		float64(tokensSeen)/elapsed.Seconds(), rssMB())
+		float64(tokensSeen)/elapsed.Seconds(), rssMB(),
+		padTokens, padPct, metal.DTGraphCacheLen())
 	return nil
 }
 
