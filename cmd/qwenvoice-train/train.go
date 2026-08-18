@@ -613,7 +613,24 @@ func train(c cliConfig) error {
 					pg, df, un,
 					float64(metal.PendingReleaseBytes())/(1<<20),
 					float64(metal.PendingReleasePeakBytes())/(1<<20))
+				// Buffer reuse cache (ADR-015). The hit rate is the
+				// number that matters: every miss is a
+				// newBufferWithLength and, once the CPU touches it, one
+				// IOAccelerator VM map entry stranded for the life of
+				// the process. `quar` is cached buffers held back
+				// because GPU work may still be reading them — it is
+				// the one way this design degrades, and a large steady
+				// figure means the drain points have become too sparse
+				// for the cache to recycle anything.
+				bc := metal.BufferCacheStatsSnapshot()
+				fmt.Printf("      bufcache: hit %.3f (%d hit / %d miss) cached %.0f MB "+
+					"(peak %.0f MB, cap %.0f MB) %d bufs / %d classes, quar %d, evicted %d\n",
+					bc.HitRate(), bc.Hits, bc.Misses,
+					float64(bc.CachedBytes)/(1<<20), float64(bc.PeakCachedBytes)/(1<<20),
+					float64(bc.LimitBytes)/(1<<20), bc.CachedBuffers, bc.Classes,
+					bc.Quarantined, bc.Evictions)
 				metal.ResetBufferStats()
+				metal.ResetBufferCacheStats()
 				if memTraceRegions {
 					fmt.Print(vmmapRegions())
 				}

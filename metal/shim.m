@@ -89,9 +89,58 @@ static _Atomic uint64_t g_pendingBytes = 0;
 static _Atomic uint64_t g_pendingPeakBytes = 0;
 static _Atomic uint64_t g_deferredReleases = 0;
 
+// g_drainGen counts transitions from "work may be outstanding" to
+// "provably drained" — it is bumped in gorch_leave_inflight, in the
+// same critical section that clears g_maybeInFlight, and NOWHERE else.
+//
+// It exists for the R1b buffer reuse cache (ADR-015). Recycling a
+// buffer's CONTENTS is a strictly stronger act than releasing it: a
+// released buffer's bytes are merely abandoned, whereas a recycled
+// buffer's bytes get overwritten by its next owner. So the cache
+// cannot lean on the retained-references guarantee that makes a plain
+// release safe in flight; it needs to know when the work that could
+// still be READING those bytes has completed.
+//
+// The generation answers exactly that. A buffer entering the cache
+// while the gate reads 1 records g_drainGen+1 and may not be handed
+// out until g_drainGen has reached it, i.e. until one full
+// waitUntilCompleted has returned — and because a single queue
+// completes in commit order, that one wait covers every command
+// buffer committed before it, which is all of the work that could
+// have encoded this buffer.
+//
+// A buffer entering while the gate reads 0 records g_drainGen and is
+// immediately reusable, by the same argument metal_release_buffer
+// uses to purge on the spot: its Go owner has already dropped the
+// handle, so no FUTURE encode can name it, and gate==0 means every
+// PAST commit has completed.
+static uint64_t g_drainGen = 0; // guarded by g_pendingLock
+
 uint64_t metal_pending_bytes(void) { return g_pendingBytes; }
 uint64_t metal_pending_peak_bytes(void) { return g_pendingPeakBytes; }
 uint64_t metal_deferred_releases(void) { return g_deferredReleases; }
+
+// metal_reuse_epoch returns the generation a buffer released RIGHT NOW
+// must see before its bytes may be handed to a new owner. Read under
+// the pending lock so the gate and the generation are one observation:
+// sampling them separately would admit "gate==1, then the drain runs,
+// then we read the post-drain generation" — which would wait for a
+// drain that had already happened and hand the buffer out early.
+uint64_t metal_reuse_epoch(void) {
+    os_unfair_lock_lock(&g_pendingLock);
+    uint64_t e = g_drainGen + (g_maybeInFlight ? 1 : 0);
+    os_unfair_lock_unlock(&g_pendingLock);
+    return e;
+}
+
+// metal_drain_epoch returns the current drained generation. A cached
+// buffer is safe to reuse iff metal_drain_epoch() >= its reuse epoch.
+uint64_t metal_drain_epoch(void) {
+    os_unfair_lock_lock(&g_pendingLock);
+    uint64_t e = g_drainGen;
+    os_unfair_lock_unlock(&g_pendingLock);
+    return e;
+}
 
 // pending_push_locked takes ownership of buf. Returns 0 if the list
 // could not grow, in which case ownership stays with the caller — the
@@ -119,6 +168,7 @@ static int pending_push_locked(MTLBufferRef buf) {
 static void gorch_leave_inflight(MTLBufferRef** batch, size_t* count) {
     os_unfair_lock_lock(&g_pendingLock);
     g_maybeInFlight = 0;
+    g_drainGen++; // see g_drainGen: same critical section, by contract
     *batch = g_pending;
     *count = g_pendingLen;
     g_pending = NULL;

@@ -310,4 +310,87 @@ Extrapolated: an unchunked 4600-step run reaches ~41 M regions → ~83 M kernel 
 
 **The fix is R1b — a size-classed buffer reuse cache — and the classes must be coarse.** Recycling through a free list eliminates the growth outright, because a buffer that is never released never strands anything: power-of-two classes measure **0.003 regions per allocation** against 0.586 for the same workload uncached, with a bounded pool (15 classes, 176 buffers, 257 MB). But caching by *exact size* on the real mixed distribution is a trap that looks like a fix and is not: it produces thousands of single-use classes that never hit, leaves the slope untouched at 0.570/alloc, and balloons live bytes to 5 GB in 12 k allocations instead. `TestVMRegionReuseCacheStopsTheGrowth` pins all three arms so the classing cannot be "simplified" away.
 
+> **R1b shipped 2026-08-18 — see ADR-015.** The cache is in `metal/buffercache.go`, on by default at a 384 MB cap, and re-measures this prediction every test run: 0.587 regions per allocation uncached against **0.003** cached, on the same mixed distribution, with a 0.972 hit rate and an 87.9 MB working set. The one thing this paragraph did not anticipate is that the classes must stop doubling somewhere — a power of two is the right bucket for a 40 KB activation and the wrong one for a 51 MB frozen weight — and that recycling needs a completion gate the plain release path does not, because overwriting a buffer's bytes is a stronger act than abandoning them. Both are in ADR-015.
+
 **Also added:** `metal.VMRegionSnapshot` — an in-process `mach_vm_region_recurse` walk returning the leaf entry count and a per-VM-tag histogram. It exists because `vmmap` forks and takes 28 s at 1 M regions, which is what made the old footprint guard pathological; the walk is O(entries) mach traps (~4 µs/entry) and must stay off any per-step path.
+
+## ADR-015: The buffer reuse cache (R1b) — coarse classes, a completion gate, and zeroing
+
+**Date:** 2026-08-18
+**Status:** Accepted
+
+ADR-014 established that a shared `MTLBuffer` whose `contents` mapping the CPU has touched strands its IOAccelerator VM map entry when released, permanently, and that the only fix is to stop releasing them. This is that fix: a size-classed free list in front of `newBufferWithLength:` (`metal/buffercache.go`), on by default.
+
+**Measured, on the log-uniform [256 B, 4 MB] distribution a micro-step produces, with the CPU touch that causes the leak.** Both arms run in the same process in the same test (`TestBufferCacheStopsTheGrowth`), 6000 allocations against a 64-buffer live ring, so the baseline is re-measured rather than quoted:
+
+| | regions/alloc | alloc p50 | alloc p99 | hit rate | peak cached |
+| --- | --- | --- | --- | --- | --- |
+| cache off | 0.587 | 3.5 µs | 17–21 µs | — | — |
+| cache on | **0.003** | **0.67 µs** | 38–61 µs | 0.972 | 87.9 MB (cap 384 MB) |
+
+A 196× reduction in the slope. The whole distribution lands in **15 size classes**; the 170 misses are the pool warming up, and this workload never reached the cap, so it evicted nothing.
+
+The p99 goes the wrong way in that table and the table is misleading about it. Allocation-call latency is not the cost that matters, because a fresh buffer's pages are zero-fill-on-demand and the caller pays for them later, in faults, on first touch. The honest measurement is the whole allocate → touch → release round trip:
+
+| buffer | uncached | cached | |
+| --- | --- | --- | --- |
+| 4 KB   | 4.1 µs   | 0.47 µs | 8.6× |
+| 64 KB  | 10.7 µs  | 0.96 µs | 11× |
+| 1 MB   | 95.5 µs  | 9.3 µs  | 10× |
+| 4 MB   | 330 µs   | 33.5 µs | 9.8× |
+
+The recycled path is ~10× cheaper at every size, 4 MB included, *after* paying for the zero-fill. And this is measured at a low region count: the uncached column is the one that degrades 6.5× as the map grows (ADR-014), while the cached column does not move.
+
+### The classes stop doubling at 2 MB
+
+Powers of two are right where the churn is and wrong where the weights are. A frozen 51 MB weight tensor rounded to 64 MB wastes 13 MB, 28 layers over. So classes double from 256 B up to 2 MB and step by 2 MB above it — bounded waste (< 2 MB per buffer) exactly where a doubling gets expensive, and still coarse: a 2 MB-granular bucket is a very coarse bucket for a 50 MB tensor. Buffers larger than 1/8 of the cap are not pooled at all and are allocated at their exact requested size; those are the frozen weights, allocated once and held for the run, so they never churn and never leak.
+
+`TestSizeClassesAreCoarse` pins the rule and asserts the micro-step distribution stays inside a handful of classes, because the failure mode is not a crash — it is exact-size classing creeping back and quietly restoring 0.570/alloc.
+
+### The caller-visible length is the requested length, not the class
+
+`Buffer` carries `bytes` (requested) and `cap` (allocated) separately. `Len` and every slice view report `bytes`; `cap` never leaves the package. So a recycled 64 KB buffer handed out for a 40 KB request presents as 40 KB, and `MPSMatrixDescriptor` / `MPSGraphTensorData`, which are built from the caller's own dimensions and only require the buffer to be big enough, cannot tell the difference. That "only require big enough" is an assumption about Apple's code, so it is measured rather than asserted: `TestBufferCacheLengthIsTheRequestedLength` runs both the `MPSMatrix` and the `MPSGraph` path on 17×17 matrices living in 2048 B buffers — 1.8× oversized — against a CPU reference.
+
+`liveBufferBytes` counts `cap`, because `cap` is the memory the OS actually has to find. Cached bytes are counted separately and charged against `SetLiveBufferLimit`, which now drains the cache before it panics: holding 384 MB speculatively is not a reason to abort a training run.
+
+### Recycled buffers are zeroed
+
+`newBufferWithLength:` zero-fills; a recycled buffer carries its previous owner's bytes. Handing those to a caller that fills only part of its allocation is a silent wrong answer, which is a worse bug than the leak. gorch has ~30 `NewBuffer` call sites and several are partial writers, so "provably fully overwritten" is not a property this package can assert on their behalf. We zero, and only the **requested** length — exactly the range a fresh buffer would have had, and therefore exactly the range a correct consumer may touch.
+
+That last claim is auditable rather than argued. `GORCH_METAL_CACHE_POISON=1` fills a recycled buffer's bytes *past* the requested length with a quiet-NaN pattern, so `GORCH_METAL_CACHE_POISON=1 go test ./...` turns any read beyond a caller's own request into numeric garbage instead of plausible-looking numbers. All 16 packages pass under it.
+
+`TestBufferCacheRecycledBufferNeverYieldsStaleBytes` checks the zeroing across a full-size and a short request out of the same class, and then turns the zeroing off and asserts the stale bytes come back (16384/16384 words). Without that second half it would pass just as happily against a cache that never recycled anything.
+
+### Reuse needs a completion gate; release did not
+
+This is the one genuinely new safety obligation, and the place a subtle bug would hide.
+
+Releasing a buffer while GPU work is in flight is safe: command buffers retain their encoded resources until completion, which is why `metal_release_buffer` can defer the page purge and be done. **Reusing** it is not safe, because the next owner writes through the same bytes the outstanding work is reading — and the failure mode is wrong numbers, not a crash.
+
+So the shim gained a drain generation, `g_drainGen`, incremented inside `gorch_leave_inflight` in the same critical section that clears `g_maybeInFlight`, and nowhere else. A buffer entering the cache records `metal_reuse_epoch()` — the current generation when the queue reads drained, one more than it when work may be in flight — and is refused until `metal_drain_epoch()` reaches it. The argument in each direction:
+
+- **Gate down at entry.** The buffer's Go owner has already dropped its handle, so no *future* command buffer can name it, and gate == 0 means every past commit has completed. Immediately reusable. This is the same TOCTOU argument `metal_release_buffer` already uses to purge on the spot.
+- **Gate up at entry.** Outstanding work may have encoded it. That work is provably complete once the generation advances, because the increment happens only where a `waitUntilCompleted` has returned — and a single in-order queue completes in commit order, so one wait covers every command buffer committed before the buffer was cached.
+
+Both the gate and the generation are read under the pending lock as one observation; sampling them separately would admit "gate reads 1, the drain then runs, we read the post-drain generation" and hand the buffer out early. The reuse epoch is sampled **inside the cache's own lock, immediately before the append**, which is what makes the per-class list sorted by epoch and lets `get` decide by looking only at the front. Sampling it outside would let two threads interleave (`sample 100 · drain · sample 101 · append 101 · append 100`) and leave a reusable entry hidden behind a quarantined one. Lock order is cache → pending; the shim never calls back into Go, so the reverse does not exist.
+
+`TestBufferCacheDoesNotRecycleWhileTheGPUMayBeReading` commits a kernel without waiting, releases its input into the cache, demands a same-class buffer, scribbles over whatever it gets, and then checks the kernel's output. It also asserts the quarantine is a *delay*: after the drain, the very same storage must come back, because in async mode nearly every release lands in flight and a cache that dropped them would recycle nothing.
+
+Admission to the cache deliberately skips the purge — `setPurgeableState:Empty` discards the contents, which is right for a buffer being destroyed and wrong for one being kept. **Eviction** is a destruction and goes through `metal_release_buffer` unchanged: purge when drained, defer when in flight, never abandon. `TestBufferCacheEvictionFollowsTheReleaseGate` forces evictions with work in flight and asserts they take the deferred branch.
+
+### Where this degrades, measured
+
+The quarantine is invisible in sync mode, where every dispatch drains. In async mode — which the trainer uses — the generation only advances on `SyncQueue`, i.e. on a `syncForCPU` or `Tensor.Data()` that finds a Metal-resident tensor. If those get sparse the cache becomes a holding area. Measured (`TestBufferCacheHitRateDependsOnDrainFrequency`), 6000 mixed allocations with a dispatch every 8:
+
+| drain every | 1 | 10 | 100 | 1000 | never |
+| --- | --- | --- | --- | --- | --- |
+| hit rate | 0.972 | 0.971 | 0.954 | 0.374 | 0.000 |
+
+The degradation is graceful — the pool fills to its cap and starts evicting, so the worst case is the pre-R1b leak plus a bounded 256 MB, not a cliff — but it is real. ADR-013's measurement that `-accel=sync` drives unpurged releases from 6284 to 845 implies ~37% of releases already land in a drained window, which puts the trainer at the top of that table; the `bufcache: hit ... quar N` line now in the micro-step trace is what confirms it on real data. **If that hit rate is poor in a real run, the fix is a completion-handler timeline** (assign each command buffer a submission sequence pre-commit, advance a completed sequence from its completion handler, and gate on that instead of on host drains) — sound, but it touches every commit site in the shim and was not worth doing on a prediction.
+
+### Also changed
+
+- **Allocation failure now drains the cache first.** `NewBuffer` on a nil `newBufferWithLength:` drains the reuse cache, then `metal_sync_queue` (the cache's releases land on the deferred list when work is in flight, so the sync sweeps them too), then retries once, then panics with hit/miss/cached figures added to the existing diagnostics.
+- **`Buffer.Release` is exactly-once under a CAS**, not a nil check, so an explicit release racing the GC finalizer cannot double-free a buffer the cache now hands to somebody else.
+- **The mapping pointer is still fetched lazily.** An early draft cached `[buf contents]` on the `Buffer` at allocation to save two cgo calls per slice view; that took the never-touched control arm of `TestVMRegionGrowthIsCPUTouchNotPurge` from 0.000 to 1.004 regions per allocation. **Asking for the `contents` pointer is itself the act that strands the entry** — not reading or writing through it. A buffer that is never mapped must stay unmapped, so `contents` is fetched only where it is needed, which for the cache is the zero-fill on a hit (by which point a previous owner has mapped it anyway).
+- **`CHUNK_STEPS` in `supervise.sh` is now belt and braces**, documented as such and deliberately kept: it still bounds what the cache cannot absorb (unpooled large allocations, evictions, and the sparse-drain degradation), and a process restart is a guaranteed reset where a cache is a measured one.

@@ -21,7 +21,13 @@ import (
 )
 
 // Device wraps a Metal GPU device.
-type Device struct{ ptr C.MTLDeviceRef }
+type Device struct {
+	ptr C.MTLDeviceRef
+	// cache is this device's size-classed buffer reuse pool (R1b,
+	// ADR-015). See buffercache.go — recycling is what keeps a long
+	// run from stranding one IOAccelerator VM map entry per allocation.
+	cache *bufferCache
+}
 
 // CommandQueue wraps a Metal command queue for submitting GPU work.
 type CommandQueue struct{ ptr C.MTLCommandQueueRef }
@@ -37,8 +43,22 @@ type CommandQueue struct{ ptr C.MTLCommandQueueRef }
 // long as any unsafe.Slice view of its contents is in use; gorch
 // Tensors do this by retaining both the slice and the *Buffer.
 type Buffer struct {
-	ptr   C.MTLBufferRef
+	ptr C.MTLBufferRef
+	// bytes is the CALLER-VISIBLE length: exactly what was requested.
+	// cap is what was actually allocated — the size class, which the
+	// reuse cache keys on and which is the real memory cost. A recycled
+	// 64 KB buffer handed out for a 40 KB request presents as 40 KB to
+	// Len, to every slice view, and therefore to MPS; nothing outside
+	// this package ever sees cap. Keeping them apart is what makes the
+	// cache invisible to shape-sensitive callers.
 	bytes int64
+	cap   int64
+	// cache is the pool this buffer returns to on Release; nil for
+	// buffers too large to be worth pooling.
+	cache *bufferCache
+	// released makes Release exactly-once under the race between an
+	// explicit call and the GC finalizer.
+	released atomic.Bool
 }
 
 // liveBufferBytes tracks the total bytes of all live (not-yet-released)
@@ -117,13 +137,23 @@ func checkLiveLimit(live int64) {
 	if lim <= 0 {
 		return
 	}
-	total := live + int64(C.metal_pending_bytes())
+	pend, cache := int64(C.metal_pending_bytes()), cachedBytes.Load()
+	if live+pend+cache <= lim {
+		return
+	}
+	// The reuse cache holds real resident memory, so it counts — but it
+	// is also the one component we can give back on the spot, and doing
+	// so is strictly kinder than aborting a training run to protect
+	// memory we were only holding speculatively.
+	DrainBufferCache()
+	pend, cache = int64(C.metal_pending_bytes()), cachedBytes.Load()
+	total := live + pend + cache
 	if total > lim {
 		panic(fmt.Sprintf("metal: live buffer ceiling exceeded: %.0f MB (%.0f MB live + "+
-			"%.0f MB awaiting purge) > limit %.0f MB "+
+			"%.0f MB awaiting purge + %.0f MB cached) > limit %.0f MB "+
 			"— aborting before the OS does (lower -accum / -max-seq, or enable -checkpoint-every)",
 			float64(total)/(1<<20), float64(live)/(1<<20),
-			float64(total-live)/(1<<20), float64(lim)/(1<<20)))
+			float64(pend)/(1<<20), float64(cache)/(1<<20), float64(lim)/(1<<20)))
 	}
 }
 
@@ -200,7 +230,7 @@ func NewDevice() (*Device, error) {
 	if ptr == nil {
 		return nil, fmt.Errorf("metal: no GPU device found")
 	}
-	return &Device{ptr: ptr}, nil
+	return &Device{ptr: ptr, cache: newBufferCache()}, nil
 }
 
 // NewCommandQueue creates a command queue on this device.
@@ -209,11 +239,35 @@ func (d *Device) NewCommandQueue() *CommandQueue {
 }
 
 // NewBuffer allocates a shared-memory GPU buffer of the given size in
-// bytes. Contents are zero-filled (Metal's newBufferWithLength
-// contract). The buffer is released automatically when the *Buffer
-// becomes unreachable; call Release for deterministic freeing.
+// bytes. Contents are zero-filled — by Metal's newBufferWithLength
+// contract for a fresh allocation, and explicitly by this function for
+// one recycled out of the reuse cache. The buffer is released
+// automatically when the *Buffer becomes unreachable; call Release for
+// deterministic freeing.
+//
+// Len and every slice view report exactly sizeBytes even when the
+// underlying allocation is a larger size class, so callers — and MPS —
+// cannot tell a recycled buffer from a fresh one.
 func (d *Device) NewBuffer(sizeBytes int) *Buffer {
-	ptr := C.metal_create_shared_buffer(d.ptr, C.uint64_t(sizeBytes))
+	if sizeBytes < 0 {
+		panic(fmt.Sprintf("gorch/metal: negative buffer size %d", sizeBytes))
+	}
+	class := int64(SizeClassFor(sizeBytes))
+	cache := d.cache
+	if cache == nil || class > maxCacheable() {
+		// Too big to pool: allocate exactly what was asked for rather
+		// than round up. These are the model's frozen weight tensors,
+		// which are allocated once and held for the run, so they neither
+		// benefit from recycling nor contribute to the region leak — and
+		// rounding a 51 MB weight up would cost real memory 28 times over.
+		cache, class = nil, int64(sizeBytes)
+	} else if p, ok := cache.get(int(class)); ok {
+		cacheHits.Add(1)
+		return d.adoptBuffer(p, int64(sizeBytes), class, cache, true)
+	}
+	cacheMisses.Add(1)
+
+	ptr := C.metal_create_shared_buffer(d.ptr, C.uint64_t(class))
 	if ptr == nil {
 		// newBufferWithLength: returned nil — the driver refused the
 		// allocation. Until 2026-08-17 this was passed straight through
@@ -223,29 +277,88 @@ func (d *Device) NewBuffer(sizeBytes int) *Buffer {
 		// eight times in a row.
 		//
 		// The most likely cause is transient pressure, and we are
-		// holding memory we can give back: the deferred-release list
-		// (buffers released while GPU work was in flight, purged at
-		// the next drained window). So drain and retry once before
-		// giving up — that turns a hard abort into a hiccup in the
-		// common case.
+		// holding memory we can give back. Two pools, in the order that
+		// frees the most for the least disruption:
+		//
+		//  1. the reuse cache — speculative by definition, and after
+		//     ADR-015 the largest thing we hold that nobody is using;
+		//  2. the deferred-release list (buffers released while GPU work
+		//     was in flight, purged at the next drained window).
+		//
+		// Drain both and retry once. The cache goes first because its
+		// releases land ON the deferred list when work is in flight, so
+		// the sync that follows sweeps them too.
+		DrainBufferCache()
 		C.metal_sync_queue()
-		ptr = C.metal_create_shared_buffer(d.ptr, C.uint64_t(sizeBytes))
+		ptr = C.metal_create_shared_buffer(d.ptr, C.uint64_t(class))
 	}
 	if ptr == nil {
-		panic(fmt.Sprintf("gorch/metal: allocation of %d bytes (%.1f MB) failed even after draining "+
-			"pending releases: live %.0f MB, pending %.0f MB, %d buffers allocated this process. "+
+		cs := BufferCacheStatsSnapshot()
+		panic(fmt.Sprintf("gorch/metal: allocation of %d bytes (%.1f MB, class %.1f MB) failed even "+
+			"after draining the reuse cache and pending releases: live %.0f MB, pending %.0f MB, "+
+			"cached %.0f MB, %d buffers allocated this process (cache %d hits / %d misses). "+
 			"The driver is out of resources — see ADR-014 (every CPU-touched buffer strands a VM map "+
-			"region for the life of the process, so long runs must recycle buffers or restart)",
-			sizeBytes, float64(sizeBytes)/(1<<20),
+			"region for the life of the process) and ADR-015 (the reuse cache that stops it)",
+			sizeBytes, float64(sizeBytes)/(1<<20), float64(class)/(1<<20),
 			float64(liveBufferBytes.Load())/(1<<20),
 			float64(C.metal_pending_bytes())/(1<<20),
-			totalAllocCount.Load()))
+			float64(cs.CachedBytes)/(1<<20),
+			totalAllocCount.Load(), cs.Hits, cs.Misses))
 	}
-	b := &Buffer{ptr: ptr, bytes: int64(sizeBytes)}
-	live := liveBufferBytes.Add(b.bytes)
+	return d.adoptBuffer(ptr, int64(sizeBytes), class, cache, false)
+}
+
+// adoptBuffer wraps a raw MTLBuffer — fresh or recycled — in a *Buffer.
+//
+// ZEROING. A fresh newBufferWithLength: is zero-filled; a recycled one
+// carries its previous owner's bytes, and handing those to a caller
+// that writes only part of its allocation is a silent wrong answer —
+// far worse than the leak this cache exists to fix. gorch has ~30
+// NewBuffer call sites and several of them fill their storage
+// partially, so "provably fully overwritten" is not a property this
+// package can assert on their behalf. We zero.
+//
+// Only the REQUESTED length is cleared, not the whole class. That is
+// exactly the range a fresh buffer would have had, and therefore
+// exactly the range any correct consumer may touch: Len and every slice
+// view stop there, MPS matrix descriptors and MPSGraph shapes are built
+// from the caller's own dimensions, and the compute kernels dispatch
+// exact thread counts. GORCH_METAL_CACHE_POISON=1 fills the bytes past
+// it with a NaN pattern so the whole test suite can be run as an audit
+// of that claim.
+//
+// The cost is not what it looks like. A fresh buffer's pages are
+// zero-fill-on-demand: the caller pays a fault plus a kernel clear on
+// first touch of every page. A recycled buffer's pages are already
+// resident and already faulted, so this memclr replaces that path
+// rather than adding to it.
+func (d *Device) adoptBuffer(ptr C.MTLBufferRef,
+	requested, class int64, cache *bufferCache, recycled bool) *Buffer {
+
+	if recycled {
+		// metal_buffer_contents is deliberately NOT called for a fresh
+		// buffer: establishing the CPU mapping is itself what strands
+		// the VM map entry (ADR-014 measures a never-mapped buffer at
+		// 0.000 regions per allocation, and eagerly caching the pointer
+		// took that to 1.004). A recycled buffer has been mapped by a
+		// previous owner already, so asking for it here costs nothing
+		// new — and zeroing needs it.
+		contents := C.metal_buffer_contents(ptr)
+		if cachePoison.Load() {
+			w := unsafe.Slice((*uint32)(contents), int(class/4))
+			for i := range w {
+				w[i] = poisonWord
+			}
+		}
+		if cacheZeroing.Load() {
+			clear(unsafe.Slice((*byte)(contents), int(requested)))
+		}
+	}
+	b := &Buffer{ptr: ptr, bytes: requested, cap: class, cache: cache}
+	live := liveBufferBytes.Add(class)
 	notePeak(live)
 	checkLiveLimit(live)
-	totalAllocBytes.Add(b.bytes)
+	totalAllocBytes.Add(class)
 	totalAllocCount.Add(1)
 	runtime.SetFinalizer(b, (*Buffer).Release)
 	return b
@@ -255,9 +368,7 @@ func (d *Device) NewBuffer(sizeBytes int) *Buffer {
 // The slice length is buffer size / 4. Writes to the slice are visible to the GPU
 // and vice versa — no copies needed.
 func (b *Buffer) FloatSlice() []float32 {
-	ptr := C.metal_buffer_contents(b.ptr)
-	n := int(C.metal_buffer_length(b.ptr)) / 4
-	return unsafe.Slice((*float32)(ptr), n)
+	return unsafe.Slice((*float32)(C.metal_buffer_contents(b.ptr)), int(b.bytes)/4)
 }
 
 // Uint16Slice returns the buffer's contents as a Go []uint16 slice
@@ -266,42 +377,48 @@ func (b *Buffer) FloatSlice() []float32 {
 // view lets them live in unified memory exactly like FloatSlice does
 // for f32.
 func (b *Buffer) Uint16Slice() []uint16 {
-	ptr := C.metal_buffer_contents(b.ptr)
-	n := int(C.metal_buffer_length(b.ptr)) / 2
-	return unsafe.Slice((*uint16)(ptr), n)
+	return unsafe.Slice((*uint16)(C.metal_buffer_contents(b.ptr)), int(b.bytes)/2)
 }
 
 // Uint32Slice returns the buffer's contents as a Go []uint32 slice.
 // Used to fill small uniform buffers (dims, counts) for kernels that
 // expect `device const uint*` arguments.
 func (b *Buffer) Uint32Slice() []uint32 {
-	ptr := C.metal_buffer_contents(b.ptr)
-	n := int(C.metal_buffer_length(b.ptr)) / 4
-	return unsafe.Slice((*uint32)(ptr), n)
+	return unsafe.Slice((*uint32)(C.metal_buffer_contents(b.ptr)), int(b.bytes)/4)
 }
 
-// Len returns the buffer size in bytes.
-func (b *Buffer) Len() int {
-	return int(C.metal_buffer_length(b.ptr))
-}
+// Len returns the buffer size in bytes as the CALLER asked for it, not
+// as the driver allocated it. A recycled buffer taken from a larger
+// size class still reports the requested length — that is the contract
+// that lets the reuse cache exist without corrupting shapes.
+func (b *Buffer) Len() int { return int(b.bytes) }
 
-// Release frees the Metal buffer. The Go slice from FloatSlice becomes
-// invalid. Idempotent — safe to call before the GC finalizer runs.
+// Release hands the Metal buffer back — to the reuse cache when it fits
+// there, to the driver otherwise. The Go slice from FloatSlice becomes
+// invalid EITHER WAY, and after ADR-015 that is sharper than it used
+// to be: a stale slice no longer reads abandoned memory, it reads
+// whatever tensor got the recycled allocation next. Holders must not
+// keep a slice past the *Buffer it came from.
+//
+// Idempotent, and exactly-once even if an explicit call races the GC
+// finalizer.
 func (b *Buffer) Release() {
-	if b.ptr == nil {
+	if !b.released.CompareAndSwap(false, true) {
 		return
 	}
 	runtime.SetFinalizer(b, nil)
-	liveBufferBytes.Add(-b.bytes)
-	switch C.metal_release_buffer(b.ptr) {
-	case 1:
-		purgedBytes.Add(b.bytes)
-	case 2:
-		deferredBytes.Add(b.bytes)
-	default:
-		unpurgedBytes.Add(b.bytes)
-	}
+	ptr, n := b.ptr, b.cap
 	b.ptr = nil
+	liveBufferBytes.Add(-n)
+	// Into the cache if it will take it. A buffer entering the cache
+	// must NOT be purged: setPurgeableState:Empty discards its contents,
+	// which is the right thing for a buffer being destroyed and the
+	// wrong thing for one being kept. Eviction, which IS a destruction,
+	// goes through the ordinary purge + in-flight-gate path.
+	if b.cache != nil && b.cache.put(ptr, n) {
+		return
+	}
+	releaseRawBuffer(ptr, n)
 }
 
 // CompileKernel compiles a Metal shader source string and returns a pipeline
@@ -589,8 +706,15 @@ func cbool(b bool) C.int {
 	return 0
 }
 
-// Release frees a device.
+// Release frees a device. Its reuse cache is drained first — the
+// buffers in it are unreachable from Go, so nothing else would ever
+// free them.
 func (d *Device) Release() {
+	if d.cache != nil {
+		d.cache.drain()
+		d.cache.unregister()
+		d.cache = nil
+	}
 	C.metal_release(unsafe.Pointer(d.ptr))
 	d.ptr = nil
 }

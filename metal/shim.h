@@ -164,6 +164,30 @@ uint64_t metal_pending_peak_bytes(void);
 // in-flight gate — that is only sound where a wait has returned.
 void metal_drain_pending_releases(void);
 
+// ---------------------------------------------------------------------------
+// Reuse generation (R1b buffer cache, ADR-015).
+//
+// Releasing a buffer in flight is safe because command buffers retain
+// their encoded resources; REUSING its bytes is not, because the new
+// owner overwrites what outstanding work may still be reading. These
+// two calls give the Go-side reuse cache a sound admission test.
+//
+//   metal_reuse_epoch()  — the generation a buffer entering the cache
+//                          NOW must wait for. Equals the current
+//                          generation when the queue reads drained,
+//                          and one more than it when work may be in
+//                          flight.
+//   metal_drain_epoch()  — the current generation, bumped once per
+//                          transition to "provably drained" (i.e. once
+//                          per returned waitUntilCompleted).
+//
+// A cached buffer's bytes may be handed to a new owner iff
+// metal_drain_epoch() >= the epoch recorded when it entered the cache.
+// Both read the gate and the counter under one lock, so the pair is a
+// single consistent observation.
+uint64_t metal_reuse_epoch(void);
+uint64_t metal_drain_epoch(void);
+
 // Number of distinct MPSGraph objects currently held by the dtyped
 // matmul cache (see gorch_dt_graph in shim.m). Each entry owns a
 // compiled MPSGraph executable plus its MPS workspace allocations —

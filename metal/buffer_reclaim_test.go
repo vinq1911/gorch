@@ -67,10 +67,20 @@ func reclaimFixture(t *testing.T) (*Device, *CommandQueue, *Pipeline) {
 		t.Fatal(err)
 	}
 	wasAsync := AsyncEnabled()
+	// These tests observe the RELEASE path's gate directly, by exact
+	// counter deltas. The R1b reuse cache (ADR-015) sits in front of
+	// that path and, when it accepts a buffer, deliberately does not
+	// release it at all — so it has to be off here or every assertion
+	// below would be measuring the cache's admission policy instead of
+	// the purge gate. TestBufferCacheEvictionFollowsTheReleaseGate
+	// covers the cache's own interaction with the same gate.
+	wasLimit := BufferCacheLimit()
+	SetBufferCacheLimit(0)
 	t.Cleanup(func() {
 		SyncQueue()
 		SetAsync(wasAsync)
 		SetPurgeOnRelease(true)
+		SetBufferCacheLimit(wasLimit)
 		pipe.Release()
 		queue.Release()
 		dev.Release()

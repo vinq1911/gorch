@@ -106,6 +106,17 @@ func churn(t *testing.T, dev *Device, o churnOpts) []int {
 	SetPurgeOnRelease(o.purge)
 	t.Cleanup(func() { SetPurgeOnRelease(true) })
 
+	// These runs measure the DRIVER's behaviour under churn, and the
+	// `reuse`/`pow2` options model a cache in Go rather than using the
+	// real one — that is the record of the experiment that established
+	// ADR-015's design. The shipped cache would otherwise absorb the
+	// churn and every arm would read zero, including the two that are
+	// supposed to leak. TestBufferCacheStopsTheGrowth exercises the
+	// real thing.
+	wasLimit := BufferCacheLimit()
+	SetBufferCacheLimit(0)
+	t.Cleanup(func() { SetBufferCacheLimit(wasLimit) })
+
 	r := rand.New(rand.NewSource(1))
 	ring := make([]*Buffer, o.liveSet)
 	pool := map[int][]*Buffer{}

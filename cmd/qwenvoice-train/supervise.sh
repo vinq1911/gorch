@@ -30,13 +30,24 @@ RUN_DIR="${RUN_DIR:-$HOME/speech-corpora/stageA-run}"
 BIN="${BIN:-$RUN_DIR/qwenvoice-train}"
 DATA="${DATA:-$HOME/speech-corpora/shards/stageA}"
 TARGET_STEPS="${TARGET_STEPS:-4300}"
-# Steps per trainer PROCESS (0 = one process for the whole run). Each
+# Steps per trainer PROCESS (0 = one process for the whole run).
+#
+# BELT AND BRACES, NOT THE MITIGATION. Chunking was written when every
 # CPU-touched Metal buffer strands a VM map region for the life of the
 # process (ADR-014): ~9k regions/step, ~128 B of WIRED KERNEL memory
 # each, charged to no task's phys_footprint, and newBufferWithLength
-# degrades 6.5x from 50k to 1M regions. Restarting resets the map;
-# resume is exact, so the only cost is ~30 s of model load per chunk.
-# The real fix is buffer reuse (R1b); this bounds the damage until then.
+# degrading 6.5x from 50k to 1M regions. The size-classed buffer reuse
+# cache (R1b, ADR-015) fixes that at source — measured 0.586 -> 0.003
+# regions per allocation on the real micro-step distribution — so the
+# map no longer grows and restarting is no longer what saves the run.
+#
+# Keep it anyway. It costs ~30 s of model load per chunk against an
+# exact resume, and it still bounds anything the cache cannot absorb:
+# allocations too large to pool, evictions under the cap, and the
+# degraded case where GPU drain points get sparse enough that the cache
+# stops recycling (watch the `bufcache: hit` line in the micro-step
+# trace). A process restart is a guaranteed reset; a cache is a
+# measured one.
 CHUNK_STEPS="${CHUNK_STEPS:-250}"
 MAX_RESTARTS="${MAX_RESTARTS:-8}"
 RSS_CEILING_MB="${RSS_CEILING_MB:-12000}"   # watchdog kill threshold
